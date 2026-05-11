@@ -30,12 +30,13 @@
 
 <style scoped>
 .navbar {
-  background: white;
-  border-bottom: 1px solid #e5e7eb;
+  background: rgba(15, 23, 42, 0.8);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   z-index: 100;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
 .navbar-container {
@@ -57,7 +58,7 @@
 .logo-icon {
   width: 32px;
   height: 32px;
-  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  background: linear-gradient(135deg, var(--accent-blue) 0%, var(--accent-cyan) 100%);
   border-radius: 8px;
   display: flex;
   align-items: center;
@@ -73,7 +74,8 @@
 .logo-text {
   font-size: 1.25rem;
   font-weight: 700;
-  color: #1f2937;
+  color: var(--text-primary);
+  font-family: 'Plus Jakarta Sans', sans-serif;
 }
 
 .navbar-links {
@@ -83,7 +85,7 @@
 }
 
 .nav-link {
-  color: #6b7280;
+  color: var(--text-secondary);
   text-decoration: none;
   font-size: 0.9375rem;
   font-weight: 500;
@@ -91,7 +93,7 @@
 }
 
 .nav-link:hover {
-  color: #3b82f6;
+  color: var(--text-primary);
 }
 
 .navbar-actions {
@@ -103,9 +105,9 @@
 .btn-login {
   padding: 0.5rem 1.25rem;
   background: transparent;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  color: #374151;
+  color: var(--text-secondary);
   font-size: 0.9375rem;
   font-weight: 500;
   cursor: pointer;
@@ -113,26 +115,26 @@
 }
 
 .btn-login:hover {
-  background: #f9fafb;
-  border-color: #d1d5db;
+  background: var(--bg-card-hover);
+  border-color: var(--border-hover);
+  color: var(--text-primary);
 }
 
 .btn-start {
   padding: 0.5rem 1.25rem;
-  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  background: linear-gradient(135deg, var(--accent-blue) 0%, var(--accent-cyan) 100%);
   border: none;
   border-radius: 8px;
   color: white;
   font-size: 0.9375rem;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
   transition: all 0.2s;
-  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
 }
 
 .btn-start:hover {
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+  box-shadow: 0 4px 16px rgba(59, 130, 246, 0.3);
 }
 
 @media (max-width: 768px) {

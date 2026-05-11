@@ -4,6 +4,7 @@ import { useDownloader } from './composables/useDownloader.js'
 import NavBar from './components/NavBar.vue'
 import HeroSection from './components/HeroSection.vue'
 import FeaturesSection from './components/FeaturesSection.vue'
+import FooterSection from './components/FooterSection.vue'
 
 const {
   videoInfo,
@@ -11,11 +12,14 @@ const {
   selectedFormat,
   progress,
   downloadHistory,
+  subtitles,
   parseVideo,
   startDownload,
   startDownloadAll,
   startDownloadSelected,
   downloadFile,
+  downloadSubtitle,
+  translateSubtitle,
   reset,
 } = useDownloader()
 
@@ -23,8 +27,10 @@ const url = ref('')
 const error = ref('')
 const loading = ref(false)
 const selectedPartIndices = ref([])
+const translateTargetLang = ref('zh-Hans')
 
 const displayFormats = computed(() => formats.value)
+const selectedFormatDetail = computed(() => formats.value.find(f => f.format_id === selectedFormat.value))
 
 const currentPart = computed(() => {
   const m = url.value.match(/[?&]p=(\d+)/)
@@ -35,6 +41,47 @@ const isAllPartsSelected = computed(() =>
   videoInfo.value?.parts?.length > 0 &&
   selectedPartIndices.value.length === videoInfo.value.parts.length
 )
+
+const manualSubtitles = computed(() => subtitles.value.filter(s => !s.is_auto))
+const autoSubtitles = computed(() => subtitles.value.filter(s => s.is_auto))
+
+const langNames = {
+  'en': 'English', 'zh-Hans': '中文', 'zh': '中文', 'zh-CN': '中文',
+  'ja': '日本語', 'ko': '한국어', 'fr': 'Français', 'de': 'Deutsch',
+  'es': 'Español', 'pt': 'Português', 'ru': 'Русский', 'it': 'Italiano',
+  'ar': 'العربية', 'th': 'ไทย', 'vi': 'Tiếng Việt', 'id': 'Bahasa Indonesia',
+}
+
+function subtitleDisplayName(sub) {
+  // 翻译字幕：zh-Hans-en → "中文（从 English 翻译）"
+  const parts = sub.lang.split('-')
+  if (parts.length >= 2) {
+    const target = parts[0]
+    const source = parts.slice(1).join('-')
+    const targetName = langNames[target] || target
+    const sourceName = langNames[source] || source
+    return `${targetName}（从 ${sourceName} 翻译）`
+  }
+  return sub.name || sub.lang
+}
+
+const translateLangs = [
+  { code: 'zh-Hans', name: '中文' },
+  { code: 'en', name: 'English' },
+  { code: 'ja', name: '日本語' },
+  { code: 'ko', name: '한국어' },
+  { code: 'fr', name: 'Français' },
+  { code: 'de', name: 'Deutsch' },
+  { code: 'es', name: 'Español' },
+]
+
+function handleDownloadSubtitle(sub) {
+  downloadSubtitle(videoInfo.value.webpage_url, sub.lang, sub.is_auto)
+}
+
+function handleTranslateSubtitle(sub) {
+  translateSubtitle(videoInfo.value.webpage_url, sub.lang, sub.is_auto, translateTargetLang.value)
+}
 
 function togglePartSelection(index) {
   const i = selectedPartIndices.value.indexOf(index)
@@ -112,6 +159,28 @@ function handleDownloadFile(taskId) {
 function handleUrlChange(value) {
   url.value = value
 }
+
+function formatViewCount(count) {
+  if (!count) return ''
+  if (count >= 10000) return (count / 10000).toFixed(1).replace(/\.0$/, '') + '万'
+  return count.toLocaleString()
+}
+
+function formatDuration(seconds) {
+  if (!seconds) return ''
+  const m = Math.floor(seconds / 60)
+  const s = Math.floor(seconds % 60)
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+function formatTime(timestamp) {
+  if (!timestamp) return ''
+  const d = new Date(timestamp)
+  const now = new Date()
+  const isToday = d.toDateString() === now.toDateString()
+  const time = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+  return isToday ? time : d.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }) + ' ' + time
+}
 </script>
 
 <template>
@@ -137,10 +206,24 @@ function handleUrlChange(value) {
         <!-- Video Info Card -->
         <div v-if="videoInfo" class="video-card">
           <div class="video-info">
-            <img v-if="videoInfo.thumbnail" :src="videoInfo.thumbnail" class="video-thumbnail" />
+            <div class="video-thumbnail-wrapper">
+              <img v-if="videoInfo.thumbnail" :src="videoInfo.thumbnail" class="video-thumbnail" />
+              <div class="video-thumbnail-play">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              </div>
+              <span v-if="videoInfo.duration_string" class="video-thumbnail-duration">{{ videoInfo.duration_string }}</span>
+            </div>
             <div class="video-details">
               <h3 class="video-title">{{ videoInfo.title }}</h3>
-              <p class="video-meta">{{ videoInfo.extractor }} · {{ videoInfo.duration_string }}</p>
+              <div class="video-meta-row">
+                <span class="video-meta-item">{{ videoInfo.extractor }}</span>
+                <span v-if="videoInfo.uploader" class="video-meta-item">{{ videoInfo.uploader }}</span>
+                <span v-if="videoInfo.view_count" class="video-meta-item">{{ formatViewCount(videoInfo.view_count) }} 次播放</span>
+              </div>
+              <a v-if="videoInfo.webpage_url" :href="videoInfo.webpage_url" target="_blank" rel="noopener" class="video-original-link">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+                查看原视频
+              </a>
             </div>
           </div>
 
@@ -184,6 +267,7 @@ function handleUrlChange(value) {
                 <button class="part-info" @click="handlePartSelect(part)">
                   <span class="part-index">P{{ part.index }}</span>
                   <span class="part-title">{{ part.title }}</span>
+                  <span v-if="part.duration" class="part-duration">{{ formatDuration(part.duration) }}</span>
                 </button>
               </div>
             </div>
@@ -191,7 +275,7 @@ function handleUrlChange(value) {
 
           <!-- Format Selection -->
           <div v-if="displayFormats.length" class="format-section">
-            <p class="format-label">选择清晰度和格式</p>
+            <p class="format-label">选择清晰度</p>
             <div class="format-grid">
               <button
                 v-for="f in displayFormats"
@@ -204,9 +288,61 @@ function handleUrlChange(value) {
                   'format-audio': f.is_audio_only,
                 }"
               >
-                <span v-if="f.is_best" class="format-badge">⭐ 推荐</span>
-                {{ f.label || (f.height ? f.height + 'p' : f.ext.toUpperCase()) }}
+                <span v-if="f.is_best" class="format-badge-best">
+                  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25z"/></svg>
+                  推荐
+                </span>
+                <span class="format-name">{{ f.is_audio_only ? (f.label || f.ext.toUpperCase()) : (f.label || (f.height ? f.height + 'p' : f.ext.toUpperCase())) }}</span>
+                <span class="format-sub">
+                  <span v-if="f.is_audio_only" class="format-tag-audio">仅音频</span>
+                  <template v-else>{{ f.ext.toUpperCase() }}</template>
+                  <template v-if="f.filesize_str"> · {{ f.filesize_str }}</template>
+                </span>
               </button>
+            </div>
+            <!-- Selected format detail -->
+            <div v-if="selectedFormatDetail" class="format-detail">
+              <span class="format-detail-item">格式：{{ selectedFormatDetail.ext.toUpperCase() }}</span>
+              <span v-if="selectedFormatDetail.vcodec && selectedFormatDetail.vcodec !== 'none'" class="format-detail-item">编码：{{ selectedFormatDetail.vcodec }}</span>
+              <span v-if="selectedFormatDetail.fps" class="format-detail-item">{{ selectedFormatDetail.fps }}fps</span>
+              <span v-if="selectedFormatDetail.tbr" class="format-detail-item">{{ selectedFormatDetail.tbr }}kbps</span>
+            </div>
+          </div>
+
+          <!-- Subtitle Section -->
+          <div v-if="subtitles.length" class="subtitle-section">
+            <p class="subtitle-label">字幕</p>
+            <div class="subtitle-translate-bar">
+              <span class="subtitle-translate-hint">翻译目标语言：</span>
+              <select v-model="translateTargetLang" class="subtitle-lang-select">
+                <option v-for="lang in translateLangs" :key="lang.code" :value="lang.code">
+                  {{ lang.name }}
+                </option>
+              </select>
+            </div>
+            <div v-if="manualSubtitles.length" class="subtitle-group">
+              <p class="subtitle-group-label">手动字幕</p>
+              <div class="subtitle-list">
+                <div v-for="sub in manualSubtitles" :key="sub.lang" class="subtitle-item">
+                  <span class="subtitle-name">{{ subtitleDisplayName(sub) }}（{{ sub.ext }}）</span>
+                  <div class="subtitle-actions">
+                    <button @click="handleDownloadSubtitle(sub)" class="subtitle-btn subtitle-download-btn">下载</button>
+                    <button @click="handleTranslateSubtitle(sub)" class="subtitle-btn subtitle-translate-btn">翻译</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div v-if="autoSubtitles.length" class="subtitle-group">
+              <p class="subtitle-group-label">自动生成字幕</p>
+              <div class="subtitle-list">
+                <div v-for="sub in autoSubtitles" :key="sub.lang" class="subtitle-item">
+                  <span class="subtitle-name">{{ subtitleDisplayName(sub) }}（{{ sub.ext }}）</span>
+                  <div class="subtitle-actions">
+                    <button @click="handleDownloadSubtitle(sub)" class="subtitle-btn subtitle-download-btn">下载</button>
+                    <button @click="handleTranslateSubtitle(sub)" class="subtitle-btn subtitle-translate-btn">翻译</button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -225,15 +361,17 @@ function handleUrlChange(value) {
           </button>
 
           <!-- Download Progress -->
-          <div v-if="progress" class="progress-card">
+          <div v-if="progress" class="progress-card" :class="'progress-' + progress.status">
             <div class="progress-header">
               <span class="progress-label">
+                <svg v-if="progress.status === 'completed'" class="progress-status-icon progress-status-success" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+                <svg v-else-if="progress.status === 'failed'" class="progress-status-icon progress-status-error" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/></svg>
                 {{ progress.status === 'completed' ? '下载完成' : progress.status === 'failed' ? '下载失败' : '下载中' }}
               </span>
               <span class="progress-percent">{{ progress.percent }}%</span>
             </div>
             <div class="progress-bar-container">
-              <div class="progress-bar" :style="{ width: progress.percent + '%' }"></div>
+              <div class="progress-bar" :class="{ 'progress-bar-shimmer': progress.status === 'downloading' }" :style="{ width: progress.percent + '%' }"></div>
             </div>
             <div v-if="progress.speed" class="progress-info">
               {{ progress.speed }} · 剩余约 {{ progress.eta }} 秒
@@ -247,12 +385,18 @@ function handleUrlChange(value) {
           <p class="history-label">下载记录</p>
           <div class="history-list">
             <div v-for="item in downloadHistory" :key="item.task_id" class="history-item">
-              <span class="history-title">{{ item.title }}</span>
+              <svg v-if="item.status === 'completed'" class="history-status-icon history-status-success" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+              <svg v-else class="history-status-icon history-status-error" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/></svg>
+              <div class="history-item-content">
+                <span class="history-title">{{ item.title }}</span>
+                <span v-if="item.time" class="history-time">{{ formatTime(item.time) }}</span>
+              </div>
               <button
                 v-if="item.status === 'completed'"
                 @click="handleDownloadFile(item.task_id)"
                 class="save-button"
               >
+                <svg viewBox="0 0 20 20" fill="currentColor" class="save-icon"><path d="M10.75 2.75a.75.75 0 00-1.5 0v8.614L6.295 8.235a.75.75 0 10-1.09 1.03l4.25 4.5a.75.75 0 001.09 0l4.25-4.5a.75.75 0 00-1.09-1.03l-2.955 3.129V2.75z"/><path d="M3.5 12.75a.75.75 0 00-1.5 0v2.5A2.75 2.75 0 004.75 18h10.5A2.75 2.75 0 0018 15.25v-2.5a.75.75 0 00-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5z"/></svg>
                 保存
               </button>
             </div>
@@ -262,18 +406,19 @@ function handleUrlChange(value) {
     </section>
 
     <FeaturesSection />
+    <FooterSection />
   </div>
 </template>
 
 <style scoped>
 .app-container {
   min-height: 100vh;
-  background: white;
+  background: var(--bg-primary);
 }
 
 .results-section {
   padding: 3rem 2rem;
-  background: white;
+  background: var(--bg-primary);
 }
 
 .results-container {
@@ -289,10 +434,10 @@ function handleUrlChange(value) {
   align-items: center;
   gap: 0.75rem;
   padding: 1rem 1.25rem;
-  background: #fef2f2;
-  border: 1px solid #fecaca;
-  border-radius: 12px;
-  color: #dc2626;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: var(--radius);
+  color: #FCA5A5;
   font-size: 0.9375rem;
 }
 
@@ -303,11 +448,11 @@ function handleUrlChange(value) {
 }
 
 .video-card {
-  background: white;
-  border: 1px solid #e5e7eb;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
   border-radius: 16px;
   padding: 2rem;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  backdrop-filter: blur(12px);
 }
 
 .video-info {
@@ -316,30 +461,109 @@ function handleUrlChange(value) {
   margin-bottom: 1.5rem;
 }
 
-.video-thumbnail {
-  width: 200px;
-  height: 112px;
-  object-fit: cover;
-  border-radius: 12px;
+.video-thumbnail-wrapper {
+  position: relative;
+  width: 220px;
   flex-shrink: 0;
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.video-thumbnail {
+  width: 100%;
+  height: 124px;
+  object-fit: cover;
+  display: block;
+}
+
+.video-thumbnail-play {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 44px;
+  height: 44px;
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.video-thumbnail-wrapper:hover .video-thumbnail-play {
+  opacity: 1;
+}
+
+.video-thumbnail-play svg {
+  width: 22px;
+  height: 22px;
+  margin-left: 2px;
+}
+
+.video-thumbnail-duration {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  padding: 0.125rem 0.4375rem;
+  background: rgba(0, 0, 0, 0.75);
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: white;
+  font-variant-numeric: tabular-nums;
 }
 
 .video-details {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .video-title {
   font-size: 1.125rem;
   font-weight: 600;
-  color: #1f2937;
-  margin-bottom: 0.5rem;
+  color: var(--text-primary);
+  margin-bottom: 0.625rem;
   line-height: 1.4;
 }
 
-.video-meta {
-  font-size: 0.875rem;
-  color: #6b7280;
+.video-meta-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  margin-bottom: 0.625rem;
+}
+
+.video-meta-item {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  padding: 0.125rem 0.5rem;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+}
+
+.video-original-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  transition: color 0.2s;
+  margin-top: auto;
+}
+
+.video-original-link:hover {
+  color: var(--accent-blue);
+}
+
+.video-original-link svg {
+  width: 14px;
+  height: 14px;
 }
 
 .format-section {
@@ -349,70 +573,244 @@ function handleUrlChange(value) {
 .format-label {
   font-size: 0.9375rem;
   font-weight: 600;
-  color: #374151;
+  color: var(--text-primary);
   margin-bottom: 0.75rem;
 }
 
 .format-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.625rem;
 }
 
 .format-button {
-  padding: 0.625rem 1.25rem;
-  background: #f3f4f6;
-  border: 2px solid transparent;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0.25rem;
+  padding: 0.75rem 1rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: #4b5563;
+  color: var(--text-secondary);
   cursor: pointer;
   transition: all 0.2s;
   text-align: left;
   line-height: 1.4;
-  position: relative;
 }
 
 .format-button:hover {
-  background: #e5e7eb;
+  background: var(--bg-card-hover);
+  border-color: var(--border-hover);
+  color: var(--text-primary);
 }
 
 .format-button.active {
-  background: #dbeafe;
-  border-color: #3b82f6;
-  color: #2563eb;
+  background: rgba(59, 130, 246, 0.15);
+  border-color: var(--accent-blue);
+  color: #93C5FD;
 }
 
 .format-button.format-best {
-  background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
-  border-color: #93c5fd;
-  color: #1d4ed8;
-  font-weight: 600;
+  background: rgba(59, 130, 246, 0.08);
+  border-color: rgba(59, 130, 246, 0.25);
 }
 
 .format-button.format-best.active {
-  background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
-  border-color: #3b82f6;
+  background: rgba(59, 130, 246, 0.2);
+  border-color: var(--accent-blue);
 }
 
 .format-button.format-audio {
-  background: #f0fdf4;
-  color: #166534;
+  background: rgba(16, 185, 129, 0.08);
+  border-color: rgba(16, 185, 129, 0.15);
+}
+
+.format-button.format-audio:hover {
+  border-color: rgba(16, 185, 129, 0.3);
 }
 
 .format-button.format-audio.active {
-  background: #dcfce7;
-  border-color: #22c55e;
-  color: #15803d;
+  background: rgba(16, 185, 129, 0.2);
+  border-color: var(--success);
+  color: #6EE7B7;
 }
 
-.format-badge {
-  display: block;
-  font-size: 0.7rem;
+.format-badge-best {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.625rem;
   font-weight: 700;
-  color: #f59e0b;
-  margin-bottom: 2px;
+  color: #FCD34D;
+}
+
+.format-badge-best svg {
+  width: 10px;
+  height: 10px;
+}
+
+.format-name {
+  font-weight: 600;
+  font-size: 0.9375rem;
+}
+
+.format-sub {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.format-tag-audio {
+  color: #6EE7B7;
+}
+
+.format-detail {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.format-detail-item {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.subtitle-section {
+  margin-bottom: 1.5rem;
+}
+
+.subtitle-label {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.75rem;
+}
+
+.subtitle-translate-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.subtitle-translate-hint {
+  font-size: 0.8125rem;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.subtitle-lang-select {
+  padding: 0.375rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.8125rem;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  cursor: pointer;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2394A3B8' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10l-5 5z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.625rem center;
+  padding-right: 2rem;
+}
+
+.subtitle-lang-select option {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.subtitle-lang-select:focus {
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
+.subtitle-group {
+  margin-bottom: 0.75rem;
+}
+
+.subtitle-group-label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 0.375rem;
+}
+
+.subtitle-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.375rem;
+}
+
+.subtitle-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.625rem;
+  border-radius: 7px;
+  transition: background 0.15s;
+  gap: 0.5rem;
+}
+
+.subtitle-item:hover {
+  background: var(--bg-card-hover);
+}
+
+.subtitle-name {
+  font-size: 0.8125rem;
+  color: var(--text-primary);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subtitle-actions {
+  display: flex;
+  gap: 0.375rem;
+  flex-shrink: 0;
+}
+
+.subtitle-btn {
+  padding: 0.25rem 0.625rem;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.subtitle-download-btn {
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  color: #93C5FD;
+}
+
+.subtitle-download-btn:hover {
+  background: rgba(59, 130, 246, 0.2);
+}
+
+.subtitle-translate-btn {
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  color: #6EE7B7;
+}
+
+.subtitle-translate-btn:hover {
+  background: rgba(16, 185, 129, 0.2);
 }
 
 .download-button {
@@ -422,24 +820,23 @@ function handleUrlChange(value) {
   justify-content: center;
   gap: 0.5rem;
   padding: 1rem;
-  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  background: linear-gradient(135deg, var(--accent-blue) 0%, var(--accent-cyan) 100%);
   color: white;
   border: none;
-  border-radius: 12px;
+  border-radius: var(--radius);
   font-size: 1rem;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s;
-  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
 }
 
 .download-button:hover:not(:disabled) {
   transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(59, 130, 246, 0.4);
+  box-shadow: 0 6px 20px rgba(59, 130, 246, 0.3);
 }
 
 .download-button:disabled {
-  opacity: 0.6;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
@@ -451,8 +848,18 @@ function handleUrlChange(value) {
 .progress-card {
   margin-top: 1.5rem;
   padding: 1.25rem;
-  background: #f9fafb;
-  border-radius: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: border-color 0.3s;
+}
+
+.progress-card.progress-completed {
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+.progress-card.progress-failed {
+  border-color: rgba(239, 68, 68, 0.3);
 }
 
 .progress-header {
@@ -463,100 +870,174 @@ function handleUrlChange(value) {
 }
 
 .progress-label {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
   font-size: 0.875rem;
   font-weight: 600;
-  color: #374151;
+  color: var(--text-primary);
+}
+
+.progress-status-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.progress-status-success {
+  color: var(--success);
+}
+
+.progress-status-error {
+  color: var(--error);
 }
 
 .progress-percent {
   font-size: 0.875rem;
   font-weight: 700;
-  color: #3b82f6;
+  color: var(--accent-cyan);
+  font-variant-numeric: tabular-nums;
 }
 
 .progress-bar-container {
   width: 100%;
-  height: 8px;
-  background: #e5e7eb;
-  border-radius: 4px;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
   overflow: hidden;
 }
 
 .progress-bar {
   height: 100%;
-  background: linear-gradient(90deg, #3b82f6 0%, #2563eb 100%);
-  border-radius: 4px;
+  background: linear-gradient(90deg, var(--accent-blue) 0%, var(--accent-cyan) 100%);
+  border-radius: 3px;
   transition: width 0.3s;
+  position: relative;
+}
+
+.progress-bar-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--accent-blue) 0%,
+    var(--accent-cyan) 40%,
+    #67e8f9 50%,
+    var(--accent-cyan) 60%,
+    var(--accent-blue) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+.progress-card.progress-completed .progress-bar {
+  background: linear-gradient(90deg, var(--success) 0%, #34d399 100%);
+}
+
+.progress-card.progress-failed .progress-bar {
+  background: linear-gradient(90deg, var(--error) 0%, #f87171 100%);
 }
 
 .progress-info {
   margin-top: 0.5rem;
   font-size: 0.75rem;
-  color: #6b7280;
+  color: var(--text-muted);
 }
 
 .progress-error {
   margin-top: 0.5rem;
   font-size: 0.75rem;
-  color: #dc2626;
+  color: #FCA5A5;
 }
 
 .history-card {
-  background: white;
-  border: 1px solid #e5e7eb;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
   border-radius: 16px;
   padding: 1.5rem;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  backdrop-filter: blur(12px);
 }
 
 .history-label {
   font-size: 0.9375rem;
   font-weight: 600;
-  color: #374151;
+  color: var(--text-primary);
   margin-bottom: 1rem;
 }
 
 .history-list {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 0.5rem;
 }
 
 .history-item {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  padding: 0.875rem 1rem;
-  background: #f9fafb;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
   border-radius: 10px;
 }
 
-.history-title {
+.history-status-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.history-status-success {
+  color: var(--success);
+}
+
+.history-status-error {
+  color: var(--error);
+}
+
+.history-item-content {
   flex: 1;
-  font-size: 0.875rem;
-  color: #374151;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.history-title {
+  font-size: 0.8125rem;
+  color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin-right: 1rem;
+}
+
+.history-time {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
 }
 
 .save-button {
-  padding: 0.5rem 1.25rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.4375rem 1rem;
   background: transparent;
-  border: 1px solid #3b82f6;
+  border: 1px solid var(--accent-blue);
   border-radius: 8px;
-  color: #3b82f6;
-  font-size: 0.875rem;
+  color: var(--accent-blue);
+  font-size: 0.8125rem;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .save-button:hover {
-  background: #3b82f6;
-  color: white;
+  background: rgba(59, 130, 246, 0.15);
+}
+
+.save-icon {
+  width: 16px;
+  height: 16px;
 }
 
 .parts-section {
@@ -575,7 +1056,7 @@ function handleUrlChange(value) {
 .parts-label {
   font-size: 0.9375rem;
   font-weight: 600;
-  color: #374151;
+  color: var(--text-primary);
   margin: 0;
 }
 
@@ -589,9 +1070,9 @@ function handleUrlChange(value) {
 .select-all-button {
   padding: 0.375rem 0.75rem;
   background: transparent;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  color: #6b7280;
+  color: var(--text-secondary);
   font-size: 0.8125rem;
   font-weight: 500;
   cursor: pointer;
@@ -600,16 +1081,17 @@ function handleUrlChange(value) {
 }
 
 .select-all-button:hover {
-  background: #f3f4f6;
-  border-color: #9ca3af;
+  background: var(--bg-card-hover);
+  border-color: var(--border-hover);
+  color: var(--text-primary);
 }
 
 .download-selected-button {
   padding: 0.375rem 0.875rem;
-  background: #eff6ff;
-  border: 1px solid #93c5fd;
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(59, 130, 246, 0.2);
   border-radius: 8px;
-  color: #2563eb;
+  color: #93C5FD;
   font-size: 0.8125rem;
   font-weight: 600;
   cursor: pointer;
@@ -618,7 +1100,7 @@ function handleUrlChange(value) {
 }
 
 .download-selected-button:hover:not(:disabled) {
-  background: #dbeafe;
+  background: rgba(59, 130, 246, 0.2);
 }
 
 .download-selected-button:disabled {
@@ -632,7 +1114,7 @@ function handleUrlChange(value) {
   gap: 0.25rem;
   max-height: 220px;
   overflow-y: auto;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 0.375rem;
 }
@@ -646,18 +1128,18 @@ function handleUrlChange(value) {
 }
 
 .part-row:hover {
-  background: #f9fafb;
+  background: var(--bg-card-hover);
 }
 
 .part-row.selected {
-  background: #eff6ff;
+  background: rgba(59, 130, 246, 0.1);
 }
 
 .part-checkbox {
-  width: 18px;
-  height: 18px;
-  border: 2px solid #d1d5db;
-  border-radius: 4px;
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-radius: 5px;
   flex-shrink: 0;
   cursor: pointer;
   display: flex;
@@ -668,12 +1150,12 @@ function handleUrlChange(value) {
 }
 
 .part-checkbox:hover {
-  border-color: #3b82f6;
+  border-color: var(--accent-blue);
 }
 
 .part-checkbox.checked {
-  background: #3b82f6;
-  border-color: #3b82f6;
+  background: var(--accent-blue);
+  border-color: var(--accent-blue);
 }
 
 .part-checkbox svg {
@@ -695,32 +1177,43 @@ function handleUrlChange(value) {
 }
 
 .part-info:hover .part-title {
-  color: #2563eb;
+  color: #93C5FD;
 }
 
 .part-index {
   font-weight: 700;
-  color: #3b82f6;
+  color: var(--accent-blue);
   min-width: 2.5rem;
   flex-shrink: 0;
   font-size: 0.875rem;
 }
 
 .part-title {
-  color: #374151;
+  color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 0.875rem;
   transition: color 0.15s;
+  flex: 1;
+  min-width: 0;
+}
+
+.part-duration {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+  padding-left: 0.5rem;
 }
 
 .download-all-button {
   padding: 0.375rem 0.875rem;
-  background: #f0fdf4;
-  border: 1px solid #86efac;
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.2);
   border-radius: 8px;
-  color: #15803d;
+  color: #6EE7B7;
   font-size: 0.8125rem;
   font-weight: 600;
   cursor: pointer;
@@ -729,8 +1222,8 @@ function handleUrlChange(value) {
 }
 
 .download-all-button:hover:not(:disabled) {
-  background: #dcfce7;
-  border-color: #4ade80;
+  background: rgba(16, 185, 129, 0.2);
+  border-color: rgba(16, 185, 129, 0.4);
 }
 
 .download-all-button:disabled {
@@ -742,9 +1235,12 @@ function handleUrlChange(value) {
   .results-section { padding: 2rem 1rem; }
   .video-card { padding: 1.5rem; }
   .video-info { flex-direction: column; }
+  .video-thumbnail-wrapper { width: 100%; }
   .video-thumbnail { width: 100%; height: auto; }
-  .history-item { flex-direction: column; align-items: flex-start; gap: 0.75rem; }
-  .history-title { margin-right: 0; }
-  .save-button { width: 100%; }
+  .video-thumbnail-play { opacity: 1; }
+  .format-grid { grid-template-columns: 1fr; }
+  .history-item { flex-wrap: wrap; }
+  .history-item-content { width: calc(100% - 42px); }
+  .save-button { width: 100%; margin-top: 0.25rem; }
 }
 </style>

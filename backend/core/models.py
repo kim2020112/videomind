@@ -33,6 +33,13 @@ class FormatOption(BaseModel):
         return int(v)
 
 
+class SubtitleTrack(BaseModel):
+    lang: str               # 语言代码，如 "en", "zh-Hans"
+    name: str               # 显示名称，如 "English", "中文（自动生成）"
+    ext: str                # 文件格式，如 "srt", "vtt"
+    is_auto: bool = False   # 是否为自动生成字幕
+
+
 class VideoPart(BaseModel):
     index: int
     title: str
@@ -52,6 +59,7 @@ class VideoInfo(BaseModel):
     extractor: Optional[str] = None
     formats: list[FormatOption] = []
     parts: list[VideoPart] = []
+    subtitles: list[SubtitleTrack] = []
 
     @field_validator('view_count', mode='before')
     @classmethod

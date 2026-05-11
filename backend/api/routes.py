@@ -5,6 +5,7 @@ import http.client
 import uuid
 import os
 import re
+import asyncio
 from asyncio import Queue
 
 
@@ -57,7 +58,7 @@ def _resolve_short_url(url: str) -> str:
     return url
 
 from core.downloader import VideoDownloader
-from core.models import ParseRequest, DownloadRequest, VideoInfo, DownloadTask, ProgressData
+from core.models import ParseRequest, DownloadRequest, VideoInfo, DownloadTask, ProgressData, SubtitleTrack
 
 router = APIRouter()
 
@@ -86,7 +87,6 @@ async def parse_video(req: ParseRequest):
 @router.get("/api/thumbnail")
 async def proxy_thumbnail(url: str):
     """代理缩略图请求，解决混合内容和防盗链问题。"""
-    import asyncio
     from urllib.parse import urlparse
 
     if url.startswith("http://"):
@@ -128,6 +128,207 @@ async def proxy_thumbnail(url: str):
         return Response(content=content, media_type=content_type)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"缩略图获取失败: {e}")
+
+
+def _download_subtitle_content(url: str, lang: str, is_auto: bool) -> tuple[str, str]:
+    """用 yt-dlp 下载字幕文件，返回 (文件内容, 文件扩展名)。
+    支持 YouTube 翻译字幕（lang 如 "zh-Hans-en" 表示从英文翻译的中文）。
+    """
+    import yt_dlp
+    import tempfile
+    import glob
+
+    tmpdir = tempfile.mkdtemp(prefix='subtitle_')
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'skip_download': True,
+        'noplaylist': True,
+        'writesubtitles': True,
+        'writeautomaticsub': True,  # 始终启用自动字幕（含翻译字幕）
+        'subtitleslangs': [lang],
+        'subtitlesformat': 'srt/vtt/json3/best',
+        'outtmpl': os.path.join(tmpdir, '%(id)s'),
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.extract_info(url, download=True)
+
+    # 查找下载的字幕文件
+    candidates = glob.glob(os.path.join(tmpdir, '*'))
+    sub_files = [f for f in candidates if os.path.isfile(f)
+                 and os.path.splitext(f)[1].lower() in ('.srt', '.vtt', '.json3', '.srv1', '.srv2', '.srv3')]
+    if not sub_files:
+        # 尝试匹配所有文件
+        sub_files = [f for f in candidates if os.path.isfile(f) and not f.endswith('.part')]
+    if not sub_files:
+        raise Exception('字幕下载失败，可能该视频没有此语言的字幕')
+
+    sub_file = sub_files[0]
+    ext = os.path.splitext(sub_file)[1].lstrip('.')
+    with open(sub_file, 'r', encoding='utf-8', errors='replace') as f:
+        content = f.read()
+
+    # 清理临时目录
+    import shutil
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
+    return content, ext
+
+
+def _parse_srt(content: str) -> list[dict]:
+    """解析 SRT 字幕，返回 [{index, time, text}]。"""
+    import re
+    blocks = re.split(r'\n\s*\n', content.strip())
+    entries = []
+    for block in blocks:
+        lines = block.strip().split('\n')
+        if len(lines) < 3:
+            continue
+        try:
+            index = int(lines[0].strip())
+        except ValueError:
+            continue
+        time_line = lines[1].strip()
+        text = '\n'.join(lines[2:]).strip()
+        if text:
+            entries.append({'index': index, 'time': time_line, 'text': text})
+    return entries
+
+
+def _build_srt(entries: list[dict]) -> str:
+    """从 [{index, time, text}] 重建 SRT 内容。"""
+    parts = []
+    for e in entries:
+        parts.append(f"{e['index']}\n{e['time']}\n{e['text']}")
+    return '\n\n'.join(parts) + '\n'
+
+
+# 语言代码映射：前端代码 → MyMemory 代码
+_LANG_MAP = {
+    'zh-Hans': 'zh-CN', 'zh': 'zh-CN', 'zh-CN': 'zh-CN',
+    'en': 'en-GB', 'en-US': 'en-US',
+    'ja': 'ja-JP', 'ko': 'ko-KR',
+    'fr': 'fr-FR', 'de': 'de-DE', 'es': 'es-ES',
+    'pt': 'pt-PT', 'ru': 'ru-RU', 'it': 'it-IT',
+}
+
+
+def _map_lang(code: str) -> str:
+    return _LANG_MAP.get(code, code)
+
+
+def _translate_text(text: str, src: str, dest: str) -> str:
+    """翻译单段文本。"""
+    from deep_translator import MyMemoryTranslator
+    try:
+        return MyMemoryTranslator(source=_map_lang(src), target=_map_lang(dest)).translate(text)
+    except Exception:
+        return text  # 翻译失败返回原文
+
+
+def _batch_translate(texts: list[str], src: str, dest: str, batch_size: int = 20) -> list[str]:
+    """批量翻译文本列表。MyMemory 单次最多 500 字符，逐条翻译更可靠。"""
+    from deep_translator import MyMemoryTranslator
+    src_code = _map_lang(src)
+    dest_code = _map_lang(dest)
+    results = []
+    for text in texts:
+        try:
+            translated = MyMemoryTranslator(source=src_code, target=dest_code).translate(text)
+            results.append(translated if translated else text)
+        except Exception:
+            results.append(text)
+    return results
+
+
+@router.get("/api/subtitle")
+async def download_subtitle(url: str, lang: str, auto: bool = False):
+    """下载字幕文件。"""
+    try:
+        url = extract_url(url)
+        content, ext = await asyncio.get_event_loop().run_in_executor(
+            None, _download_subtitle_content, url, lang, auto
+        )
+        suffix = f".{lang}.auto.{ext}" if auto else f".{lang}.{ext}"
+        return Response(
+            content=content.encode('utf-8'),
+            media_type='text/plain; charset=utf-8',
+            headers={'Content-Disposition': f'attachment; filename="subtitle{suffix}"'},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"字幕下载失败: {str(e)}")
+
+
+@router.get("/api/subtitle/translate")
+async def translate_subtitle(url: str, lang: str, target: str, auto: bool = False):
+    """下载并翻译字幕文件。
+    优先使用 YouTube 原生翻译（yt-dlp 的 automatic_captions 中已有翻译条目），
+    失败时降级到外部翻译服务。
+    """
+    try:
+        url = extract_url(url)
+
+        # 优先尝试 YouTube 原生翻译：用 target-lang 格式直接下载翻译字幕
+        # 例如 lang="en", target="zh-Hans" → 尝试下载 "zh-Hans-en"
+        yt_translated = False
+        if not auto and '-' not in lang:  # 避免对已翻译的条目重复处理
+            yt_trans_code = f"{target}-{lang}"
+            try:
+                content, ext = await asyncio.get_event_loop().run_in_executor(
+                    None, _download_subtitle_content, url, yt_trans_code, True
+                )
+                if content and len(content.strip()) > 10:
+                    yt_translated = True
+            except Exception:
+                pass  # 降级到外部翻译
+
+        if not yt_translated:
+            content, ext = await asyncio.get_event_loop().run_in_executor(
+                None, _download_subtitle_content, url, lang, auto
+            )
+
+        if yt_translated:
+            # YouTube 原生翻译已获取，直接使用
+            result = content
+        elif ext == 'srt':
+            entries = _parse_srt(content)
+            if not entries:
+                raise Exception('无法解析 SRT 字幕')
+            texts = [e['text'] for e in entries]
+            translated_texts = await asyncio.get_event_loop().run_in_executor(
+                None, _batch_translate, texts, lang, target
+            )
+            for i, e in enumerate(entries):
+                e['text'] = translated_texts[i] if i < len(translated_texts) else e['text']
+            result = _build_srt(entries)
+        else:
+            # 对于 VTT 等其他格式，逐行翻译（保留格式）
+            lines = content.split('\n')
+            text_lines = []
+            text_indices = []
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped and not stripped.startswith('WEBVTT') and not stripped.startswith('NOTE') \
+                        and '-->' not in stripped and not stripped.isdigit():
+                    text_lines.append(stripped)
+                    text_indices.append(i)
+            if text_lines:
+                translated = await asyncio.get_event_loop().run_in_executor(
+                    None, _batch_translate, text_lines, lang, target
+                )
+                for i, idx in enumerate(text_indices):
+                    lines[idx] = translated[i] if i < len(translated) else lines[idx]
+            result = '\n'.join(lines)
+
+        suffix = f".{lang}.auto.{target}.{ext}" if auto else f".{lang}.{target}.{ext}"
+        return Response(
+            content=result.encode('utf-8'),
+            media_type='text/plain; charset=utf-8',
+            headers={'Content-Disposition': f'attachment; filename="subtitle{suffix}"'},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"字幕翻译失败: {str(e)}")
 
 
 @router.post("/api/download")
@@ -172,7 +373,6 @@ async def download_progress(websocket: WebSocket, task_id: str):
 
         task.status = "downloading"
 
-        import asyncio
         loop = asyncio.get_event_loop()
 
         async def run_download():

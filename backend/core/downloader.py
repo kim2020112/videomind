@@ -6,7 +6,7 @@ import tempfile
 from typing import Optional, Callable
 from asyncio import Queue
 
-from .models import VideoInfo, FormatOption, ProgressData, VideoPart
+from .models import VideoInfo, FormatOption, ProgressData, VideoPart, SubtitleTrack
 
 
 def _is_bilibili(url: str) -> bool:
@@ -237,6 +237,7 @@ class VideoDownloader:
             'no_warnings': True,
             'skip_download': True,
             'noplaylist': True,
+            'listsubtitles': True,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -347,6 +348,39 @@ class VideoDownloader:
 
         parts = _fetch_bilibili_parts(url) if _is_bilibili(url) else []
 
+        # 提取字幕信息
+        subtitles = []
+        _pref_ext = ('srt', 'vtt', 'json3', 'srv1', 'srv2', 'srv3')
+
+        def _pick_best_ext(formats_list):
+            for ext in _pref_ext:
+                if any(f.get('ext') == ext for f in formats_list):
+                    return ext
+            return formats_list[0].get('ext', 'srt') if formats_list else 'srt'
+
+        # 手动字幕
+        for lang, fmts in (info.get('subtitles') or {}).items():
+            if not fmts:
+                continue
+            ext = _pick_best_ext(fmts)
+            name = next((f.get('name') or lang for f in fmts if f.get('name')), lang)
+            subtitles.append(SubtitleTrack(lang=lang, name=name, ext=ext, is_auto=False))
+
+        # 自动生成字幕 + YouTube 翻译字幕
+        # YouTube 的 automatic_captions 包含翻译条目，如 "zh-Hans-en"（从英文翻译的中文）
+        # 这些条目的 URL 带有 tlang 参数，可直接从 YouTube 服务器获取翻译结果
+        auto_subs = info.get('automatic_captions') or {}
+        seen_langs: set[str] = set()
+        for lang, fmts in auto_subs.items():
+            if not fmts:
+                continue
+            ext = _pick_best_ext(fmts)
+            name = next((f.get('name') or lang for f in fmts if f.get('name')), lang)
+            # 去重：同一语言只保留一个条目
+            if lang not in seen_langs:
+                seen_langs.add(lang)
+                subtitles.append(SubtitleTrack(lang=lang, name=name, ext=ext, is_auto=True))
+
         return VideoInfo(
             title=info.get('title', ''),
             webpage_url=info.get('webpage_url', url),
@@ -360,6 +394,7 @@ class VideoDownloader:
             extractor=info.get('extractor'),
             formats=formats,
             parts=parts,
+            subtitles=subtitles,
         )
 
     def _download_concat_parts(self, url: str, format_id: str, task_id: str, task_dir: str,

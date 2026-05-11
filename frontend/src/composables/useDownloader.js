@@ -10,6 +10,7 @@ export function useDownloader() {
   const downloadHistory = ref([])
   const isParsing = ref(false)
   const taskId = ref(null)
+  const subtitles = ref([])
   let ws = null
 
   async function parseVideo(url) {
@@ -38,6 +39,7 @@ export function useDownloader() {
       }
       videoInfo.value = data
       formats.value = data.formats || []
+      subtitles.value = data.subtitles || []
 
       // 默认选"最佳画质"选项（is_best = true）
       const bestFmt = data.formats?.find((f) => f.is_best)
@@ -138,6 +140,7 @@ export function useDownloader() {
             task_id: tid,
             title: videoInfo.value?.title || '未知视频',
             status: 'completed',
+            time: Date.now(),
           })
           ws.close()
         } else if (data.status === 'failed') {
@@ -145,6 +148,7 @@ export function useDownloader() {
             task_id: tid,
             title: videoInfo.value?.title || '未知视频',
             status: 'failed',
+            time: Date.now(),
           })
           ws.close()
         }
@@ -162,12 +166,23 @@ export function useDownloader() {
     window.open(`${API_BASE}/files/${tid}`, '_blank')
   }
 
+  function downloadSubtitle(url, lang, isAuto) {
+    const params = new URLSearchParams({ url, lang, auto: isAuto })
+    window.open(`${API_BASE}/subtitle?${params}`, '_blank')
+  }
+
+  function translateSubtitle(url, lang, isAuto, targetLang) {
+    const params = new URLSearchParams({ url, lang, auto: isAuto, target: targetLang })
+    window.open(`${API_BASE}/subtitle/translate?${params}`, '_blank')
+  }
+
   function reset() {
     videoInfo.value = null
     formats.value = []
     selectedFormat.value = 'best'
     progress.value = null
     taskId.value = null
+    subtitles.value = []
     if (ws) {
       ws.close()
       ws = null
@@ -182,11 +197,14 @@ export function useDownloader() {
     downloadHistory,
     isParsing,
     taskId,
+    subtitles,
     parseVideo,
     startDownload,
     startDownloadAll,
     startDownloadSelected,
     downloadFile,
+    downloadSubtitle,
+    translateSubtitle,
     reset,
   }
 }

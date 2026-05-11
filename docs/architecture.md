@@ -150,18 +150,31 @@ WebSocket 消息格式：
 
 ```
 App.vue
-├── NavBar.vue                 # 顶部导航（Logo + 导航菜单 + 登录/立即使用按钮）
-├── HeroSection.vue            # Hero 区域（大标题 + 副标题 + 输入框 + 解析按钮 + 平台图标）
+├── NavBar.vue                 # 顶部导航（毛玻璃效果，Logo + 导航菜单 + 登录/立即使用按钮）
+├── HeroSection.vue            # Hero 区域（深色背景 + 光晕 + 标题 + 输入框 + 下载按钮 + 平台标签流）
 ├── results section (内联)     # 解析结果区域（仅在有结果或错误时显示）
-│   ├── video-card             # 视频信息卡片（封面/标题/时长/平台 + 格式选择 + 下载按钮 + 进度条）
-│   └── history-card           # 下载历史列表
-└── FeaturesSection.vue        # 特性展示区（4 个特性卡片，一行排列）
+│   ├── error-card             # 错误提示（红色半透明背景）
+│   ├── video-card             # 视频信息卡片
+│   │   ├── video-info         # 封面图（含播放图标叠加层+时长角标）+ 标题 + 元数据标签行 + 原视频链接
+│   │   ├── parts-section      # 分P选择器（B站多P视频，checkbox+序号+标题+时长）
+│   │   ├── format-section     # 格式选择（2列等宽网格，视频/音频合并展示）
+│   │   ├── subtitle-section   # 字幕区（手动/自动分组，下载+翻译按钮）
+│   │   ├── download-button    # 下载按钮（蓝青渐变，全宽）
+│   │   └── progress-card      # 下载进度（shimmer动画，状态图标+边框变色）
+│   └── history-card           # 下载记录（状态图标+标题+时间戳+保存按钮）
+├── FeaturesSection.vue        # 特性展示区（6 个卡片，3 列排列，含 2 个 Pro 卡片）
+└── FooterSection.vue          # 页脚（品牌 + 链接 + 平台列表 + 版权）
 ```
 
 **设计说明：**
+- 整体采用深色主题（`#0F172A`），CSS 变量统一管理颜色
 - 输入框和解析按钮内嵌在 `HeroSection.vue` 中，通过 props 传入 `url`、`loading` 状态和事件回调
 - 视频信息、格式选择、下载进度、下载历史均在 `App.vue` 的 results section 中内联实现，不拆分为独立组件
-- `FeaturesSection.vue` 为纯展示组件，无状态
+- `FeaturesSection.vue` 为纯展示组件，含 4 个基础功能卡片 + 2 个 Pro 专属卡片
+- `FooterSection.vue` 为纯展示组件，包含产品/支持/法律链接和平台列表
+- 平台展示以国内为主（B站、抖音、小红书、快手等），海外平台为辅
+- 辅助函数：`formatViewCount()`（播放量万为单位）、`formatDuration()`（秒转 mm:ss）、`formatTime()`（时间戳格式化）
+- 下载历史数据通过 `useDownloader.js` 管理，每条记录包含 `task_id`、`title`、`status`、`time` 字段
 
 ## 6. 关键技术决策
 
@@ -260,11 +273,12 @@ free-video-downloader/
 │   ├── src/
 │   │   ├── App.vue             # 主页面（含结果区内联逻辑）
 │   │   ├── main.js             # Vue 入口
-│   │   ├── style.css           # 全局样式（Tailwind + 基础重置）
+│   │   ├── style.css           # 全局样式（CSS 变量 + Tailwind + 基础重置 + 动画）
 │   │   ├── components/
-│   │   │   ├── NavBar.vue          # 顶部导航栏（品牌 + 菜单 + 按钮）
-│   │   │   ├── HeroSection.vue     # Hero 区域（含输入框和解析按钮）
-│   │   │   ├── FeaturesSection.vue # 特性展示（4 卡片一行）
+│   │   │   ├── NavBar.vue          # 顶部导航栏（毛玻璃效果，品牌 + 菜单 + 按钮）
+│   │   │   ├── HeroSection.vue     # Hero 区域（深色背景 + 光晕 + 输入框 + 平台标签流）
+│   │   │   ├── FeaturesSection.vue # 特性展示（6 卡片 3 列，含 Pro 卡片）
+│   │   │   ├── FooterSection.vue   # 页脚（品牌 + 链接 + 平台列表 + 版权）
 │   │   │   ├── UrlInput.vue        # 备用（当前未使用）
 │   │   │   ├── VideoInfo.vue       # 备用（当前未使用）
 │   │   │   ├── FormatSelector.vue  # 备用（当前未使用）
