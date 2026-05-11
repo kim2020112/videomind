@@ -18,6 +18,11 @@ function formatCount(n) {
   if (n >= 10000) return (n / 10000).toFixed(1) + '万'
   return n.toLocaleString()
 }
+
+function thumbnailSrc(url) {
+  if (!url) return ''
+  return `/api/thumbnail?url=${encodeURIComponent(url)}`
+}
 </script>
 
 <template>
@@ -27,7 +32,7 @@ function formatCount(n) {
       <div class="shrink-0 relative w-full md:w-72 aspect-video md:aspect-auto md:h-44 rounded-xl overflow-hidden bg-surface-100">
         <img
           v-if="info.thumbnail"
-          :src="info.thumbnail"
+          :src="thumbnailSrc(info.thumbnail)"
           :alt="info.title"
           class="w-full h-full object-cover"
         />

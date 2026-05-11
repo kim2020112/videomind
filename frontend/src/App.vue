@@ -13,6 +13,8 @@ const {
   downloadHistory,
   parseVideo,
   startDownload,
+  startDownloadAll,
+  startDownloadSelected,
   downloadFile,
   reset,
 } = useDownloader()
@@ -20,14 +22,42 @@ const {
 const url = ref('')
 const error = ref('')
 const loading = ref(false)
+const selectedPartIndices = ref([])
 
-// 格式直接使用后端返回的结构（已按 is_best > 视频 > 音频 排好序）
 const displayFormats = computed(() => formats.value)
+
+const currentPart = computed(() => {
+  const m = url.value.match(/[?&]p=(\d+)/)
+  return m ? parseInt(m[1]) : 1
+})
+
+const isAllPartsSelected = computed(() =>
+  videoInfo.value?.parts?.length > 0 &&
+  selectedPartIndices.value.length === videoInfo.value.parts.length
+)
+
+function togglePartSelection(index) {
+  const i = selectedPartIndices.value.indexOf(index)
+  if (i === -1) {
+    selectedPartIndices.value = [...selectedPartIndices.value, index]
+  } else {
+    selectedPartIndices.value = selectedPartIndices.value.filter(x => x !== index)
+  }
+}
+
+function handleSelectAll() {
+  if (isAllPartsSelected.value) {
+    selectedPartIndices.value = []
+  } else {
+    selectedPartIndices.value = videoInfo.value.parts.map(p => p.index)
+  }
+}
 
 async function handleParse() {
   if (!url.value.trim()) return
   error.value = ''
   loading.value = true
+  selectedPartIndices.value = []
   reset()
   try {
     await parseVideo(url.value.trim())
@@ -36,6 +66,38 @@ async function handleParse() {
   } finally {
     loading.value = false
   }
+}
+
+async function handlePartSelect(part) {
+  const bvMatch = (videoInfo.value?.webpage_url || '').match(/(BV\w+)/)
+  if (!bvMatch) return
+  const partUrl = `https://www.bilibili.com/video/${bvMatch[1]}?p=${part.index}`
+  url.value = partUrl
+  error.value = ''
+  loading.value = true
+  selectedPartIndices.value = []
+  reset()
+  try {
+    await parseVideo(partUrl)
+  } catch (e) {
+    error.value = e.message || '解析失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+function handleDownloadSelected() {
+  if (!videoInfo.value || selectedPartIndices.value.length === 0) return
+  const bvMatch = (videoInfo.value.webpage_url || '').match(/(BV\w+)/)
+  if (!bvMatch) return
+  startDownloadSelected(`https://www.bilibili.com/video/${bvMatch[1]}`, [...selectedPartIndices.value])
+}
+
+function handleDownloadAll() {
+  if (!videoInfo.value) return
+  const bvMatch = (videoInfo.value.webpage_url || '').match(/(BV\w+)/)
+  if (!bvMatch) return
+  startDownloadAll(`https://www.bilibili.com/video/${bvMatch[1]}`)
 }
 
 function handleDownload() {
@@ -79,6 +141,51 @@ function handleUrlChange(value) {
             <div class="video-details">
               <h3 class="video-title">{{ videoInfo.title }}</h3>
               <p class="video-meta">{{ videoInfo.extractor }} · {{ videoInfo.duration_string }}</p>
+            </div>
+          </div>
+
+          <!-- 分P选择器 -->
+          <div v-if="videoInfo.parts && videoInfo.parts.length" class="parts-section">
+            <div class="parts-header">
+              <p class="parts-label">分P列表（共 {{ videoInfo.parts.length }} P）</p>
+              <div class="parts-actions">
+                <button @click="handleSelectAll" class="select-all-button">
+                  {{ isAllPartsSelected ? '取消全选' : '全选' }}
+                </button>
+                <button
+                  v-if="selectedPartIndices.length >= 1"
+                  @click="handleDownloadSelected"
+                  :disabled="progress && progress.status === 'downloading'"
+                  class="download-selected-button"
+                >下载选中({{ selectedPartIndices.length }})</button>
+                <button
+                  @click="handleDownloadAll"
+                  :disabled="progress && progress.status === 'downloading'"
+                  class="download-all-button"
+                >合并下载全部</button>
+              </div>
+            </div>
+            <div class="parts-list">
+              <div
+                v-for="part in videoInfo.parts"
+                :key="part.index"
+                class="part-row"
+                :class="{ active: currentPart === part.index, selected: selectedPartIndices.includes(part.index) }"
+              >
+                <div
+                  class="part-checkbox"
+                  :class="{ checked: selectedPartIndices.includes(part.index) }"
+                  @click="togglePartSelection(part.index)"
+                >
+                  <svg v-if="selectedPartIndices.includes(part.index)" viewBox="0 0 12 10" fill="none">
+                    <path d="M1 5l3 3.5L11 1" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </div>
+                <button class="part-info" @click="handlePartSelect(part)">
+                  <span class="part-index">P{{ part.index }}</span>
+                  <span class="part-title">{{ part.title }}</span>
+                </button>
+              </div>
             </div>
           </div>
 
@@ -450,6 +557,185 @@ function handleUrlChange(value) {
 .save-button:hover {
   background: #3b82f6;
   color: white;
+}
+
+.parts-section {
+  margin-bottom: 1.5rem;
+}
+
+.parts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.parts-label {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: #374151;
+  margin: 0;
+}
+
+.parts-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.select-all-button {
+  padding: 0.375rem 0.75rem;
+  background: transparent;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  color: #6b7280;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.select-all-button:hover {
+  background: #f3f4f6;
+  border-color: #9ca3af;
+}
+
+.download-selected-button {
+  padding: 0.375rem 0.875rem;
+  background: #eff6ff;
+  border: 1px solid #93c5fd;
+  border-radius: 8px;
+  color: #2563eb;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.download-selected-button:hover:not(:disabled) {
+  background: #dbeafe;
+}
+
+.download-selected-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.parts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 0.375rem;
+}
+
+.part-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: 7px;
+  transition: background 0.15s;
+}
+
+.part-row:hover {
+  background: #f9fafb;
+}
+
+.part-row.selected {
+  background: #eff6ff;
+}
+
+.part-checkbox {
+  width: 18px;
+  height: 18px;
+  border: 2px solid #d1d5db;
+  border-radius: 4px;
+  flex-shrink: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+  margin-left: 0.375rem;
+}
+
+.part-checkbox:hover {
+  border-color: #3b82f6;
+}
+
+.part-checkbox.checked {
+  background: #3b82f6;
+  border-color: #3b82f6;
+}
+
+.part-checkbox svg {
+  width: 12px;
+  height: 10px;
+}
+
+.part-info {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  flex: 1;
+  padding: 0.5rem 0.5rem 0.5rem 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  min-width: 0;
+}
+
+.part-info:hover .part-title {
+  color: #2563eb;
+}
+
+.part-index {
+  font-weight: 700;
+  color: #3b82f6;
+  min-width: 2.5rem;
+  flex-shrink: 0;
+  font-size: 0.875rem;
+}
+
+.part-title {
+  color: #374151;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.875rem;
+  transition: color 0.15s;
+}
+
+.download-all-button {
+  padding: 0.375rem 0.875rem;
+  background: #f0fdf4;
+  border: 1px solid #86efac;
+  border-radius: 8px;
+  color: #15803d;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.download-all-button:hover:not(:disabled) {
+  background: #dcfce7;
+  border-color: #4ade80;
+}
+
+.download-all-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 @media (max-width: 768px) {

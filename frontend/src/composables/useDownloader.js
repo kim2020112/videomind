@@ -65,14 +65,49 @@ export function useDownloader() {
       .then((res) => res.json())
       .then((data) => {
         taskId.value = data.task_id
-        connectWebSocket(data.task_id, url)
+        connectWebSocket(data.task_id, url, {})
       })
       .catch((e) => {
         progress.value = { status: 'failed', percent: 0, error: e.message }
       })
   }
 
-  function connectWebSocket(tid, url) {
+  function startDownloadSelected(url, selectedParts) {
+    progress.value = { status: 'pending', percent: 0 }
+    fetch(`${API_BASE}/download`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, format_id: selectedFormat.value }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        taskId.value = data.task_id
+        connectWebSocket(data.task_id, url, { concat_parts: true, selected_parts: selectedParts })
+      })
+      .catch((e) => {
+        progress.value = { status: 'failed', percent: 0, error: e.message }
+      })
+  }
+
+  function startDownloadAll(url) {
+    progress.value = { status: 'pending', percent: 0 }
+
+    fetch(`${API_BASE}/download`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, format_id: selectedFormat.value }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        taskId.value = data.task_id
+        connectWebSocket(data.task_id, url, { concat_parts: true })
+      })
+      .catch((e) => {
+        progress.value = { status: 'failed', percent: 0, error: e.message }
+      })
+  }
+
+  function connectWebSocket(tid, url, extraData) {
     // 关闭旧连接
     if (ws) {
       ws.close()
@@ -88,6 +123,7 @@ export function useDownloader() {
       ws.send(JSON.stringify({
         url,
         format_id: selectedFormat.value,
+        ...extraData,
       }))
       progress.value = { status: 'downloading', percent: 0 }
     }
@@ -148,6 +184,8 @@ export function useDownloader() {
     taskId,
     parseVideo,
     startDownload,
+    startDownloadAll,
+    startDownloadSelected,
     downloadFile,
     reset,
   }
