@@ -1,9 +1,60 @@
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 import urllib.request
+import http.client
 import uuid
 import os
+import re
 from asyncio import Queue
+
+
+def extract_url(text: str) -> str:
+    """从用户输入中提取第一个 http/https URL，兼容手机分享的带标题文本。"""
+    text = text.strip()
+    m = re.search(r'https?://\S+', text)
+    url = m.group(0).rstrip('.,;)】。') if m else text
+    return _resolve_short_url(url)
+
+
+def _resolve_short_url(url: str) -> str:
+    """将短链解析为真实 URL（只取 Location，不跟随重定向）。"""
+    # b23.tv → bilibili.com
+    if re.match(r'https?://b23\.tv/', url):
+        path = '/' + url.split('b23.tv/', 1)[1]
+        try:
+            conn = http.client.HTTPSConnection('b23.tv', timeout=10)
+            conn.request('GET', path, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            })
+            resp = conn.getresponse()
+            location = resp.getheader('Location')
+            if location and 'bilibili.com' in location:
+                bv = re.search(r'(BV\w+)', location)
+                if bv:
+                    return f'https://www.bilibili.com/video/{bv.group(1)}'
+                return location
+        except Exception:
+            pass
+        return url
+
+    # v.douyin.com → douyin.com/video/{id}
+    if re.match(r'https?://v\.douyin\.com/', url):
+        path = '/' + url.split('v.douyin.com/', 1)[1]
+        try:
+            conn = http.client.HTTPSConnection('v.douyin.com', timeout=10)
+            conn.request('GET', path, headers={
+                'User-Agent': 'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36',
+            })
+            resp = conn.getresponse()
+            location = resp.getheader('Location') or ''
+            vid = re.search(r'/video/(\d+)', location)
+            if vid:
+                return f'https://www.douyin.com/video/{vid.group(1)}'
+        except Exception:
+            pass
+        return url
+
+    return url
 
 from core.downloader import VideoDownloader
 from core.models import ParseRequest, DownloadRequest, VideoInfo, DownloadTask, ProgressData
@@ -26,7 +77,7 @@ async def health():
 async def parse_video(req: ParseRequest):
     """解析视频链接，返回视频信息和可用格式列表。"""
     try:
-        info = downloader.parse_info(req.url)
+        info = downloader.parse_info(extract_url(req.url))
         return info
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"解析失败: {str(e)}")
@@ -34,19 +85,41 @@ async def parse_video(req: ParseRequest):
 
 @router.get("/api/thumbnail")
 async def proxy_thumbnail(url: str):
-    """代理缩略图请求，绕过防盗链。自动升级 http 为 https。"""
+    """代理缩略图请求，解决混合内容和防盗链问题。"""
     import asyncio
+    from urllib.parse import urlparse
 
-    # B站等平台的缩略图需要 https，自动升级
     if url.startswith("http://"):
         url = "https://" + url[7:]
 
+    # CDN 域名 → 所属平台 Referer 映射
+    _CDN_REFERER = {
+        'xhscdn.com':       'https://www.xiaohongshu.com/',
+        'hdslb.com':        'https://www.bilibili.com/',
+        'bilivideo.com':    'https://www.bilibili.com/',
+        'douyinvod.com':    'https://www.douyin.com/',
+        '365yg.com':        'https://www.douyin.com/',
+        'amemv.com':        'https://www.douyin.com/',
+        'pstatp.com':       'https://www.douyin.com/',
+        'ixigua.com':       'https://www.ixigua.com/',
+        'ytimg.com':        'https://www.youtube.com/',
+        'googlevideo.com':  'https://www.youtube.com/',
+    }
+
+    netloc = urlparse(url).netloc
+    referer = next(
+        (v for k, v in _CDN_REFERER.items() if netloc.endswith(k)),
+        None,
+    )
+
     def _fetch():
-        req = urllib.request.Request(url, headers={
-            "Referer": "https://www.bilibili.com/",
+        headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        })
+        }
+        if referer:
+            headers["Referer"] = referer
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=15) as resp:
             return resp.read(), resp.headers.get("Content-Type", "image/jpeg")
 
@@ -92,8 +165,10 @@ async def download_progress(websocket: WebSocket, task_id: str):
     try:
         # 接收下载指令
         data = await websocket.receive_json()
-        url = data.get("url", "")
+        url = extract_url(data.get("url", ""))
         format_id = data.get("format_id", "best")
+        concat_parts = data.get("concat_parts", False)
+        selected_parts = data.get("selected_parts", None)
 
         task.status = "downloading"
 
@@ -104,7 +179,9 @@ async def download_progress(websocket: WebSocket, task_id: str):
             try:
                 file_path = await loop.run_in_executor(
                     None,
-                    lambda: downloader.download(url, format_id, task_id)
+                    lambda: downloader.download(url, format_id, task_id,
+                                                concat_parts=concat_parts,
+                                                selected_parts=selected_parts)
                 )
                 task.status = "completed"
                 task.file_path = file_path
