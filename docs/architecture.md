@@ -141,7 +141,7 @@ WebSocket 消息格式：
 - format_id, ext, resolution, height, fps, vcodec, acodec, filesize, is_audio_only, is_video_only, is_combined
 
 **VideoPart**：分P条目（仅 B 站多P视频）
-- index（P序号）, title（分P标题）, duration
+- index（P序号）, title（分P标题）, duration, filesize（估算字节数）, filesize_str
 
 **ProgressData**：进度数据
 - status, percent, speed, eta, downloaded, total, file_path, error
@@ -204,13 +204,21 @@ App.vue
   2. 解析后调用 api.bilibili.com/x/player/pagelist 获取完整分P列表
   3. 前端展示分P列表（checkbox 多选）：
      - 点击 checkbox：勾选/取消，用于批量下载
-     - 点击标题区域：重新解析该P（切换预览格式）
+     - 分P信息区域为纯展示（<div>），不触发页面刷新，避免手机误触
      - "全选/取消全选"按钮
      - "下载选中(N)"：只下载勾选的P，合并为一个文件
      - "合并下载全部"：下载所有P并合并
+     - 主下载按钮：选中分P时下载选中的；未选中时下载当前分P
   4. _download_concat_parts(selected_indices) 逐P下载到独立子目录，
      再用 ffmpeg -f concat -c copy 合并为 merged.mp4
      （不用 concat_playlist='always'，因为同名文件会互相覆盖）
+
+文件大小估算：
+  - yt-dlp 的 filesize/filesize_approx 对 Bilibili 不准，改用码率估算
+  - 公式：filesize = tbr(kbps) × 1000 / 8 × 全视频时长(秒)
+  - 关键：info['duration'] 只是 P1 时长，必须用分P列表时长之和作为总时长
+  - "最佳画质"：用最佳视频流 tbr + 最佳音频流 tbr 之和计算
+  - 前端根据选中分P的时长比例动态调整显示大小
 ```
 
 ### B 站（BiliBiliIE）

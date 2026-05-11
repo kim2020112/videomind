@@ -348,6 +348,84 @@ class VideoDownloader:
 
         parts = _fetch_bilibili_parts(url) if _is_bilibili(url) else []
 
+        # 清理标题：yt-dlp 对多P视频会在标题后追加 " pNN 分P名称"，需要去掉
+        title = info.get('title', '')
+        if parts:
+            import re as _re
+            title = _re.sub(r'\s+p\d{2,}\s+.*$', '', title).strip()
+
+        # yt-dlp 用 noplaylist=True 只解析第一P，所以 info['duration'] 只是 P1 的时长
+        # 必须用分P列表的时长之和作为总时长
+        video_duration = info.get('duration')
+        if parts and len(parts) > 1:
+            total_parts_duration = sum(p.duration for p in parts if p.duration)
+            if total_parts_duration > 0:
+                video_duration = total_parts_duration
+
+        # ── 基于码率的统一文件大小估算 ──
+        # 核心问题：yt-dlp 返回的 filesize 只是第一P的大小，不是整个视频的
+        # 必须将 filesize 调整为整个视频的大小，前端比例计算才能正确
+        # 最可靠的方式：用码率(kbps) × 全视频时长(秒) 计算
+
+        # 找出最佳视频流和最佳音频流的码率（用于估算"最佳画质"）
+        best_video_tbr = 0
+        best_audio_tbr = 0
+        for f in raw_formats:
+            vcodec = f.get('vcodec', 'none') or 'none'
+            acodec = f.get('acodec', 'none') or 'none'
+            tbr = f.get('tbr') or 0
+            height = f.get('height')
+            if vcodec != 'none' and acodec == 'none' and height:
+                best_video_tbr = max(best_video_tbr, tbr)
+            elif acodec != 'none' and vcodec == 'none':
+                best_audio_tbr = max(best_audio_tbr, tbr)
+
+        # 找一个有 filesize 的格式作为参考基准（给无码率的格式用）
+        ref_bytes_per_kbps = None
+        for fmt in formats:
+            if fmt.filesize and fmt.tbr and fmt.tbr > 0:
+                ref_bytes_per_kbps = fmt.filesize / fmt.tbr
+                break
+
+        for fmt in formats:
+            if fmt.tbr and fmt.tbr > 0 and video_duration:
+                # 有码率：用码率 × 全视频时长（最准确）
+                fmt.filesize = int(fmt.tbr * 1000 / 8 * video_duration)
+            elif ref_bytes_per_kbps and fmt.tbr and fmt.tbr > 0 and video_duration:
+                # 无直接码率但有参考基准
+                fmt.filesize = int(ref_bytes_per_kbps * fmt.tbr)
+            # 无码率无参考的格式保持原值
+
+        # "最佳画质"：最佳视频流 + 最佳音频流
+        best_fmt = next((f for f in formats if f.is_best), None)
+        if best_fmt and video_duration:
+            combined_tbr = best_video_tbr + best_audio_tbr
+            if combined_tbr > 0:
+                best_fmt.filesize = int(combined_tbr * 1000 / 8 * video_duration)
+
+        for fmt in formats:
+            fmt.filesize_str = _format_filesize(fmt.filesize)
+            # 重建 label：用新的 filesize_str 替换旧的大小描述
+            if fmt.filesize_str:
+                import re as _re2
+                # 去掉旧的大小描述（如 "，约 3.2 MB"），加上新的
+                base_label = _re2.sub(r'[，,]\s*约?\s*[\d.]+\s*[KMGT]?B\s*$', '', fmt.label or '').strip()
+                if fmt.is_audio_only:
+                    fmt.label = base_label  # 音频不在 label 里加大小
+                else:
+                    fmt.label = f"{base_label}，约 {fmt.filesize_str}"
+
+        # 估算每个分P的文件大小
+        if parts and len(parts) > 1 and video_duration:
+            # 找一个有码率的格式作为参考
+            ref_fmt = next((f for f in formats if f.tbr and f.tbr > 0 and not f.is_best), None)
+            if ref_fmt:
+                bytes_per_sec = ref_fmt.tbr * 1000 / 8
+                for p in parts:
+                    if p.duration:
+                        p.filesize = int(bytes_per_sec * p.duration)
+                        p.filesize_str = _format_filesize(p.filesize)
+
         # 提取字幕信息
         subtitles = []
         _pref_ext = ('srt', 'vtt', 'json3', 'srv1', 'srv2', 'srv3')
@@ -382,9 +460,9 @@ class VideoDownloader:
                 subtitles.append(SubtitleTrack(lang=lang, name=name, ext=ext, is_auto=True))
 
         return VideoInfo(
-            title=info.get('title', ''),
+            title=title,
             webpage_url=info.get('webpage_url', url),
-            duration=info.get('duration'),
+            duration=video_duration,
             duration_string=info.get('duration_string'),
             thumbnail=info.get('thumbnail'),
             description=(info.get('description', '') or '')[:500],

@@ -44,6 +44,8 @@ class VideoPart(BaseModel):
     index: int
     title: str
     duration: Optional[int] = None
+    filesize: Optional[int] = None
+    filesize_str: Optional[str] = None
 
 
 class VideoInfo(BaseModel):

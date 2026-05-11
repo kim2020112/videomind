@@ -29,7 +29,45 @@ const loading = ref(false)
 const selectedPartIndices = ref([])
 const translateTargetLang = ref('zh-Hans')
 
-const displayFormats = computed(() => formats.value)
+// 选中分P的总时长（秒）
+const selectedPartsTotalDuration = computed(() => {
+  if (!videoInfo.value?.parts || selectedPartIndices.value.length === 0) return null
+  const selectedSet = new Set(selectedPartIndices.value)
+  let total = 0
+  for (const part of videoInfo.value.parts) {
+    if (selectedSet.has(part.index) && part.duration) {
+      total += part.duration
+    }
+  }
+  return total > 0 ? total : null
+})
+
+// 根据选中分P动态调整清晰度列表中的文件大小
+// 后端的 filesize 是整个视频的大小，需要按选中分P的时长比例调整
+const displayFormats = computed(() => {
+  const hasParts = videoInfo.value?.parts && videoInfo.value.parts.length > 1
+  if (!hasParts) return formats.value
+
+  const videoDuration = videoInfo.value?.duration
+  if (!videoDuration) return formats.value
+
+  // 选中分P的总时长；未选中时用当前分P的时长
+  let targetDuration = selectedPartsTotalDuration.value
+  if (!targetDuration) {
+    const current = videoInfo.value.parts.find(p => p.index === currentPart.value)
+    targetDuration = current?.duration || null
+  }
+  if (!targetDuration) return formats.value
+
+  return formats.value.map(f => {
+    if (!f.filesize) return f
+    return {
+      ...f,
+      adjusted_filesize_str: formatBytes(Math.round(f.filesize / videoDuration * targetDuration)),
+    }
+  })
+})
+
 const selectedFormatDetail = computed(() => formats.value.find(f => f.format_id === selectedFormat.value))
 
 const currentPart = computed(() => {
@@ -44,6 +82,35 @@ const isAllPartsSelected = computed(() =>
 
 const manualSubtitles = computed(() => subtitles.value.filter(s => !s.is_auto))
 const autoSubtitles = computed(() => subtitles.value.filter(s => s.is_auto))
+
+// 计算选中分P的总大小
+const selectedPartsTotalSize = computed(() => {
+  if (!videoInfo.value?.parts || selectedPartIndices.value.length === 0) return null
+  const selectedSet = new Set(selectedPartIndices.value)
+  let total = 0
+  let hasSize = false
+  for (const part of videoInfo.value.parts) {
+    if (selectedSet.has(part.index) && part.filesize) {
+      total += part.filesize
+      hasSize = true
+    }
+  }
+  return hasSize ? formatBytes(total) : null
+})
+
+function formatBytes(bytes) {
+  if (!bytes) return ''
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB'
+}
+
+// 从格式标签中去掉单P大小（如 "，约 3.2 MB"），避免与动态总大小重复显示
+function stripSizeFromLabel(label) {
+  if (!label) return ''
+  return label.replace(/[，,]\s*约?\s*[\d.]+\s*[KMGT]?B\s*$/i, '').trim()
+}
 
 const langNames = {
   'en': 'English', 'zh-Hans': '中文', 'zh': '中文', 'zh-CN': '中文',
@@ -149,7 +216,24 @@ function handleDownloadAll() {
 
 function handleDownload() {
   if (!videoInfo.value) return
-  startDownload(videoInfo.value.webpage_url)
+  const bvMatch = (videoInfo.value.webpage_url || '').match(/(BV\w+)/)
+  if (!bvMatch) {
+    // 非B站视频，直接下载
+    startDownload(videoInfo.value.webpage_url)
+    return
+  }
+  const baseUrl = `https://www.bilibili.com/video/${bvMatch[1]}`
+  if (selectedPartIndices.value.length > 0) {
+    // 有选中的分P，下载选中的分P（合并）
+    startDownloadSelected(baseUrl, [...selectedPartIndices.value])
+  } else if (videoInfo.value.parts && videoInfo.value.parts.length > 1) {
+    // 多P视频但未选中，下载当前分P
+    const partMatch = url.value.match(/[?&]p=(\d+)/)
+    const partNum = partMatch ? parseInt(partMatch[1]) : 1
+    startDownloadSelected(baseUrl, [partNum])
+  } else {
+    startDownload(videoInfo.value.webpage_url)
+  }
 }
 
 function handleDownloadFile(taskId) {
@@ -230,7 +314,12 @@ function formatTime(timestamp) {
           <!-- 分P选择器 -->
           <div v-if="videoInfo.parts && videoInfo.parts.length" class="parts-section">
             <div class="parts-header">
-              <p class="parts-label">分P列表（共 {{ videoInfo.parts.length }} P）</p>
+              <p class="parts-label">
+                分P列表（共 {{ videoInfo.parts.length }} P）
+                <span v-if="selectedPartIndices.length > 0" class="parts-total-size">
+                  · 选中 {{ selectedPartIndices.length }} P
+                </span>
+              </p>
               <div class="parts-actions">
                 <button @click="handleSelectAll" class="select-all-button">
                   {{ isAllPartsSelected ? '取消全选' : '全选' }}
@@ -264,11 +353,12 @@ function formatTime(timestamp) {
                     <path d="M1 5l3 3.5L11 1" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                   </svg>
                 </div>
-                <button class="part-info" @click="handlePartSelect(part)">
+                <div class="part-info">
                   <span class="part-index">P{{ part.index }}</span>
                   <span class="part-title">{{ part.title }}</span>
+                  <span v-if="part.filesize_str" class="part-filesize">{{ part.filesize_str }}</span>
                   <span v-if="part.duration" class="part-duration">{{ formatDuration(part.duration) }}</span>
-                </button>
+                </div>
               </div>
             </div>
           </div>
@@ -292,11 +382,12 @@ function formatTime(timestamp) {
                   <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25z"/></svg>
                   推荐
                 </span>
-                <span class="format-name">{{ f.is_audio_only ? (f.label || f.ext.toUpperCase()) : (f.label || (f.height ? f.height + 'p' : f.ext.toUpperCase())) }}</span>
+                <span class="format-name">{{ f.is_audio_only ? (f.label || f.ext.toUpperCase()) : stripSizeFromLabel(f.label) || (f.height ? f.height + 'p' : f.ext.toUpperCase()) }}</span>
                 <span class="format-sub">
                   <span v-if="f.is_audio_only" class="format-tag-audio">仅音频</span>
                   <template v-else>{{ f.ext.toUpperCase() }}</template>
-                  <template v-if="f.filesize_str"> · {{ f.filesize_str }}</template>
+                  <template v-if="f.adjusted_filesize_str"> · {{ f.adjusted_filesize_str }}</template>
+                  <template v-else-if="f.filesize_str"> · {{ f.filesize_str }}</template>
                 </span>
               </button>
             </div>
@@ -1060,6 +1151,12 @@ function formatTime(timestamp) {
   margin: 0;
 }
 
+.parts-total-size {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--accent-cyan);
+}
+
 .parts-actions {
   display: flex;
   align-items: center;
@@ -1169,15 +1266,7 @@ function formatTime(timestamp) {
   gap: 0.625rem;
   flex: 1;
   padding: 0.5rem 0.5rem 0.5rem 0;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  text-align: left;
   min-width: 0;
-}
-
-.part-info:hover .part-title {
-  color: #93C5FD;
 }
 
 .part-index {
@@ -1197,6 +1286,12 @@ function formatTime(timestamp) {
   transition: color 0.15s;
   flex: 1;
   min-width: 0;
+}
+
+.part-filesize {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  flex-shrink: 0;
 }
 
 .part-duration {
