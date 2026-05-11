@@ -1,6 +1,75 @@
 # 变更记录
 
-## [1.2.0] - 2026-05-10
+## [1.5.0] - 2026-05-11
+
+### 新增
+
+- **分P多选下载**（`core/downloader.py`、`api/routes.py`、`composables/useDownloader.js`、`App.vue`）：
+  - 分P列表改为 checkbox 多选模式，每行左侧有勾选框，点击勾选/取消
+  - 点击分P标题区域仍触发重新解析（切换预览），行为不变
+  - 新增"全选/取消全选"切换按钮
+  - 勾选 1 个及以上分P后出现"下载选中(N)"按钮，只下载并合并勾选的分P
+  - 重新解析时自动清空勾选状态
+  - 后端 `_download_concat_parts(selected_indices)` 支持按索引过滤，只下载指定分P
+  - WebSocket 消息新增 `selected_parts: [1,2,3]` 字段传递选中列表
+
+## [1.4.0] - 2026-05-11
+
+### 新增
+
+- **B 站分P视频支持**（`core/downloader.py`、`core/models.py`、`App.vue`）：
+  - 解析时自动调用 `api.bilibili.com/x/player/pagelist` 获取分P列表，附加到 `VideoInfo.parts[]`
+  - 前端在视频信息卡片中展示分P列表（可滚动），点击任意一P触发重新解析，高亮当前选中P
+  - 新增"合并下载全部"按钮：逐P下载到独立子目录，再用 ffmpeg `-f concat -c copy` 拼接为单文件
+  - 解析和下载均加 `noplaylist=True`，避免 yt-dlp 将多P视频当作 playlist 处理（修复解析慢/失败/只有一个清晰度的问题）
+
+- **下载文件路径可靠性**（`core/downloader.py`）：
+  - 每次下载使用独立的 `downloads/{task_id}/` 子目录，下载完成后扫描目录找最大视频文件
+  - 替代原来的 `prepare_filename()` 方案（对 playlist info dict 不可靠，会导致"文件已被删除"错误）
+
+- **分P合并下载**（`core/downloader.py` `_download_concat_parts()`）：
+  - 每个分P下载到 `downloads/{task_id}/p{N:03d}/` 独立子目录，避免同名文件互相覆盖
+  - 所有分P下载完成后生成 `concat_list.txt`，调用 ffmpeg 合并为 `merged.mp4`
+  - 进度推送：每完成一P推送一次进度（0→90%），合并完成后推送 100%
+
+- **前端新增 `startDownloadAll()`**（`composables/useDownloader.js`）：
+  - 通过 WebSocket 消息携带 `concat_parts: true` 标志触发合并下载
+
+### 修复
+
+- **合并下载只保存最后一P**：原 `concat_playlist='always'` 方案中，所有分P输出到同一目录且文件名相同（均为视频标题），后P覆盖前P，最终只剩最后一P。改为逐P独立子目录下载后手动 ffmpeg 合并，彻底解决
+
+- **"文件已被删除"错误**：`ydl.prepare_filename(info)` 在 playlist info dict 下返回错误路径，改为扫描任务目录找最大视频文件
+
+
+
+### 新增
+
+- **平台兼容层**：在 `core/downloader.py` 中新增两个 monkey-patch，解决特定平台在服务器环境下的解析问题，对上层代码完全透明：
+  - `_patch_bilibili_extractor()`：
+    - **412 补丁**：B 站网页在部分云服务器 IP 上返回 412，补丁在 412 时通过 `api.bilibili.com/x/web-interface/view` 获取视频数据，构造含 `window.__INITIAL_STATE__` 的假网页，让 yt-dlp 提取器正常运行
+    - **画质补丁**：yt-dlp 默认使用 WBI 签名接口，未登录时限制到 480p；改用非 WBI 接口 `api.bilibili.com/x/player/playurl` + `try_look=1`，未登录可获取 1080p/720p
+  - `_patch_douyin_extractor()`：抖音 web API 需要 JavaScript 生成的 `s_v_web_id` cookie（yt-dlp 自身有 TODO 未实现），补丁在 web API 报 cookie 错误时，降级到 `api.amemv.com` 移动端 API（Android 设备参数，无需 cookie）
+
+- **短链与富文本 URL 解析**（`api/routes.py`）：
+  - 从手机分享文本中提取 URL（如 `【标题-哔哩哔哩】 https://b23.tv/xxx`）
+  - `b23.tv` 短链 → 解析 302 重定向，提取 BV ID，转为标准 `bilibili.com/video/BVxxx` URL
+  - `v.douyin.com` 短链 → 解析 302 重定向，提取视频 ID，转为标准 `douyin.com/video/{id}` URL
+
+- **缩略图代理通用化**（`api/routes.py`）：
+  - 前端所有缩略图统一走 `/api/thumbnail?url=...` 代理，解决 HTTP 图片在 HTTPS 页面被浏览器拦截（Mixed Content）的问题
+  - 代理根据 CDN 域名自动匹配正确的 `Referer`（如 `xhscdn.com` → `https://www.xiaohongshu.com/`），解决各平台 CDN 防盗链问题
+  - 支持的 CDN 映射：xhscdn.com、hdslb.com、bilivideo.com、douyinvod.com、365yg.com、amemv.com、pstatp.com、ixigua.com、ytimg.com、googlevideo.com
+
+### 修复
+
+- **B 站清晰度**：修复未登录时只能获取 480p/360p 的问题，现在可获取 1080p/720p/480p/360p
+- **小红书缩略图**：修复封面图无法显示的问题（Mixed Content + CDN 防盗链双重问题）
+- **抖音解析**：修复 `Fresh cookies are needed` 错误，无需登录即可解析抖音视频
+
+---
+
+
 
 ### 修复
 - **缩略图防盗链**：新增 `/api/thumbnail` 代理端点，自动将 `http://` 升级为 `https://`，携带正确的 `Referer` 和 `User-Agent` 头，解决 B站等平台封面图无法显示的问题

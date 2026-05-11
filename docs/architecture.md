@@ -119,13 +119,29 @@ WebSocket 消息格式：
 
 状态枚举：`pending` → `downloading` → `processing` → `completed` / `failed`
 
+客户端发送下载指令格式：
+
+```json
+{
+  "url": "https://www.bilibili.com/video/BVxxx",
+  "format_id": "bestvideo+bestaudio/best",
+  "concat_parts": true,
+  "selected_parts": [1, 2, 3]
+}
+```
+
+`concat_parts: true` 触发分P合并下载；`selected_parts` 为空时下载全部分P。
+
 ### 4.3 数据模型
 
 **VideoInfo**：视频元数据
-- title, webpage_url, duration, thumbnail, description, uploader, view_count, extractor, formats[]
+- title, webpage_url, duration, thumbnail, description, uploader, view_count, extractor, formats[], parts[]
 
 **FormatOption**：格式选项
 - format_id, ext, resolution, height, fps, vcodec, acodec, filesize, is_audio_only, is_video_only, is_combined
+
+**VideoPart**：分P条目（仅 B 站多P视频）
+- index（P序号）, title（分P标题）, duration
 
 **ProgressData**：进度数据
 - status, percent, speed, eta, downloaded, total, file_path, error
@@ -153,13 +169,81 @@ App.vue
 |------|------|------|
 | yt-dlp 集成方式 | Python 库 `import yt_dlp` | 类型安全、无子进程开销、进度回调直接 |
 | 进度推送 | `progress_hook` → `asyncio.Queue` → WebSocket | 延迟 < 100ms，天然异步 |
-| 文件存储 | `{task_id}_{title}.{ext}` | 避免文件名冲突，可追溯 |
+| 文件存储 | `downloads/{task_id}/{title}.{ext}` | 每任务独立目录，避免同名覆盖，路径可靠 |
 | 任务存储 | 内存 dict | 无数据库依赖，重启清空可接受 |
 | 多线程 | 每任务独立 `YoutubeDL` 实例 | yt-dlp 非线程安全 |
 | 前端代理 | Vite proxy → 后端 | 开发模式避免跨域 |
 | 生产部署 | FastAPI 托管前端静态文件 | 单进程部署，零配置 |
+| 缩略图代理 | 后端 `/api/thumbnail` 统一代理 | 解决 Mixed Content 和各平台 CDN 防盗链 |
+| 平台兼容层 | monkey-patch yt-dlp 提取器 | 不修改 yt-dlp 源码，升级安全；对业务代码透明 |
+| 分P合并 | 逐P独立子目录下载 + ffmpeg concat | `concat_playlist='always'` 同名覆盖问题；手动合并更可靠 |
 
-## 7. 目录结构
+## 7. 平台兼容层
+
+部分平台在服务器环境下存在特殊限制，通过 monkey-patch 解决，代码位于 `core/downloader.py` 底部，模块加载时自动执行。
+
+### B 站分P视频
+
+```
+问题：多P视频默认被 yt-dlp 当作 playlist 处理，导致解析慢/失败/只有一个清晰度
+解决：
+  1. 解析和下载均加 noplaylist=True，只处理当前P
+  2. 解析后调用 api.bilibili.com/x/player/pagelist 获取完整分P列表
+  3. 前端展示分P列表（checkbox 多选）：
+     - 点击 checkbox：勾选/取消，用于批量下载
+     - 点击标题区域：重新解析该P（切换预览格式）
+     - "全选/取消全选"按钮
+     - "下载选中(N)"：只下载勾选的P，合并为一个文件
+     - "合并下载全部"：下载所有P并合并
+  4. _download_concat_parts(selected_indices) 逐P下载到独立子目录，
+     再用 ffmpeg -f concat -c copy 合并为 merged.mp4
+     （不用 concat_playlist='always'，因为同名文件会互相覆盖）
+```
+
+### B 站（BiliBiliIE）
+
+```
+问题 1：云服务器 IP 访问 bilibili.com 网页返回 412
+解决：拦截 _download_webpage_handle，412 时改调 api.bilibili.com/x/web-interface/view
+      将返回数据构造为含 window.__INITIAL_STATE__ 的假网页，提取器正常继续
+
+问题 2：WBI 签名接口未登录限制 480p
+解决：覆盖 _download_playinfo，未登录时改用非 WBI 接口 + try_look=1，可获取 1080p/720p
+```
+
+### 抖音（DouyinIE）
+
+```
+问题：web API 需要 JS 生成的 s_v_web_id cookie，服务器无法获取（yt-dlp 自身 TODO）
+解决：覆盖 _real_extract，web API 报 cookie 错误时降级到 api.amemv.com 移动端 API
+      使用 Android 设备参数请求，无需任何 cookie
+```
+
+### 短链解析（routes.py `extract_url`）
+
+```
+b23.tv   → HTTP GET 取 Location header → 提取 BV ID → bilibili.com/video/BVxxx
+v.douyin.com → HTTP GET 取 Location header → 提取视频 ID → douyin.com/video/{id}
+手机分享文本 → 正则提取第一个 URL → 去除末尾标点
+```
+
+### 缩略图代理（routes.py `/api/thumbnail`）
+
+```
+前端统一使用 /api/thumbnail?url=... 代理所有缩略图
+代理根据 CDN 域名后缀匹配 Referer：
+  xhscdn.com      → https://www.xiaohongshu.com/
+  hdslb.com       → https://www.bilibili.com/
+  bilivideo.com   → https://www.bilibili.com/
+  douyinvod.com   → https://www.douyin.com/
+  365yg.com       → https://www.douyin.com/
+  ytimg.com       → https://www.youtube.com/
+  （其余不带 Referer）
+```
+
+
+
+## 8. 目录结构
 
 ```
 free-video-downloader/

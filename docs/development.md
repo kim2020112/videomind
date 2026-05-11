@@ -69,6 +69,26 @@ npm run dev
 - 修改 `backend/core/models.py` 来调整数据模型
 - 启用 `--reload` 参数后，代码修改会自动重启服务
 
+### 新增平台兼容补丁
+
+当某个平台出现解析错误时，在 `core/downloader.py` 末尾添加 monkey-patch 函数，参考已有的 `_patch_bilibili_extractor` 和 `_patch_douyin_extractor`。
+
+常见错误类型及处理思路：
+
+| 错误 | 原因 | 处理方式 |
+|------|------|----------|
+| HTTP 412 / 403 | 服务器 IP 被封，网页请求被拒 | 改调平台 API 接口，构造假网页数据 |
+| Fresh cookies needed | 需要 JS 生成的 cookie | 寻找移动端 API 或其他无 cookie 接口 |
+| Unable to extract | 提取器解析失败 | 查看 yt-dlp 源码，找降级路径 |
+
+### 新增短链支持
+
+在 `api/routes.py` 的 `_resolve_short_url` 函数中添加新平台的短链解析逻辑，参考已有的 `b23.tv` 和 `v.douyin.com` 处理方式：只取 302 重定向的 `Location` header，不跟随到最终页面。
+
+### 新增缩略图 CDN 映射
+
+在 `api/routes.py` 的 `proxy_thumbnail` 函数中的 `_CDN_REFERER` 字典里添加新平台的 CDN 域名后缀和对应 Referer。
+
 ### 样式开发
 
 本项目前端样式采用**两层结构**：
@@ -158,3 +178,19 @@ A: 安装 FFmpeg 并加入 PATH，或在 `downloader.py` 中通过 `ffmpeg_locat
 **Q: 前端页面无法访问后端 API**
 
 A: 检查 Vite 代理配置是否正确（`vite.config.js` 中的 proxy 配置）。确保后端在 8000 端口运行。
+
+**Q: B 站解析报 412 错误**
+
+A: 云服务器 IP 被 B 站封锁，`_patch_bilibili_extractor()` 会自动处理。如果仍然失败，检查 `api.bilibili.com` 是否可访问。
+
+**Q: 抖音解析报 "Fresh cookies needed"**
+
+A: `_patch_douyin_extractor()` 会自动降级到移动端 API。如果失败，检查 `api.amemv.com` 是否可访问。
+
+**Q: 某平台缩略图不显示**
+
+A: 两种可能：① CDN 防盗链——在 `proxy_thumbnail` 的 `_CDN_REFERER` 字典中添加该平台 CDN 域名和 Referer；② Mixed Content——确认前端使用的是 `/api/thumbnail?url=...` 代理而非直接 URL。
+
+**Q: 手机分享链接解析失败（带标题文字）**
+
+A: `extract_url()` 会自动从文本中提取 URL。如果短链无法解析，检查 `_resolve_short_url()` 是否覆盖了该短链域名。
