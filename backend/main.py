@@ -8,6 +8,9 @@ from fastapi.staticfiles import StaticFiles
 sys.path.insert(0, os.path.dirname(__file__))
 
 from api.routes import router as api_router
+from api.summary_routes import router as summary_router
+from api.subtitle_text_routes import router as subtitle_text_router
+from api.stream_routes import router as stream_router
 
 app = FastAPI(
     title="万能视频下载器",
@@ -26,6 +29,9 @@ app.add_middleware(
 
 # 注册 API 路由
 app.include_router(api_router)
+app.include_router(summary_router)
+app.include_router(subtitle_text_router)
+app.include_router(stream_router)
 
 # 创建下载目录
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
