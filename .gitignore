@@ -40,3 +40,9 @@ Thumbs.db
 
 # 日志
 *.log
+
+# Claude Code 配置（含 skill 锁定文件）
+.claude/
+.agents/
+.mcp.json
+skills-lock.json

@@ -1,5 +1,144 @@
 # 变更记录
 
+## [2.2.0] - 2026-05-12
+
+### 修复
+
+- **SSE 实时流式输出修复**（`api/stream_routes.py`）：
+  - `_sse_generator` 原先使用 `lambda: list(_run())` 缓冲全部 AI 输出后才发送，导致前端等待 30-60s 无任何反馈
+  - 改为 `asyncio.Queue` + `loop.call_soon_threadsafe`，AI 每生成一个 token 即推送至客户端
+  - 新增 `progress` 事件，通知前端字幕加载完成、AI 总结开始生成
+
+### 新增
+
+- **B 站 CC 字幕提取**（`core/summarizer.py` `extract_bilibili_subtitle()`）：
+  - 通过 `api.bilibili.com/x/v2/dm/view?type=1` 获取 CC 字幕列表（人工字幕优先于自动字幕）
+  - 下载字幕 JSON 后解析分段，生成带时间戳的格式化文本和纯文本
+  - 返回 `has_subtitle`、`language`、`subtitle_type`、`segments`、`full_text`、`text` 字段
+  - `stream_routes.py`、`subtitle_text_routes.py`、`summary_routes.py` 的 AI 总结和字幕文本提取均优先使用此 API
+
+- **字幕文本提取端点**（`api/subtitle_text_routes.py`）：
+  - `GET /api/subtitle/text?url=...&lang=...` 返回清洗后的字幕纯文本
+  - 优先 Bilibili CC 字幕 API，降级到 yt-dlp 字幕下载
+  - 弹幕 XML 用专用解析器（`_clean_danmaku_xml`），其他格式走通用清洗
+
+- **AI 问答功能**（`api/stream_routes.py` + `frontend/src/composables/useChat.js`）：
+  - `POST /api/chat/stream` SSE 流式端点，基于字幕内容回答用户问题
+  - 支持多轮对话历史（`history` 参数），最多保留最近 10 条
+  - 前端 `AiSummary.vue` 新增聊天区域，问答结果支持 Markdown 渲染
+
+### 优化
+
+- **AI prompt 增强**（`core/summarizer.py`）：
+  - summary 字段明确要求 Markdown 格式输出（`##` 标题、`**加粗**`、`-` 列表）
+  - 思维导图层级从 3 层提升至 3-4 层，每分支最多 6 个子节点
+  - 强调提取具体概念/技术/工具名称作为节点，避免"要点1"等无信息量标题
+  - `summarize_from_description()` 同步应用 enhanced prompt
+
+- **Markdown 渲染**（`frontend/src/components/AiSummary.vue`）：
+  - 引入 `marked` + `dompurify`，AI 输出的摘要、流式文本、聊天消息均渲染为 HTML
+  - 添加 `:deep()` CSS 样式覆盖（h1-h4、ul、ol、code、blockquote、strong、a）
+  - `streamingText`、`result.summary`、`chat content` 三处改为 `v-html="renderMarkdown(...)"`
+
+- **字幕与弹幕区分**（`core/downloader.py` + `frontend/src/components/AiSummary.vue`）：
+  - `parse_info()` 过滤 `lang == 'danmaku'` 的字幕轨道，不展示在字幕列表
+  - 前端字幕空状态改为"该视频无可用的字幕文本"，提示弹幕不等于字幕
+
+### 新增依赖
+
+- `frontend/package.json`：`marked`、`dompurify`（Markdown 渲染 + XSS 防护）、`markmap-lib`、`markmap-view`（思维导图渲染）、`@tailwindcss/typography`（Markdown 排版）
+
+### 技术细节
+
+- `_sse_generator` 跨线程流式实现：sync generator 在 thread executor 中运行，每 yield 一个事件就通过 `call_soon_threadsafe` 推入 `asyncio.Queue`；async generator 从队列中取出并立即 yield SSE 字节
+- `extract_bilibili_subtitle()` 强制 HTTPS，解决字幕 URL 可能为 `//` 或 `http://` 开头的问题
+- 弹幕 XML 解析回退到通用清洗方案（`_clean_plain_text`），而非直接失败
+- AI 问答问答截取字幕后 80000 字符，保留足够上下文
+
+---
+
+## [2.1.0] - 2026-05-12
+
+### 修复
+
+- **ThinkingBlock 兼容性**（`core/summarizer.py`）：
+  - DeepSeek 思考模型（如 `deepseek-v4-pro`）返回的响应中第一个 block 是 `ThinkingBlock`，无 `.text` 属性，直接访问会抛 `AttributeError`
+  - 新增 `_extract_text(response)` 函数，遍历 `response.content`，跳过无 `.text` 属性的 block，返回第一个文本 block 的内容
+  - 同时兼容思考模型（`ThinkingBlock` + `TextBlock`）和非思考模型（仅 `TextBlock`）
+
+- **bilibili.com URL 规范化**（`api/routes.py`）：
+  - 手机分享链接解析后可能得到 `bilibili.com`（无 www），yt-dlp 访问该域名返回 HTTP 403
+  - 在 `_resolve_short_url()` 中新增正则检测，自动将 `bilibili.com/` 替换为 `www.bilibili.com/`
+
+- **思维导图 CJK 文字溢出**（`frontend/src/components/AiSummary.vue`）：
+  - 原 `measureText()` 用 `text.length * fontSize * 0.65 + 24` 估算宽度，对中文字符严重低估
+  - 改为逐字符计算：CJK 字符（Unicode 范围检测）宽度 = `fontSize * 1.0`，ASCII 字符宽度 = `fontSize * 0.7`，padding 从 28 增至 32
+  - `nodeGapX` 从 180 增至 220，节点间距更宽松
+
+### 优化
+
+- **AI 总结提速**（`backend/.env`、`core/summarizer.py`）：
+  - 默认模型从 `deepseek-v4-pro`（思考模型，耗时 60s+）切换为 `deepseek-v4-flash`（非思考模型，约 11s）
+  - 通过环境变量 `DEEPSEEK_MODEL` 可随时切换回思考模型
+
+### 新增
+
+- **无字幕视频 AI 总结降级方案**（`core/summarizer.py`、`api/summary_routes.py`）：
+  - Bilibili 等平台无法通过 yt-dlp 获取自动生成字幕
+  - 新增 `summarize_from_description(title, description)` 函数，基于视频标题和简介生成基础总结
+  - 两种触发条件：① `info.subtitles` 为空；② 字幕内容 < 50 字符（如弹幕 XML 格式）
+  - 前端展示时在总结顶部显示 `⚠️` 警告，说明总结基于简介而非字幕
+
+### 技术细节
+
+- `core/summarizer.py` 新增 `summarize_from_description()` 函数，`_call_deepseek()` 和多分片路径均改用 `_extract_text()` 提取文本
+- `api/summary_routes.py` 新增 `from core.summarizer import summarize_from_description` 导入，路由中加入无字幕降级逻辑
+- `DEEPSEEK_MODEL` 默认值改为 `deepseek-v4-flash`
+
+---
+
+## [2.0.0] - 2026-05-11
+
+### 新增
+
+- **AI 视频总结功能**：
+  - 新增 `/api/summarize` 端点，输入视频 URL 即可生成 AI 总结
+  - 集成 DeepSeek API（Anthropic 兼容端点），通过环境变量 `DEEPSEEK_API_KEY` 配置
+  - 字幕获取策略：优先中文 → 其次英文 → 自动选择第一个可用字幕
+  - 字幕清洗支持 SRT、VTT、JSON3 等多种格式
+  - 长视频自动分片处理（超过 60000 字符分片摘要后再合并）
+
+- **前端 AI 总结标签页**（`AiSummary.vue`）：
+  - 视频信息卡片新增"下载 / AI 总结"标签栏切换
+  - **内容摘要**：AI 生成的视频核心内容概要（200-500 字）
+  - **章节大纲**：带时间戳的章节列表，展示各章节核心要点
+  - **思维导图**：静态 SVG 树状图渲染，支持缩放（+/-/重置）
+  - 加载状态：shimmer 骨架屏动画
+  - 重新生成功能
+
+- **免费限制机制**：
+  - 每日 3 次免费 AI 总结（内存计数，重启清零）
+  - 超出次数后显示 Pro 升级提示卡片
+
+### 技术细节
+
+- 新增 `core/summarizer.py`：DeepSeek API 调用模块，含字幕清洗、文本分片、prompt 工程、JSON 解析
+- 新增数据模型：`SummarizeRequest`、`SummaryResult`、`ChapterItem`、`MindMapNode`
+- 新增依赖：`anthropic>=0.40.0`（通过 DeepSeek 的 Anthropic 兼容端点调用）
+- 新增 `core/summary_models.py`：AI 总结相关 Pydantic 模型（`SummarizeRequest`、`SummaryResult`、`ChapterItem`、`MindMapNode`）
+- 新增 `api/summary_routes.py`：AI 总结路由，挂载到主应用
+- 新增 `composables/useSummary.js`：AI 总结状态管理（`summarizeVideo()`、`summaryResult`、`isSummarizing`、`summarizeError`、`resetSummary`）
+- 思维导图使用 `markmap-lib` + `markmap-view` 渲染（v2.2.0 起；v2.0.0 原为纯 SVG 渲染）
+
+### 配置
+
+需设置环境变量（`backend/.env`）：
+- `DEEPSEEK_API_KEY`：DeepSeek API 密钥（必需）
+- `DEEPSEEK_BASE_URL`：API 地址（默认 `https://api.deepseek.com/anthropic`，使用 Anthropic 兼容端点）
+- `DEEPSEEK_MODEL`：模型名称（默认 `deepseek-v4-flash`，v2.1.0 起；v2.0.0 原默认为 `deepseek-chat`）
+
+---
+
 ## [1.9.0] - 2026-05-11
 
 ### 修复

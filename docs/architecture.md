@@ -8,7 +8,10 @@
 | CSS 框架 | Tailwind CSS 4 | 原子化 CSS，快速构建 UI |
 | 后端框架 | FastAPI (Python) | 异步支持好、自动生成 API 文档、WebSocket 原生支持 |
 | 视频引擎 | yt-dlp | GitHub 19w+ Star，支持 1800+ 平台，Python 库直接调用 |
-| 进度推送 | WebSocket | 实时双向通信，低延迟 |
+| AI 总结 | anthropic SDK + DeepSeek | 通过 Anthropic 兼容端点调用，支持流式 MessageStream（thinking + text 双轨） |
+| Markdown 渲染 | marked + DOMPurify | 轻量无依赖，XSS 防护，AI 输出结构化展示 |
+| 思维导图 | markmap-lib + markmap-view | 将 Markdown 列表渲染为交互式思维导图 |
+| 进度推送 | WebSocket / SSE | 下载用 WebSocket（双向），AI 总结用 SSE（单向流式） |
 | 进程管理 | Uvicorn | 高性能 ASGI 服务器 |
 
 ## 2. 系统架构
@@ -94,11 +97,20 @@ sequenceDiagram
 |------|------|------|--------|------|
 | GET | `/api/health` | 健康检查 | - | `{"status": "ok"}` |
 | POST | `/api/parse` | 解析视频链接 | `{"url": "..."}` | VideoInfo |
+| GET | `/api/thumbnail` | 缩略图代理 | `?url=...` | 图片二进制流 |
+| GET | `/api/subtitle` | 下载字幕文件 | `?url=...&lang=...&auto=false` | SRT/VTT 字幕文件 |
+| GET | `/api/subtitle/translate` | 翻译字幕 | `?url=...&lang=...&target=zh-Hans` | 翻译后的字幕文件 |
+| GET | `/api/subtitle/text` | 字幕文本提取 | `?url=...&lang=zh` | `{"text": "...", "lang": "zh", ...}` |
+| POST | `/api/summarize` | AI 视频总结（同步） | `{"url": "..."}` | SummaryResult |
+| POST | `/api/summarize/stream` | AI 视频总结（SSE 流式） | `{"url": "...", "lang": "zh"}` | SSE 事件流 |
+| POST | `/api/chat/stream` | AI 问答（SSE 流式） | `{"subtitle_text": "...", "question": "...", "history": []}` | SSE 事件流 |
 | POST | `/api/download` | 创建下载任务 | `{"url": "...", "format_id": "best"}` | `{"task_id": "...", "ws_url": "..."}` |
 | GET | `/api/files/{task_id}` | 下载文件 | - | 文件流 |
 | GET | `/api/downloads` | 已完成任务列表 | - | `{"downloads": [...]}` |
 
-### 4.2 WebSocket
+### 4.2 实时通信
+
+**WebSocket** — 下载进度推送
 
 | 路径 | 说明 |
 |------|------|
@@ -117,6 +129,28 @@ WebSocket 消息格式：
 }
 ```
 
+**SSE（Server-Sent Events）** — AI 总结/问答实时流式输出
+
+SSE 端点返回 `text/event-stream`，事件格式：
+
+```json
+data: {"type": "progress", "data": {"stage": "subtitle_loaded", ...}}
+
+data: {"type": "thinking_start", "data": {}}
+
+data: {"type": "thinking", "data": {"text": "..."}}
+
+data: {"type": "text", "data": {"text": "..."}}
+
+data: {"type": "result", "data": {"summary": "...", "chapters": [...], "mindmap": {...}}}
+
+data: {"type": "done", "data": {}}
+```
+
+事件类型：`progress`（字幕加载完成等进度通知）、`thinking_start`/`thinking`/`thinking_end`（思考过程）、`text_start`/`text`（文本生成）、`warn`（警告）、`error`（错误）、`result`（最终结构化结果）、`done`（流结束）
+
+实现原理：`_sse_generator` 使用 `asyncio.Queue` + `loop.call_soon_threadsafe` 实现真正的实时流式传输，每生成一个 token 即推送至客户端，不再缓冲。
+
 状态枚举：`pending` → `downloading` → `processing` → `completed` / `failed`
 
 客户端发送下载指令格式：
@@ -134,17 +168,43 @@ WebSocket 消息格式：
 
 ### 4.3 数据模型
 
+**ParseRequest**：解析请求
+- url（视频链接）
+
 **VideoInfo**：视频元数据
 - title, webpage_url, duration, thumbnail, description, uploader, view_count, extractor, formats[], parts[]
 
 **FormatOption**：格式选项
 - format_id, ext, resolution, height, fps, vcodec, acodec, filesize, is_audio_only, is_video_only, is_combined
 
+**SubtitleTrack**：字幕轨道
+- lang（语言代码）, name（显示名称）, ext（格式后缀）, is_auto（是否自动生成）
+
 **VideoPart**：分P条目（仅 B 站多P视频）
 - index（P序号）, title（分P标题）, duration, filesize（估算字节数）, filesize_str
 
+**DownloadRequest**：下载请求
+- url, format_id, concat_parts（是否合并分P）, selected_parts（选中的分P索引列表）
+
+**DownloadTask**：下载任务
+- task_id, url, format_id, status, ws_url, file_path, title, created_at
+
 **ProgressData**：进度数据
 - status, percent, speed, eta, downloaded, total, file_path, error
+
+**SummarizeRequest**：AI 总结请求
+- url（视频链接）, lang（字幕语言偏好，默认 `zh`）
+
+**SummaryResult**：AI 总结结果
+- summary（摘要文本）, chapters[]（章节大纲：time/title/content）, mindmap（思维导图：title/children）
+
+**ChatMessage**：对话消息
+- role（`user` / `assistant`）, content（消息内容）
+
+**ChatRequest**：AI 问答请求
+- subtitle_text（字幕纯文本）, question（用户问题）, history[]（历史对话记录）
+
+> AI 总结使用 `anthropic` SDK 调用 DeepSeek 的 Anthropic 兼容端点（`https://api.deepseek.com/anthropic`），而非 OpenAI 兼容端点。
 
 ## 5. 前端组件树
 
@@ -156,11 +216,15 @@ App.vue
 │   ├── error-card             # 错误提示（红色半透明背景）
 │   ├── video-card             # 视频信息卡片
 │   │   ├── video-info         # 封面图（含播放图标叠加层+时长角标）+ 标题 + 元数据标签行 + 原视频链接
-│   │   ├── parts-section      # 分P选择器（B站多P视频，checkbox+序号+标题+时长）
-│   │   ├── format-section     # 格式选择（2列等宽网格，视频/音频合并展示）
-│   │   ├── subtitle-section   # 字幕区（手动/自动分组，下载+翻译按钮）
-│   │   ├── download-button    # 下载按钮（蓝青渐变，全宽）
-│   │   └── progress-card      # 下载进度（shimmer动画，状态图标+边框变色）
+│   │   ├── tab-bar            # 标签栏（下载 / AI 总结）
+│   │   ├── [下载标签页]
+│   │   │   ├── parts-section      # 分P选择器（B站多P视频，checkbox+序号+标题+时长）
+│   │   │   ├── format-section     # 格式选择（2列等宽网格，视频/音频合并展示）
+│   │   │   ├── subtitle-section   # 字幕区（手动/自动分组，下载+翻译按钮）
+│   │   │   ├── download-button    # 下载按钮（蓝青渐变，全宽）
+│   │   │   └── progress-card      # 下载进度（shimmer动画，状态图标+边框变色）
+│   │   └── [AI 总结标签页]
+│   │       └── AiSummary.vue      # AI 总结组件（内含：字幕加载状态 + 流式摘要 + 章节大纲 + 思维导图 + AI 问答，Markdown 渲染）
 │   └── history-card           # 下载记录（状态图标+标题+时间戳+保存按钮）
 ├── FeaturesSection.vue        # 特性展示区（6 个卡片，3 列排列，含 2 个 Pro 卡片）
 └── FooterSection.vue          # 页脚（品牌 + 链接 + 平台列表 + 版权）
@@ -172,7 +236,7 @@ App.vue
 - 视频信息、格式选择、下载进度、下载历史均在 `App.vue` 的 results section 中内联实现，不拆分为独立组件
 - `FeaturesSection.vue` 为纯展示组件，含 4 个基础功能卡片 + 2 个 Pro 专属卡片
 - `FooterSection.vue` 为纯展示组件，包含产品/支持/法律链接和平台列表
-- 平台展示以国内为主（B站、抖音、小红书、快手等），海外平台为辅
+- 平台展示以国内为主（B站、抖音、小红书），海外平台为辅（YouTube、TikTok、Instagram 等）
 - 辅助函数：`formatViewCount()`（播放量万为单位）、`formatDuration()`（秒转 mm:ss）、`formatTime()`（时间戳格式化）
 - 下载历史数据通过 `useDownloader.js` 管理，每条记录包含 `task_id`、`title`、`status`、`time` 字段
 
@@ -190,6 +254,10 @@ App.vue
 | 缩略图代理 | 后端 `/api/thumbnail` 统一代理 | 解决 Mixed Content 和各平台 CDN 防盗链 |
 | 平台兼容层 | monkey-patch yt-dlp 提取器 | 不修改 yt-dlp 源码，升级安全；对业务代码透明 |
 | 分P合并 | 逐P独立子目录下载 + ffmpeg concat | `concat_playlist='always'` 同名覆盖问题；手动合并更可靠 |
+| AI 流式输出 | `asyncio.Queue` + `call_soon_threadsafe` | 跨线程实时推送，每 token 即时送达；避免 `list()` 缓冲所有数据后再发送 |
+| B 站字幕获取 | 优先 Bilibili CC 字幕 API (`dm/view`)，降级 yt-dlp | yt-dlp 对 Bilibili 只返回弹幕 XML；CC 字幕 API 可获取真实人工/自动字幕 |
+| AI SDK 端点 | Anthropic 兼容端点 (`/anthropic`) | 支持流式 MessageStream（thinking + text 双轨）；OpenAI 兼容端点无此能力 |
+| Markdown 渲染 | `marked` + `DOMPurify` + `v-html` | 轻量无框架依赖；XSS 防护；AI 输出的结构化内容可读性大幅提升 |
 
 ## 7. 平台兼容层
 
@@ -216,8 +284,10 @@ App.vue
 文件大小估算：
   - yt-dlp 的 filesize/filesize_approx 对 Bilibili 不准，改用码率估算
   - 公式：filesize = tbr(kbps) × 1000 / 8 × 全视频时长(秒)
+  - 视频流格式（is_video_only）下载时会自动合并 +bestaudio，估算时需加上最佳音频流码率
   - 关键：info['duration'] 只是 P1 时长，必须用分P列表时长之和作为总时长
-  - "最佳画质"：用最佳视频流 tbr + 最佳音频流 tbr 之和计算
+  - 分P大小估算：用已有 filesize 的格式的 filesize / duration 得到每秒字节数，再乘以分P时长
+  - 格式列表中最高分辨率格式自动标记为"推荐"，不再有固定的"最佳画质"选项
   - 前端根据选中分P的时长比例动态调整显示大小
 ```
 
@@ -243,9 +313,10 @@ App.vue
 ### 短链解析（routes.py `extract_url`）
 
 ```
-b23.tv   → HTTP GET 取 Location header → 提取 BV ID → bilibili.com/video/BVxxx
+b23.tv       → HTTP GET 取 Location header → 提取 BV ID → bilibili.com/video/BVxxx
 v.douyin.com → HTTP GET 取 Location header → 提取视频 ID → douyin.com/video/{id}
-手机分享文本 → 正则提取第一个 URL → 去除末尾标点
+bilibili.com → 自动补全为 www.bilibili.com（无 www 时 yt-dlp 返回 403）
+手机分享文本  → 正则提取第一个 URL → 去除末尾标点
 ```
 
 ### 缩略图代理（routes.py `/api/thumbnail`）
@@ -271,19 +342,26 @@ free-video-downloader/
 ├── backend/
 │   ├── main.py                 # FastAPI 入口
 │   ├── requirements.txt        # Python 依赖
+│   ├── .env                    # 环境变量（DEEPSEEK_API_KEY 等，不提交到 git）
 │   ├── core/
 │   │   ├── downloader.py       # yt-dlp 封装
-│   │   └── models.py           # Pydantic 数据模型
+│   │   ├── summarizer.py       # DeepSeek AI 总结模块（含 B 站 CC 字幕提取、字幕清洗、流式/非流式 prompt）
+│   │   ├── summary_models.py   # AI 总结 Pydantic 模型（SummarizeRequest、SummaryResult 等）
+│   │   └── models.py           # 视频下载 Pydantic 数据模型
 │   ├── api/
-│   │   └── routes.py           # REST + WebSocket 路由
+│   │   ├── routes.py                # REST + WebSocket 路由（含 bilibili.com URL 规范化）
+│   │   ├── summary_routes.py        # AI 总结路由（/api/summarize，含无字幕降级逻辑）
+│   │   ├── stream_routes.py         # SSE 流式端点（/api/summarize/stream + /api/chat/stream）
+│   │   └── subtitle_text_routes.py  # 字幕文本提取端点（/api/subtitle/text）
 │   └── downloads/              # 下载文件输出
 ├── frontend/
 │   ├── src/
-│   │   ├── App.vue             # 主页面（含结果区内联逻辑）
+│   │   ├── App.vue             # 主页面（含结果区内联逻辑 + 标签栏）
 │   │   ├── main.js             # Vue 入口
 │   │   ├── style.css           # 全局样式（CSS 变量 + Tailwind + 基础重置 + 动画）
 │   │   ├── components/
 │   │   │   ├── NavBar.vue          # 顶部导航栏（毛玻璃效果，品牌 + 菜单 + 按钮）
+│   │   │   ├── AiSummary.vue       # AI 总结组件（流式摘要+章节大纲+思维导图+AI 问答，Markdown 渲染，含 CJK 宽度修正）
 │   │   │   ├── HeroSection.vue     # Hero 区域（深色背景 + 光晕 + 输入框 + 平台标签流）
 │   │   │   ├── FeaturesSection.vue # 特性展示（6 卡片 3 列，含 Pro 卡片）
 │   │   │   ├── FooterSection.vue   # 页脚（品牌 + 链接 + 平台列表 + 版权）
@@ -291,9 +369,12 @@ free-video-downloader/
 │   │   │   ├── VideoInfo.vue       # 备用（当前未使用）
 │   │   │   ├── FormatSelector.vue  # 备用（当前未使用）
 │   │   │   ├── DownloadProgress.vue # 备用（当前未使用）
-│   │   │   └── DownloadHistory.vue  # 备用（当前未使用）
+│   │   │   ├── DownloadHistory.vue  # 备用（当前未使用）
+│   │   │   └── HelloWorld.vue       # 备用（Vite 脚手架默认组件，当前未使用）
 │   │   └── composables/
-│   │       └── useDownloader.js    # API/WebSocket 对接（核心状态管理）
+│   │       ├── useDownloader.js    # 下载 API/WebSocket 对接（核心状态管理）
+│   │       ├── useSummary.js       # AI 总结状态管理（SSE 流式接收、Markdown 渲染、字幕文本获取）
+│   │       └── useChat.js          # AI 问答状态管理（流式对话、历史记录）
 │   ├── vite.config.js          # Vite + Tailwind + 代理
 │   └── index.html
 ├── docs/                       # 项目文档

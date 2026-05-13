@@ -12,6 +12,21 @@
 
 从 https://github.com/BtbN/FFmpeg-Builds/releases 下载，解压后将 `bin/` 目录加入系统 PATH。
 
+## 环境变量配置
+
+AI 总结功能需要在 `backend/.env` 中配置 DeepSeek API：
+
+```env
+DEEPSEEK_API_KEY=your_api_key_here
+DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic
+DEEPSEEK_MODEL=deepseek-v4-flash
+```
+
+说明：
+- `DEEPSEEK_BASE_URL` 使用 DeepSeek 的 **Anthropic 兼容端点**（`/anthropic` 后缀），后端通过 `anthropic` SDK 调用，而非 OpenAI 兼容端点
+- `DEEPSEEK_MODEL` 默认 `deepseek-v4-flash`（非思考模型，约 11s）；如需更高质量可改为 `deepseek-v4-pro`（思考模型，60s+）
+- `.env` 文件不应提交到 git
+
 ## 快速开始
 
 ### 1. 安装依赖
@@ -65,9 +80,25 @@ npm run dev
 ### 后端开发
 
 - 修改 `backend/core/downloader.py` 来调整 yt-dlp 参数
-- 修改 `backend/api/routes.py` 来增删 API 端点
-- 修改 `backend/core/models.py` 来调整数据模型
+- 修改 `backend/api/routes.py` 来增删视频下载相关 API 端点
+- 修改 `backend/api/summary_routes.py` 来调整 AI 总结路由逻辑
+- 修改 `backend/api/stream_routes.py` 来调整 SSE 流式端点逻辑
+- 修改 `backend/api/subtitle_text_routes.py` 来调整字幕文本提取逻辑
+- 修改 `backend/core/summarizer.py` 来调整 AI 总结 prompt、B 站 CC 字幕提取或分片策略
+- 修改 `backend/core/models.py` 来调整视频下载数据模型
+- 修改 `backend/core/summary_models.py` 来调整 AI 总结数据模型
 - 启用 `--reload` 参数后，代码修改会自动重启服务
+
+### AI 总结开发说明
+
+- `summarizer.py` 中的 `_extract_text(response)` 负责从 Anthropic SDK 响应中提取文本，同时兼容思考模型（`ThinkingBlock` + `TextBlock`）和非思考模型（仅 `TextBlock`）
+- `stream_summarize()` 使用 `client.messages.stream()` 实现流式 AI 总结，yield `(event_type, data)` tuple 用于 SSE
+- `extract_bilibili_subtitle(url)` 通过 Bilibili CC 字幕 API（`/x/v2/dm/view?type=1`）获取真实字幕，优先于 yt-dlp；yt-dlp 对 B 站只返回弹幕 XML
+- `_sse_generator` 使用 `asyncio.Queue` + `loop.call_soon_threadsafe` 实现跨线程实时流式传输，注意不要回退到 `list()` 缓冲方案
+- 无字幕时自动降级到 `summarize_from_description()`，基于视频标题和简介生成总结，前端会显示 `⚠️` 警告
+- `danmaku` 语言轨道的字幕在 `downloader.py` 中被过滤，不出现在前端字幕列表；弹幕 XML 通过 `_clean_danmaku_xml()` 专门解析
+- 思维导图渲染在 `AiSummary.vue` 的 `measureText()` 中，CJK 字符按 `fontSize * 1.0` 计算宽度，ASCII 按 `fontSize * 0.7`，修改 prompt 输出结构时需同步检查节点宽度是否够用
+- 前端 Markdown 渲染使用 `marked` + `DOMPurify`，修改 `renderMarkdown()` 或在模板中新增 `v-html` 时注意 XSS 防护
 
 ### 新增平台兼容补丁
 
@@ -119,13 +150,19 @@ free-video-downloader/
 ├── backend/                    # Python 后端
 │   ├── main.py                 # FastAPI 应用入口（含 CORS、静态文件服务）
 │   ├── requirements.txt        # Python 依赖清单
+│   ├── .env                    # 环境变量（DEEPSEEK_API_KEY 等，不提交 git）
 │   ├── core/
 │   │   ├── __init__.py
 │   │   ├── downloader.py       # yt-dlp 核心封装类 VideoDownloader
-│   │   └── models.py           # Pydantic 数据模型
+│   │   ├── summarizer.py       # DeepSeek AI 总结（B 站 CC 字幕提取、字幕清洗、流式/非流式 prompt）
+│   │   ├── summary_models.py   # AI 总结 Pydantic 模型
+│   │   └── models.py           # 视频下载 Pydantic 数据模型
 │   ├── api/
 │   │   ├── __init__.py
-│   │   └── routes.py           # REST + WebSocket 路由
+│   │   ├── routes.py                # REST + WebSocket 路由（含 bilibili.com URL 规范化）
+│   │   ├── summary_routes.py        # AI 总结路由（/api/summarize，含无字幕降级）
+│   │   ├── stream_routes.py         # SSE 流式端点（/api/summarize/stream + /api/chat/stream）
+│   │   └── subtitle_text_routes.py  # 字幕文本提取端点（/api/subtitle/text）
 │   └── downloads/              # 视频下载输出目录（自动创建）
 ├── frontend/                   # Vue 3 前端
 │   ├── vite.config.js          # Vite 配置（插件、代理）
@@ -138,14 +175,18 @@ free-video-downloader/
 │       ├── components/         # Vue 组件
 │       │   ├── NavBar.vue          # 顶部导航栏（品牌 + 菜单 + 按钮）
 │       │   ├── HeroSection.vue     # Hero 区域（含输入框和解析按钮）
+│       │   ├── AiSummary.vue       # AI 总结（流式摘要+章节大纲+思维导图+AI 问答，Markdown 渲染，含 CJK 宽度修正）
 │       │   ├── FeaturesSection.vue # 特性展示（4 卡片一行）
 │       │   ├── UrlInput.vue        # 备用（当前未使用）
 │       │   ├── VideoInfo.vue       # 备用（当前未使用）
 │       │   ├── FormatSelector.vue  # 备用（当前未使用）
 │       │   ├── DownloadProgress.vue # 备用（当前未使用）
-│       │   └── DownloadHistory.vue  # 备用（当前未使用）
+│       │   ├── DownloadHistory.vue  # 备用（当前未使用）
+│       │   └── HelloWorld.vue       # 备用（Vite 脚手架默认组件，当前未使用）
 │       └── composables/
-│           └── useDownloader.js # API/WebSocket 对接（核心状态管理）
+│           ├── useDownloader.js # 下载 API/WebSocket 对接（核心状态管理）
+│           ├── useSummary.js    # AI 总结状态管理（SSE 流式接收、Markdown 渲染、字幕文本获取）
+│           └── useChat.js       # AI 问答状态管理（流式对话、历史记录）
 ├── docs/                       # 项目文档
 ├── start.bat                   # Windows 一键启动脚本
 └── README.md
@@ -194,3 +235,31 @@ A: 两种可能：① CDN 防盗链——在 `proxy_thumbnail` 的 `_CDN_REFERER
 **Q: 手机分享链接解析失败（带标题文字）**
 
 A: `extract_url()` 会自动从文本中提取 URL。如果短链无法解析，检查 `_resolve_short_url()` 是否覆盖了该短链域名。
+
+**Q: AI 总结报错 `'ThinkingBlock' object has no attribute 'text'`**
+
+A: 使用了 DeepSeek 思考模型（如 `deepseek-v4-pro`），其响应第一个 block 是 `ThinkingBlock`。`summarizer.py` 中的 `_extract_text()` 已处理此情况；如果仍报错，检查 `summarizer.py` 是否是最新版本。
+
+**Q: AI 总结提示"该视频无字幕"**
+
+A: 部分平台（如 Bilibili）不提供 yt-dlp 可获取的字幕，系统会自动降级为基于视频简介生成总结，并在结果顶部显示 `⚠️` 警告。这是预期行为，不是错误。
+
+**Q: AI 总结速度很慢（超过 60 秒）**
+
+A: 检查 `backend/.env` 中的 `DEEPSEEK_MODEL`，如果是 `deepseek-v4-pro`（思考模型）则速度较慢。改为 `deepseek-v4-flash` 可将耗时降至约 11 秒。
+
+**Q: 思维导图文字超出方框**
+
+A: `AiSummary.vue` 的 `measureText()` 函数负责计算节点宽度。如果出现溢出，检查节点文本是否包含特殊字符或混合 CJK+ASCII 内容，可适当增大 `MINDMAP_CONFIG.fontSize` 或 `nodeGapX` 参数。
+
+**Q: AI 总结 SSE 流式无实时输出（全部一次性返回）**
+
+A: 检查 `stream_routes.py` 中的 `_sse_generator` 是否被回退为 `list()` 缓冲方案。正确实现使用 `asyncio.Queue` + `loop.call_soon_threadsafe`，确保每个 SSE 事件即时推送。
+
+**Q: B 站视频有字幕但系统返回"无字幕"**
+
+A: 检查 `extract_bilibili_subtitle()` 是否正常调用。B 站的 CC 字幕通过 `api.bilibili.com/x/v2/dm/view?type=1` 获取，与 yt-dlp 的字幕机制完全不同。如果 `dm/view` API 返回空 `subtitles` 列表，则该视频确实没有 CC 字幕。
+
+**Q: AI 问答提示"字幕内容为空，无法进行问答"**
+
+A: `chat_stream` 端点要求前端先通过 `/api/subtitle/text` 获取字幕文本，然后在请求体中传入 `subtitle_text` 字段。不能直接传 URL。
