@@ -5,6 +5,9 @@ import NavBar from './components/NavBar.vue'
 import HeroSection from './components/HeroSection.vue'
 import FeaturesSection from './components/FeaturesSection.vue'
 import FooterSection from './components/FooterSection.vue'
+import AiSummary from './components/AiSummary.vue'
+import { useSummary } from './composables/useSummary.js'
+import { useChat } from './composables/useChat.js'
 
 const {
   videoInfo,
@@ -28,6 +31,51 @@ const error = ref('')
 const loading = ref(false)
 const selectedPartIndices = ref([])
 const translateTargetLang = ref('zh-Hans')
+const activeTab = ref('info')
+const showSubtitles = ref(false)
+const showFullDescription = ref(false)
+
+const {
+  summaryResult,
+  isSummarizing,
+  summarizeError,
+  streamingText,
+  subtitleText,
+  isFetchingSubtitle,
+  subtitleError,
+  subtitleInfo,
+  mindmapMarkdown,
+  fetchSubtitleText,
+  summarizeVideoStream,
+  summarizeVideo,
+  resetSummary,
+} = useSummary()
+
+const {
+  chatMessages,
+  isChatStreaming,
+  chatError,
+  sendQuestion,
+  resetChat,
+} = useChat()
+
+async function handleSummarize() {
+  if (!videoInfo.value) return
+  try {
+    await summarizeVideoStream(videoInfo.value.webpage_url)
+  } catch (e) { /* handled by useSummary */ }
+}
+
+async function handleFetchSubtitle() {
+  if (!videoInfo.value) return
+  try {
+    await fetchSubtitleText(videoInfo.value.webpage_url)
+  } catch (e) { /* handled by useSummary */ }
+}
+
+function handleSendQuestion(question) {
+  sendQuestion(subtitleText.value, question)
+}
 
 // 选中分P的总时长（秒）
 const selectedPartsTotalDuration = computed(() => {
@@ -172,7 +220,12 @@ async function handleParse() {
   error.value = ''
   loading.value = true
   selectedPartIndices.value = []
+  activeTab.value = 'info'
+  resetSummary()
+  resetChat()
   reset()
+  showSubtitles.value = false
+  showFullDescription.value = false
   try {
     await parseVideo(url.value.trim())
   } catch (e) {
@@ -311,6 +364,32 @@ function formatTime(timestamp) {
             </div>
           </div>
 
+          <!-- Video Description -->
+          <div v-if="videoInfo.description" class="video-description" :class="{ expanded: showFullDescription }">
+            <p class="video-description-text">{{ videoInfo.description }}</p>
+            <button
+              v-if="videoInfo.description.length > 150"
+              class="description-toggle"
+              @click="showFullDescription = !showFullDescription"
+            >
+              {{ showFullDescription ? '收起' : '展开全部' }}
+            </button>
+          </div>
+
+          <!-- Tab 栏 -->
+          <div class="tab-bar">
+            <button class="tab-button" :class="{ active: activeTab === 'info' }" @click="activeTab = 'info'">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="tab-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 11l5 5m0 0l5-5m-5 5V3" /></svg>
+              下载
+            </button>
+            <button class="tab-button" :class="{ active: activeTab === 'summary' }" @click="activeTab = 'summary'">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="tab-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" /></svg>
+              AI 总结
+            </button>
+          </div>
+
+          <!-- Tab: 下载区 -->
+          <div v-show="activeTab === 'info'">
           <!-- 分P选择器 -->
           <div v-if="videoInfo.parts && videoInfo.parts.length" class="parts-section">
             <div class="parts-header">
@@ -400,37 +479,63 @@ function formatTime(timestamp) {
             </div>
           </div>
 
-          <!-- Subtitle Section -->
+          <!-- Subtitle Section (collapsible) -->
           <div v-if="subtitles.length" class="subtitle-section">
-            <p class="subtitle-label">字幕</p>
-            <div class="subtitle-translate-bar">
-              <span class="subtitle-translate-hint">翻译目标语言：</span>
-              <select v-model="translateTargetLang" class="subtitle-lang-select">
-                <option v-for="lang in translateLangs" :key="lang.code" :value="lang.code">
-                  {{ lang.name }}
-                </option>
-              </select>
-            </div>
-            <div v-if="manualSubtitles.length" class="subtitle-group">
-              <p class="subtitle-group-label">手动字幕</p>
-              <div class="subtitle-list">
-                <div v-for="sub in manualSubtitles" :key="sub.lang" class="subtitle-item">
-                  <span class="subtitle-name">{{ subtitleDisplayName(sub) }}（{{ sub.ext }}）</span>
-                  <div class="subtitle-actions">
-                    <button @click="handleDownloadSubtitle(sub)" class="subtitle-btn subtitle-download-btn">下载</button>
-                    <button @click="handleTranslateSubtitle(sub)" class="subtitle-btn subtitle-translate-btn">翻译</button>
+            <button
+              type="button"
+              class="subtitle-collapse-toggle"
+              :aria-expanded="showSubtitles"
+              @click="showSubtitles = !showSubtitles"
+            >
+              <svg
+                class="subtitle-toggle-chevron"
+                :class="{ rotated: showSubtitles }"
+                viewBox="0 0 20 20"
+                fill="currentColor"
+              >
+                <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
+              </svg>
+              <span class="subtitle-toggle-label">
+                字幕文件（{{ subtitles.length }}）
+              </span>
+              <span class="subtitle-toggle-desc">下载 .srt/.vtt 文本文件（不嵌入视频）</span>
+            </button>
+            <div v-show="showSubtitles" class="subtitle-expanded">
+              <div class="subtitle-disclaimer">
+                <svg viewBox="0 0 20 20" fill="currentColor" class="subtitle-disclaimer-icon">
+                  <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/>
+                </svg>
+                <span>字幕将以独立文件下载，不会嵌入到视频中。如需内嵌字幕，请使用视频编辑软件手动合成。</span>
+              </div>
+              <div class="subtitle-translate-bar">
+                <span class="subtitle-translate-hint">翻译目标语言：</span>
+                <select v-model="translateTargetLang" class="subtitle-lang-select">
+                  <option v-for="lang in translateLangs" :key="lang.code" :value="lang.code">
+                    {{ lang.name }}
+                  </option>
+                </select>
+              </div>
+              <div v-if="manualSubtitles.length" class="subtitle-group">
+                <p class="subtitle-group-label">手动字幕</p>
+                <div class="subtitle-list">
+                  <div v-for="sub in manualSubtitles" :key="sub.lang" class="subtitle-item">
+                    <span class="subtitle-name">{{ subtitleDisplayName(sub) }}（{{ sub.ext }}）</span>
+                    <div class="subtitle-actions">
+                      <button @click="handleDownloadSubtitle(sub)" class="subtitle-btn subtitle-download-btn">下载</button>
+                      <button @click="handleTranslateSubtitle(sub)" class="subtitle-btn subtitle-translate-btn">翻译</button>
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-            <div v-if="autoSubtitles.length" class="subtitle-group">
-              <p class="subtitle-group-label">自动生成字幕</p>
-              <div class="subtitle-list">
-                <div v-for="sub in autoSubtitles" :key="sub.lang" class="subtitle-item">
-                  <span class="subtitle-name">{{ subtitleDisplayName(sub) }}（{{ sub.ext }}）</span>
-                  <div class="subtitle-actions">
-                    <button @click="handleDownloadSubtitle(sub)" class="subtitle-btn subtitle-download-btn">下载</button>
-                    <button @click="handleTranslateSubtitle(sub)" class="subtitle-btn subtitle-translate-btn">翻译</button>
+              <div v-if="autoSubtitles.length" class="subtitle-group">
+                <p class="subtitle-group-label">自动生成字幕</p>
+                <div class="subtitle-list">
+                  <div v-for="sub in autoSubtitles" :key="sub.lang" class="subtitle-item">
+                    <span class="subtitle-name">{{ subtitleDisplayName(sub) }}（{{ sub.ext }}）</span>
+                    <div class="subtitle-actions">
+                      <button @click="handleDownloadSubtitle(sub)" class="subtitle-btn subtitle-download-btn">下载</button>
+                      <button @click="handleTranslateSubtitle(sub)" class="subtitle-btn subtitle-translate-btn">翻译</button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -468,6 +573,29 @@ function formatTime(timestamp) {
               {{ progress.speed }} · 剩余约 {{ progress.eta }} 秒
             </div>
             <div v-if="progress.error" class="progress-error">{{ progress.error }}</div>
+          </div>
+          </div>
+
+          <!-- Tab: AI 总结 -->
+          <div v-show="activeTab === 'summary'">
+            <AiSummary
+              :result="summaryResult"
+              :loading="isSummarizing"
+              :error="summarizeError"
+              :streamingText="streamingText"
+              :subtitleText="subtitleText"
+              :isFetchingSubtitle="isFetchingSubtitle"
+              :subtitleError="subtitleError"
+              :chatMessages="chatMessages"
+              :isChatStreaming="isChatStreaming"
+              :chatError="chatError"
+              :subtitleInfo="subtitleInfo"
+              :videoTitle="videoInfo?.title || ''"
+              :mindmapMarkdown="mindmapMarkdown"
+              :onSummarize="handleSummarize"
+              :onFetchSubtitle="handleFetchSubtitle"
+              :onSendQuestion="handleSendQuestion"
+            />
           </div>
         </div>
 
@@ -549,8 +677,39 @@ function formatTime(timestamp) {
 .video-info {
   display: flex;
   gap: 1.25rem;
-  margin-bottom: 1.5rem;
+  margin-bottom: 1.25rem;
 }
+
+.tab-bar {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 1.5rem;
+  padding: 0.25rem;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+
+.tab-button {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  padding: 0.625rem 1rem;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.tab-button:hover { color: var(--text-secondary); background: rgba(255, 255, 255, 0.05); }
+.tab-button.active { background: rgba(59, 130, 246, 0.15); color: #93C5FD; }
+.tab-icon { width: 16px; height: 16px; }
 
 .video-thumbnail-wrapper {
   position: relative;
@@ -655,6 +814,42 @@ function formatTime(timestamp) {
 .video-original-link svg {
   width: 14px;
   height: 14px;
+}
+
+.video-description {
+  margin-bottom: 1rem;
+  padding: 0.75rem 1rem;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  position: relative;
+}
+.video-description-text {
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  color: var(--text-muted);
+  margin: 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.video-description.expanded .video-description-text {
+  display: block;
+  -webkit-line-clamp: unset;
+}
+.description-toggle {
+  display: inline-block;
+  margin-top: 0.375rem;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--accent-blue);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.description-toggle:hover {
+  color: var(--accent-cyan);
 }
 
 .format-section {
@@ -775,11 +970,75 @@ function formatTime(timestamp) {
   margin-bottom: 1.5rem;
 }
 
-.subtitle-label {
-  font-size: 0.9375rem;
-  font-weight: 600;
+.subtitle-collapse-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.625rem 0.875rem;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  cursor: pointer;
+  transition: all 0.2s;
+  text-align: left;
+}
+
+.subtitle-collapse-toggle:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--border-hover);
   color: var(--text-primary);
+}
+
+.subtitle-toggle-chevron {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  transition: transform 0.2s;
+  color: var(--text-muted);
+}
+
+.subtitle-toggle-chevron.rotated {
+  transform: rotate(90deg);
+}
+
+.subtitle-toggle-label {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.subtitle-toggle-desc {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-left: auto;
+}
+
+.subtitle-disclaimer {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.625rem 0.75rem;
   margin-bottom: 0.75rem;
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.15);
+  border-radius: 8px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.subtitle-disclaimer-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: #FCD34D;
+  margin-top: 1px;
+}
+
+.subtitle-expanded {
+  margin-top: 0.5rem;
 }
 
 .subtitle-translate-bar {

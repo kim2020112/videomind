@@ -11,9 +11,6 @@ const platforms = [
   { name: 'B站', color: '#00a1d6' },
   { name: '抖音', color: '#fe2c55' },
   { name: '小红书', color: '#ff2442' },
-  { name: '快手', color: '#ff4906' },
-  { name: '微博', color: '#e6162d' },
-  { name: '西瓜视频', color: '#ff0000' },
   { name: 'YouTube', color: '#ff0000' },
   { name: 'TikTok', color: '#00f2ea' },
   { name: 'Instagram', color: '#e1306c' },
@@ -55,7 +52,7 @@ const platforms = [
           :disabled="!url || loading"
           class="hero-parse-button"
         >
-          {{ loading ? '解析中...' : '免费下载' }}
+          {{ loading ? '解析中...' : '解析视频' }}
         </button>
       </div>
 
