@@ -178,6 +178,49 @@ def rag_answer(question: str, context_chunks: list[str], history: list = None) -
     return _extract_text(resp)
 
 
+def stream_generate_notes(subtitle_text: str, video_title: str = ""):
+    """流式生成学习笔记，yield (event_type, data)。"""
+    client = _get_client()
+    chunks = _split_text(subtitle_text)
+    if len(chunks) > 1:
+        parts = [f"## 第 {i+1}/{len(chunks)} 部分\n{c}" for i, c in enumerate(chunks)]
+        subtitle_text = "\n\n".join(parts)
+
+    title_hint = f"视频标题：{video_title}\n\n" if video_title else ""
+    prompt = f"""你是一个专业的学习笔记生成助手。请将以下视频内容整理为结构化的 Markdown 学习笔记。
+
+{title_hint}字幕内容：
+---
+{subtitle_text}
+---
+
+要求：
+1. 使用 ## 和 ### 标题分层组织
+2. 关键概念用 **加粗**
+3. 步骤/流程用有序列表
+4. 要点用无序列表
+5. 代码/命令用 `行内代码` 或代码块
+6. 重要提示用 > 引用块
+7. 适当使用 emoji 标记类别（💡提示 ⚠️注意 ✅要点 📌重点）
+8. 笔记应该是可独立阅读的，不依赖视频
+9. 300-800字，信息密度高
+10. 用中文输出
+11. 只输出纯 Markdown，不要 JSON 或代码块包裹"""
+
+    try:
+        with client.messages.stream(
+            model=AI_MODEL, max_tokens=4000,
+            messages=[{"role": "user", "content": prompt}],
+        ) as stream:
+            for event in stream:
+                if event.type == "content_block_delta":
+                    delta = event.delta
+                    if hasattr(delta, "text") and delta.text:
+                        yield ("notes_text", {"text": delta.text})
+    except Exception as e:
+        yield ("error", {"message": str(e)})
+
+
 def stream_rag_answer(question: str, context_chunks: list[str], history: list = None):
     client = _get_client()
     context = "\n\n---\n\n".join(context_chunks)

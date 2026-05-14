@@ -440,7 +440,7 @@ function formatTime(timestamp) {
             </button>
             <button class="tab-button" :class="{ active: activeTab === 'download' }" @click="activeTab = 'download'; showDownloadSection = true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="tab-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 11l5 5m0 0l5-5m-5 5V3" /></svg>
-              下载
+              视频下载
             </button>
           </div>
 
@@ -540,13 +540,6 @@ function formatTime(timestamp) {
                 </span>
               </button>
             </div>
-            <!-- Selected format detail -->
-            <div v-if="selectedFormatDetail" class="format-detail">
-              <span class="format-detail-item">格式：{{ selectedFormatDetail.ext.toUpperCase() }}</span>
-              <span v-if="selectedFormatDetail.vcodec && selectedFormatDetail.vcodec !== 'none'" class="format-detail-item">编码：{{ selectedFormatDetail.vcodec }}</span>
-              <span v-if="selectedFormatDetail.fps" class="format-detail-item">{{ selectedFormatDetail.fps }}fps</span>
-              <span v-if="selectedFormatDetail.tbr" class="format-detail-item">{{ selectedFormatDetail.tbr }}kbps</span>
-            </div>
           </div>
 
           <!-- Subtitle Section (collapsible) -->
@@ -612,18 +605,22 @@ function formatTime(timestamp) {
             </div>
           </div>
 
-          <!-- Download Button (small secondary) -->
-          <div v-if="displayFormats.length" style="display:flex;justify-content:flex-end;">
+          <!-- Download Button (inline with format detail) -->
+          <div v-if="selectedFormatDetail" class="format-detail">
+            <span class="format-detail-item">格式：{{ selectedFormatDetail.ext.toUpperCase() }}</span>
+            <span v-if="selectedFormatDetail.vcodec && selectedFormatDetail.vcodec !== 'none'" class="format-detail-item">编码：{{ selectedFormatDetail.vcodec }}</span>
+            <span v-if="selectedFormatDetail.fps" class="format-detail-item">{{ selectedFormatDetail.fps }}fps</span>
+            <span v-if="selectedFormatDetail.tbr" class="format-detail-item">{{ selectedFormatDetail.tbr }}kbps</span>
             <button
               @click="handleDownload"
               :disabled="progress && progress.status === 'downloading'"
-              class="download-btn-small"
+              class="download-btn-inline"
             >
               <svg class="download-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                   d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
               </svg>
-              {{ progress && progress.status === 'downloading' ? '下载中...' : '下载视频' }}
+              {{ progress && progress.status === 'downloading' ? '下载中...' : '下载' }}
             </button>
           </div>
 
@@ -1034,6 +1031,28 @@ function formatTime(timestamp) {
   padding-top: 0.75rem;
   border-top: 1px solid var(--border);
 }
+.download-btn-inline {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.4375rem 1rem;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.2) 0%, rgba(6, 182, 212, 0.15) 100%);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 8px;
+  color: #93C5FD;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.download-btn-inline:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.3) 0%, rgba(6, 182, 212, 0.25) 100%);
+  border-color: rgba(59, 130, 246, 0.5);
+  transform: translateY(-1px);
+}
+.download-btn-inline:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .format-detail-item {
   font-size: 0.75rem;
@@ -1751,24 +1770,4 @@ function formatTime(timestamp) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.download-btn-small {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.375rem;
-  padding: 0.5rem 1rem;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--text-secondary);
-  font-size: 0.8125rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.download-btn-small:hover:not(:disabled) {
-  background: rgba(59, 130, 246, 0.1);
-  border-color: rgba(59, 130, 246, 0.3);
-  color: #93C5FD;
-}
-.download-btn-small:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>

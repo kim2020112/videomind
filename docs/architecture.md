@@ -145,10 +145,26 @@ data: {"type": "text", "data": {"text": "..."}}
 
 data: {"type": "result", "data": {"summary": "...", "chapters": [...], "mindmap": {...}}}
 
+data: {"type": "mindmap", "data": {"markdown": "..."}}
+
+data: {"type": "notes_text", "data": {"text": "..."}}
+
 data: {"type": "done", "data": {}}
 ```
 
-事件类型：`progress`（字幕加载完成等进度通知）、`thinking_start`/`thinking`/`thinking_end`（思考过程）、`text_start`/`text`（文本生成）、`warn`（警告）、`error`（错误）、`result`（最终结构化结果）、`done`（流结束）
+事件类型：
+
+| 事件 | 说明 |
+|------|------|
+| `progress` | 进度通知（字幕加载完成等） |
+| `thinking_start` / `thinking` / `thinking_end` | 思考模型推理过程 |
+| `text_start` / `text` | AI 摘要流式文本生成 |
+| `notes_text` | 学习笔记流式文本生成（逐 token） |
+| `mindmap` | 思维导图 Markdown（一次性） |
+| `result` | 最终结构化结果 |
+| `warn` | 警告信息 |
+| `error` | 错误信息 |
+| `done` | 流结束 |
 
 实现原理：`_sse_generator` 使用 `asyncio.Queue` + `loop.call_soon_threadsafe` 实现真正的实时流式传输，每生成一个 token 即推送至客户端，不再缓冲。
 

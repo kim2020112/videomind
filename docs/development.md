@@ -85,6 +85,7 @@ npm run dev
 - 修改 `backend/api/stream_routes.py` 来调整 SSE 流式端点逻辑
 - 修改 `backend/api/subtitle_text_routes.py` 来调整字幕文本提取逻辑
 - 修改 `backend/core/summarizer.py` 来调整 AI 总结 prompt、B 站 CC 字幕提取或分片策略
+- 修改 `backend/core/ai_client.py` 来调整 AI API 调用（统一 Anthropic SDK 客户端，含摘要/导图/笔记/问答的流式与非流式实现）
 - 修改 `backend/core/models.py` 来调整视频下载数据模型
 - 修改 `backend/core/summary_models.py` 来调整 AI 总结数据模型
 - 启用 `--reload` 参数后，代码修改会自动重启服务
@@ -93,6 +94,7 @@ npm run dev
 
 - `summarizer.py` 中的 `_extract_text(response)` 负责从 Anthropic SDK 响应中提取文本，同时兼容思考模型（`ThinkingBlock` + `TextBlock`）和非思考模型（仅 `TextBlock`）
 - `stream_summarize()` 使用 `client.messages.stream()` 实现流式 AI 总结，yield `(event_type, data)` tuple 用于 SSE
+- `stream_generate_notes()` 在 `ai_client.py` 中，同样使用 `client.messages.stream()` 流式生成笔记，yield `notes_text` 事件
 - `extract_bilibili_subtitle(url)` 通过 Bilibili CC 字幕 API（`/x/v2/dm/view?type=1`）获取真实字幕，优先于 yt-dlp；yt-dlp 对 B 站只返回弹幕 XML
 - `_sse_generator` 使用 `asyncio.Queue` + `loop.call_soon_threadsafe` 实现跨线程实时流式传输，注意不要回退到 `list()` 缓冲方案
 - 无字幕时自动降级到 `summarize_from_description()`，基于视频标题和简介生成总结，前端会显示 `⚠️` 警告

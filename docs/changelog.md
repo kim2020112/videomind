@@ -1,5 +1,30 @@
 # 变更记录
 
+## [2.3.1] - 2026-05-14
+
+### 新增
+
+- **学习笔记流式输出**（`backend/core/ai_client.py` + `backend/api/stream_routes.py` + `frontend/src/composables/useSummary.js`）：
+  - 新增 `stream_generate_notes()` 函数，使用 `client.messages.stream()` 流式生成笔记
+  - SSE 新增 `notes_text` 事件类型，逐 token 推送笔记内容
+  - 笔记标签页实时增量渲染，工具栏显示"生成中..."流式标记
+
+### 优化
+
+- **前端 UI 优化**（`frontend/src/components/AiSummary.vue` + `frontend/src/App.vue`）：
+  - 进度指示器移至摘要内容上方，用户第一时间看到 AI 进度
+  - 移除字幕标签页骨架屏加载闪烁
+  - 标签页新增 SVG 图标，名称优化为：AI 摘要 / 字幕原文 / 思维导图 / 学习笔记 / AI 问答
+  - AI 问答标签在无字幕时自动禁用
+  - 主标签栏"下载"改为"视频下载"，与"AI 总结"对仗
+  - 下载按钮内嵌至格式详情栏，消除突兀感
+
+- **全局样式统一**（`frontend/src/style.css`）：
+  - 所有 `<select>` 下拉框统一深色主题（半透明背景 + 自定义箭头 + 深色 option）
+  - 全局滚动条深色样式
+
+---
+
 ## [2.3.0] - 2026-05-14
 
 ### 新增

@@ -94,6 +94,10 @@ export function useSummary() {
                 mindmapMarkdown.value = event.data.markdown
                 generationStage.value = 'mindmap'
                 break
+              case 'notes_text':
+                notesMarkdown.value += event.data.text
+                generationStage.value = 'notes'
+                break
               case 'notes':
                 notesMarkdown.value = event.data.markdown
                 generationStage.value = 'notes'
