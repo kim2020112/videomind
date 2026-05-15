@@ -10,6 +10,10 @@ from fastapi import APIRouter, HTTPException
 
 from core.summary_models import SummarizeRequest, SummaryResult, ChapterItem, MindMapNode
 from core.summarizer import clean_subtitle_text, summarize_subtitle, summarize_from_description
+from core.whisper import transcribe_video, is_model_available
+from core.cache import get_whisper_cache, save_whisper_cache, get_video_info_cache, save_video_info_cache
+from core.ai_client import correct_subtitle
+from config import SUBTITLE_CORRECTION_ENABLED, WHISPER_MAX_DURATION
 
 # 复用已有模块中的工具函数和实例
 from api.routes import extract_url, _download_subtitle_content, downloader
@@ -62,10 +66,65 @@ async def summarize_video(req: SummarizeRequest):
     try:
         url = extract_url(req.url)
 
-        info = downloader.parse_info(url)
+        # 视频信息缓存预检：已缓存的超长视频直接跳过
+        cached_info = get_video_info_cache(url)
+        if cached_info and cached_info.get("duration", 0) > WHISPER_MAX_DURATION:
+            desc = cached_info.get("description", "")
+            title = cached_info.get("title", "")
+            if not desc or len(desc.strip()) < 20:
+                raise HTTPException(status_code=400, detail=f"视频时长 {int(cached_info['duration'])} 秒超过 {WHISPER_MAX_DURATION} 秒限制，不支持语音识别。该视频也没有简介，无法生成 AI 总结")
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, summarize_from_description, title, desc
+            )
+            _summarize_usage[today] = used + 1
+            return SummaryResult(
+                summary=f"⚠️ 视频时长 {int(cached_info['duration'])} 秒超过 {WHISPER_MAX_DURATION} 秒限制，以下总结基于视频简介生成，仅供参考。\n\n" + result.get("summary", ""),
+                chapters=[ChapterItem(**ch) for ch in result.get("chapters", [])],
+                mindmap=MindMapNode(title=title[:20], children=[]),
+            )
 
-        # 无字幕时降级：用视频标题+简介生成基础总结
-        if not info.subtitles:
+        info = downloader.parse_info(url)
+        save_video_info_cache(url, info)
+
+        # 无字幕时降级：Whisper 转录 > 视频简介
+        whisper_text = None
+        if not info.subtitles and is_model_available() and not (info.duration and info.duration > WHISPER_MAX_DURATION):
+            whisper_text = get_whisper_cache(url)
+            if not whisper_text or len(whisper_text.strip()) < 50:
+                try:
+                    whisper_text = await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(
+                            None, transcribe_video, url, req.lang
+                        ),
+                        timeout=600,
+                    )
+                    if whisper_text and len(whisper_text.strip()) >= 50:
+                        raw_text = whisper_text
+                        if SUBTITLE_CORRECTION_ENABLED:
+                            try:
+                                whisper_text = await asyncio.wait_for(
+                                    asyncio.get_event_loop().run_in_executor(
+                                        None, correct_subtitle, whisper_text, info.title, info.description
+                                    ),
+                                    timeout=60,
+                                )
+                            except (asyncio.TimeoutError, Exception) as e:
+                                print(f"[SubtitleCorrection] 校正失败，使用原始文本: {e}")
+                        save_whisper_cache(url, whisper_text, req.lang or "auto", raw_text)
+                except (asyncio.TimeoutError, Exception):
+                    whisper_text = None
+
+            if whisper_text and len(whisper_text.strip()) >= 50:
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None, summarize_subtitle, whisper_text, info.title
+                )
+                _summarize_usage[today] = used + 1
+                return SummaryResult(
+                    summary="⚠️ 该视频无原生字幕，以下总结基于 Whisper 语音识别结果生成。\n\n" + result.get("summary", ""),
+                    chapters=[ChapterItem(**ch) for ch in result.get("chapters", [])],
+                    mindmap=MindMapNode(title=info.title[:20], children=[]),
+                )
+
             if not info.description or len(info.description.strip()) < 20:
                 raise HTTPException(status_code=400, detail="该视频没有字幕也没有简介，无法生成 AI 总结")
             result = await asyncio.get_event_loop().run_in_executor(
@@ -90,7 +149,46 @@ async def summarize_video(req: SummarizeRequest):
 
         clean_text = clean_subtitle_text(raw_content, ext)
         if len(clean_text.strip()) < 50:
-            # 字幕内容无效（如弹幕），也降级到描述总结
+            # 字幕内容无效（如弹幕），先尝试 Whisper 转录
+            whisper_text = None
+            if is_model_available() and not (info.duration and info.duration > WHISPER_MAX_DURATION):
+                whisper_text = get_whisper_cache(url)
+                if not whisper_text or len(whisper_text.strip()) < 50:
+                    try:
+                        whisper_text = await asyncio.wait_for(
+                            asyncio.get_event_loop().run_in_executor(
+                                None, transcribe_video, url, req.lang
+                            ),
+                            timeout=600,
+                        )
+                        if whisper_text and len(whisper_text.strip()) >= 50:
+                            raw_text = whisper_text
+                            if SUBTITLE_CORRECTION_ENABLED:
+                                try:
+                                    whisper_text = await asyncio.wait_for(
+                                        asyncio.get_event_loop().run_in_executor(
+                                            None, correct_subtitle, whisper_text, info.title, info.description
+                                        ),
+                                        timeout=60,
+                                    )
+                                except (asyncio.TimeoutError, Exception) as e:
+                                    print(f"[SubtitleCorrection] 校正失败，使用原始文本: {e}")
+                            save_whisper_cache(url, whisper_text, req.lang or "auto", raw_text)
+                    except (asyncio.TimeoutError, Exception):
+                        whisper_text = None
+
+            if whisper_text and len(whisper_text.strip()) >= 50:
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None, summarize_subtitle, whisper_text, info.title
+                )
+                _summarize_usage[today] = used + 1
+                return SummaryResult(
+                    summary="⚠️ 该视频原生字幕不可用，以下总结基于 Whisper 语音识别结果生成。\n\n" + result.get("summary", ""),
+                    chapters=[ChapterItem(**ch) for ch in result.get("chapters", [])],
+                    mindmap=MindMapNode(title=info.title[:20], children=[]),
+                )
+
+            # Whisper 不可用，降级到描述总结
             if info.description and len(info.description.strip()) >= 20:
                 result = await asyncio.get_event_loop().run_in_executor(
                     None, summarize_from_description, info.title, info.description

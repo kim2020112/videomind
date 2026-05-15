@@ -1,4 +1,7 @@
-"""AI 视频总结模块 - 调用 DeepSeek API（Anthropic 兼容格式）生成摘要、章节大纲、思维导图。"""
+"""AI 视频总结模块 — 字幕清洗 + B站字幕提取 + 降级方案。
+
+AI 调用统一委托给 core.ai_client（prompt 文件化，结构化输出）。
+"""
 
 import json
 import os
@@ -6,24 +9,14 @@ import re
 import urllib.request
 from xml.etree import ElementTree
 
-import anthropic
 from dotenv import load_dotenv
 
-# 加载 .env 配置
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 
-_DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/anthropic")
-_DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-_DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
-
-_MAX_SUBTITLE_CHARS = 60000
+from core.ai_client import summarize, generate_notes, generate_mindmap, stream_summarize, stream_generate_notes, stream_chat, _chunk_summarize
 
 
-def _get_client() -> anthropic.Anthropic:
-    if not _DEEPSEEK_API_KEY:
-        raise ValueError("未配置 DEEPSEEK_API_KEY，请在 backend/.env 中设置")
-    return anthropic.Anthropic(api_key=_DEEPSEEK_API_KEY, base_url=_DEEPSEEK_BASE_URL)
-
+# ──── 字幕清洗 ────
 
 def clean_subtitle_text(raw_content: str, ext: str) -> str:
     """清洗字幕文本，去除时间码和格式标记，返回纯文本。"""
@@ -109,272 +102,15 @@ def _clean_danmaku_xml(content: str) -> str:
         return _clean_plain_text(content)
 
 
-def _split_text(text: str, max_chars: int = _MAX_SUBTITLE_CHARS) -> list[str]:
-    if len(text) <= max_chars:
-        return [text]
-    paragraphs = text.split('\n')
-    chunks, current, current_len = [], [], 0
-    for para in paragraphs:
-        para_len = len(para) + 1
-        if current_len + para_len > max_chars and current:
-            chunks.append('\n'.join(current))
-            current, current_len = [para], para_len
-        else:
-            current.append(para)
-            current_len += para_len
-    if current:
-        chunks.append('\n'.join(current))
-    return chunks
-
-
-def _build_prompt(subtitle_text: str, video_title: str = "") -> str:
-    title_hint = f"视频标题：{video_title}\n\n" if video_title else ""
-    return f"""你是一个专业的视频内容分析助手。请根据以下视频字幕内容，生成结构化的总结。
-
-{title_hint}字幕内容：
----
-{subtitle_text}
----
-
-请直接输出 Markdown 格式的全面视频总结，200-500字。
-
-要求：
-1. 必须使用 ## 标题分段、**加粗**关键概念、- 列表列举要点
-2. 涵盖核心观点和关键信息
-3. 用中文输出
-4. 只输出纯 Markdown，不要 JSON 或代码块包裹"""
-
-
-def _build_mindmap_prompt(subtitle_text: str, video_title: str = "") -> str:
-    title_hint = f"视频标题：{video_title}\n\n" if video_title else ""
-    return f"""你是一个专业的思维导图生成助手，请将以下视频字幕内容整理为思维导图结构。
-
-{title_hint}字幕内容：
----
-{subtitle_text}
----
-
-请使用 Markdown 标题层级格式输出：
-1. # 一级标题是视频核心主题
-2. ## 二级标题是主要章节/模块
-3. ### 三级标题是各章节的要点
-4. #### 四级标题可做更细的展开
-
-要求：
-- 每个节点的文字要简洁精炼
-- 提取视频中的具体概念、技术术语、工具名称、关键人物作为节点
-- 避免使用"要点1"、"其他"等无信息量标题
-- 所有内容用中文输出
-- 只输出 Markdown 内容，不要其他说明文字"""
-
-
-def _extract_text(response) -> str:
-    """从响应中提取文本内容，跳过 ThinkingBlock 等非文本 block。"""
-    for block in response.content:
-        if hasattr(block, 'text'):
-            return block.text.strip()
-    raise ValueError("API 响应中未找到文本内容")
-
-
-def _call_deepseek(client: anthropic.Anthropic, prompt: str) -> dict:
-    response = client.messages.create(
-        model=_DEEPSEEK_MODEL,
-        max_tokens=4000,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    content = _extract_text(response)
-    return {
-        "summary": content,
-        "chapters": [],
-    }
-
-
-def summarize_subtitle(subtitle_text: str, video_title: str = "") -> dict:
-    """调用 DeepSeek API 生成视频总结。"""
-    client = _get_client()
-    chunks = _split_text(subtitle_text)
-
-    if len(chunks) == 1:
-        prompt = _build_prompt(chunks[0], video_title)
-        return _call_deepseek(client, prompt)
-
-    partial_summaries = []
-    for i, chunk in enumerate(chunks):
-        partial_prompt = f"请对以下视频字幕片段（第 {i+1}/{len(chunks)} 部分）生成简要摘要，100-200字：\n\n---\n{chunk}\n---\n\n直接输出摘要文本，不要输出 JSON 或其他格式。"
-        resp = client.messages.create(
-            model=_DEEPSEEK_MODEL,
-            max_tokens=1000,
-            messages=[{"role": "user", "content": partial_prompt}],
-        )
-        partial_summaries.append(_extract_text(resp))
-
-    combined = '\n\n'.join(partial_summaries)
-    prompt = _build_prompt(combined, video_title)
-    return _call_deepseek(client, prompt)
-
+# ──── 降级方案 ────
 
 def summarize_from_description(title: str, description: str) -> dict:
     """无字幕时，基于视频标题和简介生成基础总结。"""
-    client = _get_client()
-    prompt = f"""你是一个专业的视频内容分析助手。该视频没有字幕，请根据以下视频标题和简介生成内容总结。
-
-视频标题：{title}
-
-视频简介：
----
-{description[:3000]}
----
-
-请直接输出 Markdown 格式的内容总结，150-350字，使用 ## 标题、**加粗**关键概念、- 列表等格式。用中文输出。"""
-
-    return _call_deepseek(client, prompt)
+    subtitle_text = f"视频标题：{title}\n\n视频简介：\n{description[:3000]}"
+    return summarize(subtitle_text, title)
 
 
-def stream_summarize(subtitle_text: str, video_title: str = ""):
-    """流式调用 DeepSeek API，yield (event_type, data) tuple 用于 SSE。"""
-    client = _get_client()
-    chunks = _split_text(subtitle_text)
-
-    if len(chunks) == 1:
-        prompt = _build_prompt(chunks[0], video_title)
-        yield from _stream_single(client, prompt)
-    else:
-        partial_summaries = []
-        for i, chunk in enumerate(chunks):
-            partial_prompt = f"请对以下视频字幕片段（第 {i+1}/{len(chunks)} 部分）生成简要摘要，100-200字：\n\n---\n{chunk}\n---\n\n直接输出摘要文本，不要输出 JSON 或其他格式。"
-            resp = client.messages.create(
-                model=_DEEPSEEK_MODEL,
-                max_tokens=1000,
-                messages=[{"role": "user", "content": partial_prompt}],
-            )
-            partial_summaries.append(_extract_text(resp))
-
-        combined = '\n\n'.join(partial_summaries)
-        prompt = _build_prompt(combined, video_title)
-        yield from _stream_single(client, prompt)
-
-
-def _stream_single(client: anthropic.Anthropic, prompt: str):
-    """流式调用，yield SSE 事件。纯摘要模式——无思维导图分隔符。"""
-    full_text = ""
-
-    try:
-        with client.messages.stream(
-            model=_DEEPSEEK_MODEL,
-            max_tokens=4000,
-            messages=[{"role": "user", "content": prompt}],
-        ) as stream:
-            for event in stream:
-                if event.type == "content_block_start":
-                    if getattr(event.content_block, 'type', None) == 'thinking':
-                        pass
-                    else:
-                        yield ("text_start", {})
-                elif event.type == "content_block_delta":
-                    delta = event.delta
-                    if hasattr(delta, 'text') and delta.text:
-                        full_text += delta.text
-                        yield ("text", {"text": delta.text})
-                elif event.type == "content_block_stop":
-                    pass
-
-        summary = full_text.strip()
-        if not summary:
-            summary = "AI 未能生成有效的总结内容，请重试。"
-
-        yield ("result", {
-            "summary": summary,
-            "chapters": [],
-        })
-
-    except Exception as e:
-        yield ("error", {"message": str(e)})
-
-
-def generate_mindmap_markdown(subtitle_text: str, video_title: str = "") -> str:
-    """单独调用 DeepSeek API 生成思维导图 Markdown。"""
-    client = _get_client()
-    chunks = _split_text(subtitle_text)
-
-    if len(chunks) == 1:
-        prompt = _build_mindmap_prompt(chunks[0], video_title)
-    else:
-        prompt_parts = []
-        for i, chunk in enumerate(chunks):
-            prompt_parts.append(f"## 第 {i+1}/{len(chunks)} 部分\n{chunk}")
-        prompt = _build_mindmap_prompt('\n\n'.join(prompt_parts), video_title)
-
-    response = client.messages.create(
-        model=_DEEPSEEK_MODEL,
-        max_tokens=2000,
-        temperature=0.5,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return _extract_text(response)
-
-
-def _parse_json_response(content: str) -> dict:
-    """从文本中提取 JSON，与 _call_deepseek 保持一致。"""
-    json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', content, re.DOTALL)
-    if json_match:
-        content = json_match.group(1).strip()
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError:
-        return {
-            "summary": content[:2000],
-            "chapters": [],
-            "mindmap": {"title": "视频内容", "children": []},
-        }
-    return {
-        "summary": data.get("summary", ""),
-        "chapters": data.get("chapters", []),
-        "mindmap": data.get("mindmap", {"title": "视频内容", "children": []}),
-    }
-
-
-def stream_chat(subtitle_text: str, question: str, history: list = None):
-    """流式 AI 问答，基于字幕内容回答用户问题。"""
-    client = _get_client()
-
-    history_lines = []
-    if history:
-        for msg in history[-10:]:
-            role = "用户" if msg.get("role") == "user" else "助手"
-            history_lines.append(f"{role}：{msg.get('content', '')}")
-    history_text = '\n'.join(history_lines) if history_lines else "无历史对话"
-
-    subtitle_context = subtitle_text[-80000:] if len(subtitle_text) > 80000 else subtitle_text
-
-    prompt = f"""你是一个基于视频字幕内容的问答助手。请根据以下视频字幕内容回答用户的问题。
-
-视频字幕：
----
-{subtitle_context}
----
-
-历史对话：
-{history_text}
-
-用户问题：{question}
-
-请基于以上字幕内容回答问题。如果答案不在字幕中，请如实告知。用中文回答，保持简洁准确。"""
-
-    try:
-        with client.messages.stream(
-            model=_DEEPSEEK_MODEL,
-            max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}],
-        ) as stream:
-            for event in stream:
-                if event.type == "content_block_delta":
-                    delta = event.delta
-                    if hasattr(delta, 'text') and delta.text:
-                        yield ("text", {"text": delta.text})
-
-    except Exception as e:
-        yield ("error", {"message": str(e)})
-
+# ──── B 站 CC 字幕提取 ────
 
 def extract_bilibili_subtitle(url: str) -> dict | None:
     """B 站专用：通过 dm/view API 获取 CC 字幕（人工字幕 > 自动字幕）。
@@ -386,7 +122,7 @@ def extract_bilibili_subtitle(url: str) -> dict | None:
             "subtitle_type": "manual" | "auto",
             "segments": [{"start": float, "end": float, "text": str}, ...],
             "full_text": str,
-            "text": str,  # 兼容旧接口，带时间戳的格式化文本
+            "text": str,
         }
         无字幕时返回 None
     """
@@ -461,7 +197,6 @@ def extract_bilibili_subtitle(url: str) -> dict | None:
             })
 
         full_text = ' '.join(seg['text'] for seg in segments)
-        # 带时间戳的格式化文本（用于前端字幕展示）
         formatted_lines = []
         for seg in segments:
             mm = int(seg['start'] // 60)
@@ -479,3 +214,9 @@ def extract_bilibili_subtitle(url: str) -> dict | None:
 
     except Exception:
         return None
+
+
+# ──── 别名（兼容旧 import） ────
+
+summarize_subtitle = summarize
+generate_mindmap_markdown = generate_mindmap

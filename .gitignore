@@ -23,8 +23,19 @@ frontend/node_modules/
 # 设计参考图（不提交）
 frontend/public/design-reference.png
 
+# 数据库文件（运行时生成，不提交）
+backend/db/*.db
+backend/db/*.db-shm
+backend/db/*.db-wal
+backend/data/chroma/
+
+# Whisper 模型文件（太大，单独管理）
+backend/data/whisper_models/
+
 # 环境变量
 .env
+.env.local
+.env.*.local
 .env.local
 .env.*.local
 

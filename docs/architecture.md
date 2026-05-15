@@ -9,10 +9,13 @@
 | 后端框架 | FastAPI (Python) | 异步支持好、自动生成 API 文档、WebSocket 原生支持 |
 | 视频引擎 | yt-dlp | GitHub 19w+ Star，支持主流视频平台，Python 库直接调用 |
 | AI 总结 | anthropic SDK + DeepSeek | 通过 Anthropic 兼容端点调用，支持流式 MessageStream（thinking + text 双轨） |
+| 语音转录 | Faster-Whisper (small/int8) | 本地 CPU 推理，无字幕视频兜底方案，仅加载本地模型不联网 |
+| 字幕校正 | AI 后处理 | Whisper 输出经 LLM 校正（利用视频标题/简介上下文修正专有名词、同音错字） |
 | Markdown 渲染 | marked + DOMPurify | 轻量无依赖，XSS 防护，AI 输出结构化展示 |
 | 思维导图 | markmap-lib + markmap-view | 将 Markdown 列表渲染为交互式思维导图 |
 | 导图导出 | 原生 SVG + Canvas | SVG 走离屏重渲染与静态化导出，PNG 基于内联 SVG 生成 4K 位图，避免受展示区缩放影响 |
 | 进度推送 | WebSocket / SSE | 下载用 WebSocket（双向），AI 总结用 SSE（单向流式） |
+| 持久化 | SQLite | AI 结果缓存、Whisper 转录缓存、视频信息缓存，同 URL 不重复消耗资源 |
 | 进程管理 | Uvicorn | 高性能 ASGI 服务器 |
 
 ## 2. 系统架构
@@ -34,13 +37,15 @@
 │  ┌────────────────────────────────────────────┐  │
 │  │            FastAPI (Python)                  │  │
 │  │  /api/parse  /api/download  /api/health     │  │
-│  │  /ws/download/{task_id}  /api/files/{id}    │  │
+│  │  /api/subtitle/text  /api/summarize          │  │
+│  │  /api/summarize/stream  /api/chat/stream     │  │
+│  │  /ws/download/{task_id}  /api/files/{id}     │  │
 │  └──────────────┬─────────────────────────────┘  │
 │                 │                                   │
 │  ┌──────────────▼─────────────────────────────┐  │
-│  │   VideoDownloader (core/downloader.py)      │  │
-│  │   parse_info()    download()                │  │
-│  │   progress_hook → asyncio.Queue → WS        │  │
+│  │   核心模块 (core/)                           │  │
+│  │   downloader.py  ai_client.py  summarizer.py│  │
+│  │   whisper.py  cache.py  models.py           │  │
 │  └──────────────┬─────────────────────────────┘  │
 │                 │                                   │
 │  ┌──────────────▼─────────────────────────────┐  │
@@ -55,6 +60,8 @@
 ```
 
 ## 3. 核心流程
+
+### 3.1 视频下载流程
 
 ```mermaid
 sequenceDiagram
@@ -88,6 +95,46 @@ sequenceDiagram
     U->>FE: 点击保存文件
     FE->>BE: GET /api/files/{task_id}
     BE-->>FE: 文件流
+```
+
+### 3.2 字幕获取 Pipeline（四级降级）
+
+```
+┌─ Pipeline 1: 平台 API ─────────────────────────────┐
+│  Bilibili CC 字幕 (api.bilibili.com/x/v2/dm/view)    │
+│  → 人工字幕优先，自动字幕次之                          │
+└──────────────────────────────────────────────────────┘
+                    │ 无字幕
+                    ▼
+┌─ Pipeline 2: yt-dlp 原生字幕 ────────────────────────┐
+│  info.subtitles + automatic_captions                  │
+│  → 下载 SRT/VTT/JSON3 字幕文件                        │
+│  → 过滤 danmaku 弹幕格式                              │
+└──────────────────────────────────────────────────────┘
+                    │ 无字幕
+                    ▼
+┌─ Pipeline 3: Whisper 语音转录 ───────────────────────┐
+│  下载音频(mp3) → Faster-Whisper small (CPU/int8)      │
+│  → AI 字幕校正 (利用标题/简介上下文)                   │
+│  → 缓存到 whisper_cache 表                            │
+│  ├─ 前置条件: is_model_available()                     │
+│  ├─ 时长限制: duration ≤ WHISPER_MAX_DURATION (120s)   │
+│  └─ 超时: 600s                                        │
+└──────────────────────────────────────────────────────┘
+                    │ 模型不可用/超时/超长
+                    ▼
+┌─ Pipeline 4: OCR 硬字幕（预留接口）──────────────────┐
+└──────────────────────────────────────────────────────┘
+```
+
+### 3.3 AI 总结流水线
+
+```
+URL → 查 ai_cache (命中→SSE重放)
+    → 查 video_info_cache (超长视频→即时拒)
+    → parse_info() → 字幕获取 pipeline
+    → 有字幕: AI摘要(流式) → 思维导图 → 学习笔记(流式) → 持久化
+    → 无字幕: 基于视频简介降级总结 / 返回400
 ```
 
 ## 4. API 设计
@@ -156,13 +203,15 @@ data: {"type": "done", "data": {}}
 
 | 事件 | 说明 |
 |------|------|
-| `progress` | 进度通知（字幕加载完成等） |
+| `progress` | 进度通知（字幕加载完成、Whisper 转录状态等） |
+| `cache_hit` | 命中 AI 缓存，直接重放 |
 | `thinking_start` / `thinking` / `thinking_end` | 思考模型推理过程 |
 | `text_start` / `text` | AI 摘要流式文本生成 |
 | `notes_text` | 学习笔记流式文本生成（逐 token） |
+| `flashcard_text` | 学习卡片流式文本生成（逐 token） |
 | `mindmap` | 思维导图 Markdown（一次性） |
 | `result` | 最终结构化结果 |
-| `warn` | 警告信息 |
+| `warn` | 警告信息（无字幕降级、Whisper 跳过等） |
 | `error` | 错误信息 |
 | `done` | 流结束 |
 
@@ -211,6 +260,8 @@ data: {"type": "done", "data": {}}
 
 **SummarizeRequest**：AI 总结请求
 - url（视频链接）, lang（字幕语言偏好，默认 `zh`）
+- 系统自动选择字幕源：B站CC > yt-dlp原生 > Whisper转录 > OCR预留
+- 视频时长超过 `WHISPER_MAX_DURATION`（默认 120s）直接跳过 Whisper
 
 **SummaryResult**：AI 总结结果
 - summary（摘要文本）, chapters[]（章节大纲：time/title/content）, mindmap（思维导图：title/children）
@@ -272,6 +323,9 @@ App.vue
 | 平台兼容层 | monkey-patch yt-dlp 提取器 | 不修改 yt-dlp 源码，升级安全；对业务代码透明 |
 | 分P合并 | 逐P独立子目录下载 + ffmpeg concat | `concat_playlist='always'` 同名覆盖问题；手动合并更可靠 |
 | AI 流式输出 | `asyncio.Queue` + `call_soon_threadsafe` | 跨线程实时推送，每 token 即时送达；避免 `list()` 缓冲所有数据后再发送 |
+| 语音转录 | Faster-Whisper small (CPU/int8) + local_files_only | 本地推理无需 GPU/网络；仅用于无字幕视频兜底；限制 120s 内视频 |
+| 字幕校正 | AI 后处理（temperature=0.1）| 利用视频元数据修正 Whisper 专有名词、同音错字；失败降级到原始文本 |
+| 视频信息缓存 | SQLite video_info_cache 表 | 避免同一视频重复调用 yt-dlp 解析（单次 20s+）；超长视频即时拦截 |
 | B 站字幕获取 | 优先 Bilibili CC 字幕 API (`dm/view`)，降级 yt-dlp | yt-dlp 对 Bilibili 只返回弹幕 XML；CC 字幕 API 可获取真实人工/自动字幕 |
 | AI SDK 端点 | Anthropic 兼容端点 (`/anthropic`) | 支持流式 MessageStream（thinking + text 双轨）；OpenAI 兼容端点无此能力 |
 | Markdown 渲染 | `marked` + `DOMPurify` + `v-html` | 轻量无框架依赖；XSS 防护；AI 输出的结构化内容可读性大幅提升 |
@@ -362,14 +416,26 @@ videomind/
 │   ├── .env                    # 环境变量（DEEPSEEK_API_KEY 等，不提交到 git）
 │   ├── core/
 │   │   ├── downloader.py       # yt-dlp 封装
-│   │   ├── summarizer.py       # DeepSeek AI 总结模块（含 B 站 CC 字幕提取、字幕清洗、流式/非流式 prompt）
+│   │   ├── ai_client.py        # 统一 AI API 客户端（流式/非流式，prompt 加载，字幕校正）
+│   │   ├── summarizer.py       # 字幕清洗 + B 站 CC 字幕提取 + 降级方案
+│   │   ├── whisper.py          # Faster-Whisper 转录模块（本地模型，CPU/int8）
+│   │   ├── cache.py            # SQLite 持久化缓存（AI 结果 + Whisper 转录 + 视频信息）
 │   │   ├── summary_models.py   # AI 总结 Pydantic 模型（SummarizeRequest、SummaryResult 等）
 │   │   └── models.py           # 视频下载 Pydantic 数据模型
+│   ├── prompts/                # AI Prompt 模板（版本化）
+│   │   ├── summary/v1.txt
+│   │   ├── notes/v1.txt
+│   │   ├── mindmap/v1.txt
+│   │   ├── flashcard/v1.txt
+│   │   └── subtitle_correction/v1.txt
 │   ├── api/
 │   │   ├── routes.py                # REST + WebSocket 路由（含 bilibili.com URL 规范化）
-│   │   ├── summary_routes.py        # AI 总结路由（/api/summarize，含无字幕降级逻辑）
-│   │   ├── stream_routes.py         # SSE 流式端点（/api/summarize/stream + /api/chat/stream）
-│   │   └── subtitle_text_routes.py  # 字幕文本提取端点（/api/subtitle/text）
+│   │   ├── summary_routes.py        # AI 总结路由（/api/summarize，含无字幕降级+Whisper）
+│   │   ├── stream_routes.py         # SSE 流式端点（/api/summarize/stream + /api/chat/stream，含视频缓存预检）
+│   │   └── subtitle_text_routes.py  # 字幕文本提取端点（/api/subtitle/text，含Whisper兜底）
+│   ├── data/
+│   │   ├── chroma/              # ChromaDB 向量数据库
+│   │   └── whisper_models/      # Whisper 本地模型文件
 │   └── downloads/              # 下载文件输出
 ├── frontend/
 │   ├── src/

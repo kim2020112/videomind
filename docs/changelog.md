@@ -1,5 +1,109 @@
 # 变更记录
 
+## [2.5.0] - 2026-05-15
+
+### 新增
+
+- **Faster-Whisper 语音转录兜底**（`backend/core/whisper.py`）：
+  - 无字幕视频通过 Whisper small 模型转录（CPU/int8 量化，本地加载不联网）
+  - 四级字幕 pipeline：B站CC > yt-dlp 原生 > Whisper > OCR（预留）
+  - 启动时检查模型文件完整性，缺失只记录日志不阻塞服务
+  - Whisper 转录结果缓存到 `whisper_cache` 表，避免重复转录
+
+- **AI 字幕校正 Pipeline**（`backend/core/ai_client.py` + `backend/prompts/subtitle_correction/v1.txt`）：
+  - Whisper 转录后利用视频标题/简介作为上下文进行 AI 校正
+  - 修正专有名词、同音错字、断句错误，保留时间戳不变
+  - 低温输出（temperature=0.1）+ 30% 长度校验防止输出异常
+  - 校正失败自动降级到原始文本，不阻塞流水线
+  - 环境变量控制：`SUBTITLE_CORRECTION_ENABLED`、`SUBTITLE_CORRECTION_MAX_CHARS`
+
+- **视频时长限制**（所有字幕/总结端点）：
+  - `WHISPER_MAX_DURATION=120`（默认 2 分钟），超过则跳过 Whisper
+  - 防止长视频在 CPU 上转录过久（13 分钟视频需 40-60 分钟）
+  - 无字幕+超长+无简介 → 返回 400 明确提示
+  - 无字幕+超长+有简介 → 自动降级到基于简介总结
+
+- **视频信息缓存**（`backend/core/cache.py` + `video_info_cache` 表）：
+  - `/api/parse` 结果缓存到 `video_info_cache` 表，同 URL 无需重复解析
+  - `/api/summarize/stream` 先查缓存，超长视频直接拦截（跳过 yt-dlp 的 20s+ 解析）
+  - 缓存存储完整 VideoInfo JSON，后续可扩展离线查询
+
+### 修复
+
+- **Markdown 渲染修复**（`backend/prompts/summary/v1.txt` + `notes/v1.txt`）：
+  - 摘要和学习笔记 prompt 从 JSON 格式改为纯 Markdown 输出
+  - 解决 JSON 中未转义换行导致 `json.loads()` 失败、前端显示原始 JSON 的问题
+
+- **笔记复制按钮修复**（`frontend/src/components/AiSummary.vue`）：
+  - 新增 `fallbackCopy()` 函数（textarea + `execCommand('copy')`）
+  - 解决 `navigator.clipboard.writeText()` 静默失败导致复制无反应
+
+- **字幕文本返回修正**（`backend/api/subtitle_text_routes.py`）：
+  - Whisper 校正后的文本正确返回给前端（之前返回了原始转录文本）
+
+### 变更
+
+- **Whisper 缓存表扩展**：`whisper_cache` 新增 `raw_text` 列，分别存储校正后文本和原始转录
+
+---
+
+## [2.4.0] - 2026-05-15
+
+### 新增
+
+- **Prompt 版本化系统**（`backend/prompts/`）：
+  - Prompt 从代码中分离为独立文件 `prompts/{name}/v{N}.txt`
+  - 通过 `config.py` 中的 `PROMPT_VERSION` 环境变量控制版本
+  - 首批 4 个 prompt：`summary`、`notes`、`mindmap`、`flashcard`
+  - `_load_prompt(name)` 自动加载对应版本的 prompt 模板
+
+- **SQLite 持久化缓存**（`backend/core/cache.py`）：
+  - 新建 `ai_cache` 表，以 URL SHA256 为主键
+  - `get_cached(url)` / `save_cache(...)` / `list_history(limit)` / `delete_cache(url)`
+  - 命中缓存后直接通过 SSE 重放结果，不消耗 AI token
+  - 缓存完整存储 result + mindmap_markdown + notes，支持后续知识查询
+
+- **Chunk Summary Pipeline**（`backend/core/ai_client.py`）：
+  - 长视频字幕超过 60000 字符自动分片
+  - `_chunk_summarize()`: 逐片生成摘要 → 合并为全局摘要文本
+  - 非流式和流式 API 统一使用分片 pipeline
+
+- **标准化字幕获取 Pipeline**（`backend/api/stream_routes.py`）：
+  - `_get_subtitle_text()` 三级降级：平台 API（B站 CC）→ yt-dlp 原生字幕 → Whisper fallback（预留）
+  - 异步上下文中执行，避免阻塞事件循环
+
+### 变更
+
+- **AI Provider 抽象**（`backend/config.py` + `backend/core/ai_client.py`）：
+  - 新增 `AI_PROVIDER` 环境变量（deepseek | openai | openrouter）
+  - `AI_BASE_URL` 和 `AI_MODEL` 支持独立配置
+  - 底层仍使用 Anthropic SDK（通过兼容端点）
+
+- **AI 输出结构化 JSON**（`backend/core/ai_client.py`）：
+  - 所有 prompt 要求 AI 返回结构化 JSON（非纯 Markdown）
+  - `_parse_json_response()` 提取 JSON，支持 ` ```json ``` ` 代码块和裸 JSON
+  - 解析失败时降级为原始文本
+
+- **`summarizer.py` 瘦身**（`backend/core/summarizer.py`）：
+  - 移除与 `ai_client.py` 重复的 AI 调用代码（`_get_client`、`_split_text`、`_extract_text`、prompt 构建等）
+  - 保留字幕清洗函数和 B 站 CC 字幕提取
+  - 添加兼容别名：`summarize_subtitle`、`generate_mindmap_markdown`
+
+- **SSE 流式端点重构**（`backend/api/stream_routes.py`）：
+  - 缓存优先：先查 `get_cached()`，命中则 SSE 重放
+  - 字幕获取在 async 上下文中执行
+  - 更细粒度的进度阶段：`cache_hit` / `subtitle_loaded` / `summary_generating` / `mindmap_generating` / `notes_generating`
+  - 流水线完成后持久化到 SQLite
+
+### 技术细节
+
+- Prompt 模板使用 Python `.format()` 注入变量（`{video_title}`、`{subtitle_text}`、`{content_summary}`）
+- Chunk pipeline 每个分片独立调用 AI，最后合并结果
+- 缓存表包含完整 AI 结果 JSON，未来可用于知识库检索
+- `config.py` 中 `DB_PATH`、`CHROMA_PATH`、`TEMP_DIR`、`DOWNLOAD_DIR` 确保目录自动创建
+
+---
+
 ## [2.3.1] - 2026-05-14
 
 ### 新增

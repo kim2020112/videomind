@@ -6,10 +6,14 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).parent
 
-# AI API 配置（DeepSeek 为主，OpenAI 兼容协议可切换）
+# AI API 配置
+AI_PROVIDER = os.getenv("AI_PROVIDER", "deepseek")  # deepseek | openai | openrouter
 AI_API_KEY = os.getenv("AI_API_KEY", os.getenv("DEEPSEEK_API_KEY", ""))
 AI_BASE_URL = os.getenv("AI_BASE_URL", os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/anthropic"))
 AI_MODEL = os.getenv("AI_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
+
+# Prompt 版本
+PROMPT_VERSION = int(os.getenv("PROMPT_VERSION", "1"))
 
 # 数据库
 DB_PATH = BASE_DIR / "db" / "knowledge.db"
@@ -23,9 +27,21 @@ TEMP_DIR = BASE_DIR / "temp"
 # 下载目录（保留下载功能）
 DOWNLOAD_DIR = BASE_DIR / "downloads"
 
-# Whisper（预留，暂不启用）
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
+# Whisper（Faster-Whisper 转录兜底）
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")  # tiny | base | small | medium | large
 WHISPER_MODELS_DIR = BASE_DIR / "data" / "whisper_models"
+
+# Whisper 字幕校正（AI 后处理，修正语音识别错误）
+SUBTITLE_CORRECTION_ENABLED = os.getenv("SUBTITLE_CORRECTION_ENABLED", "true").lower() == "true"
+SUBTITLE_CORRECTION_MAX_CHARS = int(os.getenv("SUBTITLE_CORRECTION_MAX_CHARS", "15000"))
+
+# Whisper 转录最大视频时长（秒），超过则跳过，避免 CPU 转录过久
+WHISPER_MAX_DURATION = int(os.getenv("WHISPER_MAX_DURATION", "120"))
+
+# HuggingFace 镜像（国内加速，首次下载 Whisper 模型用）
+_HF_ENDPOINT = os.getenv("HF_ENDPOINT", "https://hf-mirror.com")
+if _HF_ENDPOINT:
+    os.environ.setdefault("HF_ENDPOINT", _HF_ENDPOINT)
 
 # 任务队列
 MAX_CONCURRENT_TASKS = int(os.getenv("MAX_CONCURRENT_TASKS", "2"))

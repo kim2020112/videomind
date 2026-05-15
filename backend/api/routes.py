@@ -8,6 +8,8 @@ import re
 import asyncio
 from asyncio import Queue
 
+from core.cache import save_video_info_cache
+
 
 def extract_url(text: str) -> str:
     """从用户输入中提取第一个 http/https URL，兼容手机分享的带标题文本。"""
@@ -82,7 +84,9 @@ async def health():
 async def parse_video(req: ParseRequest):
     """解析视频链接，返回视频信息和可用格式列表。"""
     try:
-        info = downloader.parse_info(extract_url(req.url))
+        url = extract_url(req.url)
+        info = downloader.parse_info(url)
+        save_video_info_cache(url, info)
         return info
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"解析失败: {str(e)}")
