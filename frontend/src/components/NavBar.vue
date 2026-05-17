@@ -1,12 +1,15 @@
 <script setup>
-defineEmits(['toggle-history'])
+defineProps({
+  currentView: { type: String, default: 'home' }
+})
+defineEmits(['toggle-history', 'go-home'])
 </script>
 
 <template>
   <nav class="navbar">
     <div class="navbar-container">
       <!-- Logo -->
-      <div class="navbar-logo">
+      <div class="navbar-logo" @click="$emit('go-home')">
         <div class="logo-icon">
           <svg viewBox="0 0 24 24" fill="currentColor">
             <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-8 12H9.5v-2H11v-2H9.5V9H11V7H9.5v2H8V7H6.5v2H5v2h1.5v2H5v2h1.5v2H8v-2h1.5v2H11v-2zm2.5 2H12v-2h1.5v2zm0-4H12v-2h1.5v2zm0-4H12V7h1.5v2zm4 8H16v-2h1.5v2zm0-4H16v-2h1.5v2zm0-4H16V7h1.5v2z"/>
@@ -23,11 +26,11 @@ defineEmits(['toggle-history'])
 
       <!-- Actions -->
       <div class="navbar-actions">
-        <button class="btn-history" @click="$emit('toggle-history')">
+        <button class="btn-history" :class="{ active: currentView === 'history' }" @click="$emit('toggle-history')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-history-icon">
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
           </svg>
-          历史
+          学习历史
         </button>
       </div>
     </div>
@@ -127,6 +130,12 @@ defineEmits(['toggle-history'])
   background: var(--bg-card-hover);
   border-color: var(--border-hover);
   color: var(--text-primary);
+}
+
+.btn-history.active {
+  background: rgba(59, 130, 246, 0.15);
+  border-color: rgba(59, 130, 246, 0.3);
+  color: var(--accent-blue);
 }
 
 .btn-history-icon {

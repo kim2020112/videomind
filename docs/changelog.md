@@ -1,5 +1,88 @@
 # 变更记录
 
+## [2.8.0] - 2026-05-17
+
+### 新增
+
+- **学习历史页独立组件**（`frontend/src/components/HistoryPage.vue`）：
+  - 从 App.vue（2607 行）提取学习历史页为独立组件，App.vue 缩减至 ~1900 行（-28%）
+  - 组件自行管理所有状态（搜索、标签、排序、分页、收藏、删除）
+  - 通过 `emit('select-item', item)` 与 App.vue 通信，用户点击历史卡片后跳转首页并自动触发 AI 总结
+  - 包含完整 scoped CSS + 移动端 768px 响应式适配
+
+- **智能标签提取**（`backend/core/tag_extractor.py`）：
+  - 基于规则匹配的轻量级标签提取器，从标题和摘要中提取 3-5 个标签
+  - 100+ 关键词→标签映射：编程语言、AI/ML、前后端、数据库、算法、框架工具、内容类型
+  - 平台识别：从 URL 或 yt-dlp extractor 名自动识别 bilibili/youtube/douyin/tiktok/xiaohongshu
+  - AI 总结完成后自动提取标签并持久化到 `video_tags` 关联表
+
+- **学习统计仪表盘**（HistoryPage 顶部）：
+  - 显示学习视频数、笔记字数、平均时长、覆盖平台数
+  - 后端 `GET /api/history/stats` 端点提供统计数据
+
+- **标签过滤与平台过滤**（HistoryPage 搜索栏）：
+  - 标签过滤栏显示使用频率最高的 20 个标签，点击筛选
+  - 平台下拉筛选：B站/YouTube/抖音/TikTok/小红书
+  - 排序切换：最新/最早
+
+- **语义搜索**（HistoryPage AI 搜索模式）：
+  - 切换到 AI 模式后可输入自然语言问题（如"哪个视频讲过IK分词器"）
+  - 基于 ChromaDB 向量数据库的跨视频语义搜索
+  - 后端 `GET /api/search` 端点返回匹配片段 + 来源视频
+
+### 修复
+
+- **Bilibili 字幕下载无换行**（`backend/core/summarizer.py`）：
+  - `extract_bilibili_subtitle_by_cid()` 的 `full_text` 原用 `' '.join()` 拼接所有字幕段，导致前端收到的字幕文本为一整行
+  - 改为 `'\n'.join()`，每段字幕独立一行，SRT/VTT/TXT 下载格式正确换行
+
+- **多P视频 P0 显示为 P？**（HistoryPage）：
+  - `part.part_index || '?'` 中 `0` 为 falsy 值导致 P0 显示为 `P?`
+  - 改为 `part.part_index ?? '?'`（nullish coalescing）
+
+- **多P视频展开/关闭文案**（HistoryPage）：
+  - 展开后仍显示"点击展开"，改为根据 `expandedGroups` 状态显示"点击关闭"/"点击展开"
+
+- **多P视频 P0 标题显示**（HistoryPage）：
+  - P0 的 `part_info` 为空时显示 AI 摘要预览，改为显示"总览"
+
+- **垃圾标签**（`backend/core/tag_extractor.py`）：
+  - 原中文词提取正则 `[一-鿿]{2,4}` 盲目切分标题，产生"会被中国"、"车厂吓到"等无意义标签
+  - 移除该降级逻辑，关键词匹配无结果时返回空列表
+
+- **删除后标签残留**（`backend/core/cache.py`）：
+  - `delete_cache()` 原只删除 `ai_cache` 记录，未清理 `video_tags` 和孤立 `tags`
+  - 新增级联删除：先删 `video_tags`，再清理无引用的 `tags`
+
+- **N+1 标签查询**（`backend/core/cache.py`）：
+  - `list_history_enhanced()` 原对每条记录单独查询标签（N 次 SQL）
+  - 新增 `get_tags_for_urls(urls)` 批量查询函数，一次 SQL 获取所有 URL 的标签
+
+- **空 catch 块**（HistoryPage）：
+  - `fetchHistoryPage`、`loadMoreHistory`、`handleSemanticSearch` 的 catch 块原为空，用户操作失败无反馈
+  - 改为 `alert()` 提示具体错误信息
+
+- **时长格式**（HistoryPage）：
+  - 超过 1 小时的视频原显示 `m:ss`（如 `106:28`），改为 `Xh Ym` 格式
+
+- **删除确认标题截断**（HistoryPage）：
+  - `confirm` 弹窗原用 `.slice(0, 30)` 截断标题，长标题显示不完整
+  - 移除截断，显示完整标题
+
+- **P4 提取误删 `formatTime`**（`frontend/src/App.vue`）：
+  - 提取 HistoryPage 时 `formatTime` 函数被一并移除，但下载历史区域仍在使用
+  - 恢复 `formatTime` 函数
+
+### 优化
+
+- **数据库索引**（`backend/core/cache.py`）：
+  - `ai_cache` 表新增 `idx_ai_cache_created_at` 索引，加速按时间排序的历史查询
+
+- **错误处理增强**（HistoryPage）：
+  - 所有 API 调用添加 try-catch + 用户友好的 alert 提示
+
+---
+
 ## [2.7.0] - 2026-05-16
 
 ### 新增

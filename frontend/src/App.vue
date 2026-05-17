@@ -6,6 +6,7 @@ import HeroSection from './components/HeroSection.vue'
 import FeaturesSection from './components/FeaturesSection.vue'
 import FooterSection from './components/FooterSection.vue'
 import AiSummary from './components/AiSummary.vue'
+import HistoryPage from './components/HistoryPage.vue'
 import { useSummary } from './composables/useSummary.js'
 import { useChat } from './composables/useChat.js'
 
@@ -49,45 +50,26 @@ const showDownloadSection = ref(false)
 const showSubtitles = ref(false)
 const showFullDescription = ref(false)
 const showChapters = ref(false)
-const showHistory = ref(false)
-const historyList = ref([])
-const deletingHistoryId = ref(null)
-
-async function fetchHistory() {
-  try {
-    const res = await fetch('/api/videos?limit=50')
-    if (res.ok) {
-      const data = await res.json()
-      historyList.value = data.items || []
-    }
-  } catch {}
-}
+const currentView = ref('home') // 'home' | 'history'
 
 function toggleHistory() {
-  showHistory.value = !showHistory.value
-  if (showHistory.value) fetchHistory()
+  if (currentView.value === 'history') {
+    currentView.value = 'home'
+  } else {
+    currentView.value = 'history'
+  }
+  window.scrollTo(0, 0)
 }
 
-async function selectHistory(item) {
+async function handleSelectHistory(item) {
   url.value = item.url
-  showHistory.value = false
+  currentView.value = 'home'
   await handleParse()
-  // 解析完成后自动触发AI总结（恢复缓存的AI结果）
   if (videoInfo.value && !error.value) {
     handleSummarize(false)
   }
 }
 
-async function deleteHistory(item, event) {
-  event.stopPropagation()
-  try {
-    deletingHistoryId.value = item.id
-    await fetch(`/api/videos/${item.id}`, { method: 'DELETE' })
-    historyList.value = historyList.value.filter(h => h.id !== item.id)
-  } catch {} finally {
-    deletingHistoryId.value = null
-  }
-}
 
 const {
   summaryResult,
@@ -414,9 +396,10 @@ function formatViewCount(count) {
 
 function formatDuration(seconds) {
   if (!seconds) return ''
-  const m = Math.floor(seconds / 60)
-  const s = Math.floor(seconds % 60)
-  return `${m}:${String(s).padStart(2, '0')}`
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  if (h > 0) return `${h}h ${m}m`
+  return `${m} 分钟`
 }
 
 function formatTime(timestamp) {
@@ -431,39 +414,13 @@ function formatTime(timestamp) {
 
 <template>
   <div class="app-container">
-    <NavBar @toggle-history="toggleHistory" />
+    <NavBar :currentView="currentView" @toggle-history="toggleHistory" @go-home="currentView = 'home'; $nextTick(() => window.scrollTo(0, 0))" />
 
-    <!-- 历史抽屉 -->
-    <transition name="drawer">
-      <div v-if="showHistory" class="history-drawer-overlay" @click="showHistory = false">
-        <div class="history-drawer" @click.stop>
-          <div class="drawer-header">
-            <h3 class="drawer-title">历史记录</h3>
-            <button class="drawer-close" @click="showHistory = false">&times;</button>
-          </div>
-          <div class="drawer-body">
-            <div v-if="!historyList.length" class="drawer-empty">暂无历史记录</div>
-            <div v-for="item in historyList" :key="item.id" class="drawer-item" @click="selectHistory(item)">
-              <img v-if="item.thumbnail_url" :src="'/api/thumbnail?url=' + encodeURIComponent(item.thumbnail_url)" class="drawer-thumb" />
-              <div class="drawer-item-info">
-                <span class="drawer-item-title">{{ item.title }}</span>
-                <span v-if="item.part_info" class="drawer-item-part">{{ item.part_info }}</span>
-                <span class="drawer-item-time">{{ item.platform }} · {{ item.created_at?.slice(0, 10) }}</span>
-              </div>
-              <button
-                class="drawer-delete-btn"
-                :disabled="deletingHistoryId === item.id"
-                @click="deleteHistory(item, $event)"
-                :title="'删除'"
-              >
-                <svg v-if="deletingHistoryId !== item.id" viewBox="0 0 20 20" fill="currentColor" class="drawer-delete-icon"><path fill-rule="evenodd" d="M8.75 2.5A1.75 1.75 0 006 4.25H3.75a.75.75 0 000 1.5h.372l.94 10.838A2 2 0 007.045 18.5h5.91a2 2 0 001.984-1.912l.94-10.838h.371a.75.75 0 000-1.5H14A1.75 1.75 0 0011.25 2.5h-2.5zm3.098 3.5H8.152l.912 10.5h1.872l.912-10.5z" clip-rule="evenodd"/></svg>
-                <svg v-else class="drawer-delete-icon spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" /></svg>
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </transition>
+    <!-- 学习历史页 -->
+    <HistoryPage v-if="currentView === 'history'" @select-item="handleSelectHistory" />
+
+    <!-- 首页内容 -->
+    <template v-if="currentView === 'home'">
 
     <HeroSection
       v-model:url="url"
@@ -823,6 +780,8 @@ function formatTime(timestamp) {
       </div>
     </section>
 
+    </template>
+
     <FeaturesSection />
     <FooterSection />
   </div>
@@ -840,7 +799,7 @@ function formatTime(timestamp) {
 }
 
 .results-container {
-  max-width: 800px;
+  max-width: 1100px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
@@ -1902,77 +1861,6 @@ function formatTime(timestamp) {
   /* 描述 */
   .description-text { font-size: 0.8125rem; }
 }
-
-/* 历史抽屉 */
-.history-drawer-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
-  z-index: 200;
-  display: flex;
-  justify-content: flex-end;
-}
-.history-drawer {
-  width: 340px;
-  max-width: 90vw;
-  height: 100%;
-  background: var(--bg-card);
-  border-left: 1px solid var(--border);
-  box-shadow: -8px 0 30px rgba(0, 0, 0, 0.35);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.drawer-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 1rem 1.25rem;
-  border-bottom: 1px solid var(--border);
-}
-.drawer-title { font-size: 1rem; font-weight: 600; color: var(--text-primary); margin: 0; }
-.drawer-close { background: none; border: none; font-size: 1.5rem; color: var(--text-muted); cursor: pointer; line-height: 1; }
-.drawer-body { flex: 1; overflow-y: auto; padding: 0.75rem; }
-.drawer-empty { padding: 2rem; text-align: center; color: var(--text-muted); font-size: 0.875rem; }
-.drawer-item {
-  display: flex;
-  gap: 0.75rem;
-  padding: 0.75rem;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-.drawer-item:hover { background: rgba(255, 255, 255, 0.05); }
-.drawer-thumb { width: 64px; height: 40px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
-.drawer-item-info { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
-.drawer-item-title { font-size: 0.8125rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.drawer-item-part { font-size: 0.75rem; color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.drawer-item-time { font-size: 0.75rem; color: var(--text-muted); }
-.drawer-delete-btn {
-  flex-shrink: 0;
-  width: 28px; height: 28px;
-  display: flex; align-items: center; justify-content: center;
-  background: transparent;
-  border: none;
-  border-radius: 6px;
-  color: var(--text-muted);
-  cursor: pointer;
-  opacity: 0;
-  transition: all 0.15s;
-  align-self: center;
-}
-.drawer-item:hover .drawer-delete-btn { opacity: 1; }
-.drawer-delete-btn:hover { background: rgba(239, 68, 68, 0.15); color: #FCA5A5; }
-.drawer-delete-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.drawer-delete-icon { width: 14px; height: 14px; }
-.drawer-delete-icon.spinner { animation: spin 1s linear infinite; }
-
-.drawer-enter-active, .drawer-leave-active { transition: opacity 0.2s; }
-.drawer-enter-active .history-drawer, .drawer-leave-active .history-drawer { transition: transform 0.2s; }
-.drawer-enter-from, .drawer-leave-to { opacity: 0; }
-.drawer-enter-from .history-drawer, .drawer-leave-to .history-drawer { transform: translateX(100%); }
 
 /* 下载折叠栏 */
 .download-collapse-toggle {

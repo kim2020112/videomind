@@ -163,6 +163,12 @@ URL → 查 ai_cache (命中→SSE重放)
 | POST | `/api/download` | 创建下载任务 | `{"url": "...", "format_id": "best"}` | `{"task_id": "...", "ws_url": "..."}` |
 | GET | `/api/files/{task_id}` | 下载文件 | - | 文件流 |
 | GET | `/api/downloads` | 已完成任务列表 | - | `{"downloads": [...]}` |
+| GET | `/api/history` | 学习历史列表 | `?q=...&tag=...&platform=...&sort=newest&limit=50&offset=0` | `{"items": [...], "total": N}` |
+| POST | `/api/history/{url_hash}/favorite` | 切换收藏状态 | - | `{"is_favorite": true/false}` |
+| DELETE | `/api/history/{url_hash}` | 删除学习记录 | - | `{"ok": true}` |
+| GET | `/api/history/stats` | 学习统计数据 | - | `{"total_videos": N, "total_notes_chars": N, ...}` |
+| GET | `/api/history/tags` | 所有标签（含使用次数） | - | `[{"name": "...", "count": N}, ...]` |
+| GET | `/api/search` | 跨视频语义搜索 | `?q=...&limit=10` | `{"results": [...], "query": "..."}` |
 
 ### 4.2 实时通信
 
@@ -287,8 +293,14 @@ data: {"type": "done", "data": {}}
 ## 5. 前端组件树
 
 ```
-App.vue
-├── NavBar.vue                 # 顶部导航（毛玻璃效果，Logo + 导航菜单 + 登录/立即使用按钮）
+App.vue（~1900 行，视图路由：home / history）
+├── NavBar.vue                 # 顶部导航（毛玻璃效果，Logo + 学习历史按钮 + 返回首页）
+├── HistoryPage.vue            # 学习历史页（独立组件，自行管理状态，emit('select-item') 通知 App 跳转）
+│   ├── 统计仪表盘             # 学习视频数、笔记字数、平均时长、覆盖平台
+│   ├── 搜索栏                 # 文本搜索 + AI 语义搜索切换 + 排序/平台筛选
+│   ├── 标签过滤栏             # 标签列表（点击筛选）
+│   ├── 语义搜索结果            # ChromaDB 向量搜索结果卡片
+│   └── 历史卡片列表            # 分页加载、收藏、删除、多P展开/折叠
 ├── HeroSection.vue            # Hero 区域（深色背景 + 光晕 + 标题 + 输入框 + 下载按钮 + 平台标签流，移动端纵向堆叠）
 ├── results section (内联)     # 解析结果区域（仅在有结果或错误时显示）
 │   ├── error-card             # 错误提示（红色半透明背景）
@@ -311,7 +323,8 @@ App.vue
 **设计说明：**
 - 整体采用深色主题（`#0F172A`），CSS 变量统一管理颜色
 - 输入框和解析按钮内嵌在 `HeroSection.vue` 中，通过 props 传入 `url`、`loading` 状态和事件回调
-- 视频信息、格式选择、下载进度、下载历史均在 `App.vue` 的 results section 中内联实现，不拆分为独立组件
+- `HistoryPage.vue` 为独立组件，包含所有学习历史相关的 JS/模板/CSS（scoped），通过 `currentView` 视图切换控制显示
+- 视频信息、格式选择、下载进度在 `App.vue` 的 results section 中内联实现
 - `FeaturesSection.vue` 为纯展示组件，含 4 个基础功能卡片 + 2 个 Pro 专属卡片
 - `FooterSection.vue` 为纯展示组件，包含产品/支持/法律链接和平台列表
 - 平台展示以国内为主（B站、抖音、小红书），海外平台为辅（YouTube、TikTok、Instagram 等）
@@ -340,6 +353,9 @@ App.vue
 | B 站字幕获取 | 优先 Bilibili CC 字幕 API (`dm/view`)，降级 yt-dlp | yt-dlp 对 Bilibili 只返回弹幕 XML；CC 字幕 API 可获取真实人工/自动字幕 |
 | 多P视频 AI 总结 | 按分P独立获取字幕+独立缓存+独立总结 | 多P视频每P是一个章节，全部总结不可行；`?p=N` 参数贯穿整个流水线 |
 | 多P缓存隔离 | URL 中 `?p=N` 存在时跳过指纹匹配 | 同一 BV 号不同分P共享指纹，直接按指纹匹配会命中错误缓存 |
+| 标签提取 | 规则匹配（100+ 关键词映射）| 轻量级，无 AI 调用开销；覆盖编程语言/AI/框架/算法/内容类型；不足 3 个时不盲切中文词 |
+| 学习历史 | SQLite ai_cache + video_tags + tags 表 | 复用已有缓存表，新增标签关联表；支持收藏/搜索/标签过滤/平台过滤/统计 |
+| 前端组件拆分 | HistoryPage.vue 独立组件 | App.vue 2607 行过大；HistoryPage 自行管理状态，emit 通信；CSS scoped 隔离 |
 | AI SDK 端点 | Anthropic 兼容端点 (`/anthropic`) | 支持流式 MessageStream（thinking + text 双轨）；OpenAI 兼容端点无此能力 |
 | Markdown 渲染 | `marked` + `DOMPurify` + `v-html` | 轻量无框架依赖；XSS 防护；AI 输出的结构化内容可读性大幅提升 |
 
@@ -457,18 +473,23 @@ videomind/
 │   │   ├── routes.py                # REST + WebSocket 路由（含 bilibili.com URL 规范化）
 │   │   ├── summary_routes.py        # AI 总结路由（/api/summarize，含无字幕降级+Whisper）
 │   │   ├── stream_routes.py         # SSE 流式端点（/api/summarize/stream + /api/chat/stream，含视频缓存预检）
-│   │   └── subtitle_text_routes.py  # 字幕文本提取端点（/api/subtitle/text，含Whisper兜底）
+│   │   ├── subtitle_text_routes.py  # 字幕文本提取端点（/api/subtitle/text，含Whisper兜底）
+│   │   └── knowledge_routes.py      # 知识管理端点（/api/history、/api/search、/api/tags，含收藏/删除/统计）
+│   ├── core/
+│   │   ├── ...
+│   │   └── tag_extractor.py         # 智能标签提取器（100+ 关键词映射 + 平台识别）
 │   ├── data/
 │   │   ├── chroma/              # ChromaDB 向量数据库
 │   │   └── whisper_models/      # Whisper 本地模型文件
 │   └── downloads/              # 下载文件输出
 ├── frontend/
 │   ├── src/
-│   │   ├── App.vue             # 主页面（含结果区内联逻辑 + 标签栏）
+│   │   ├── App.vue             # 主页面（视图路由：home/history，~1900 行）
 │   │   ├── main.js             # Vue 入口
 │   │   ├── style.css           # 全局样式（CSS 变量 + Tailwind + 基础重置 + 动画）
 │   │   ├── components/
 │   │   │   ├── NavBar.vue          # 顶部导航栏（毛玻璃效果，品牌 + 菜单 + 按钮）
+│   │   │   ├── HistoryPage.vue     # 学习历史页（搜索+标签+收藏+删除+多P折叠+语义搜索+统计，scoped CSS）
 │   │   │   ├── AiSummary.vue       # AI 总结组件（流式摘要+章节大纲+思维导图+AI 问答，Markdown 渲染，含 CJK 宽度修正）
 │   │   │   ├── HeroSection.vue     # Hero 区域（深色背景 + 光晕 + 输入框 + 平台标签流）
 │   │   │   ├── FeaturesSection.vue # 特性展示（6 卡片 3 列，含 Pro 卡片）

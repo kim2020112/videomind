@@ -25,6 +25,7 @@ from core.ai_client import (
 from config import SUBTITLE_CORRECTION_ENABLED, WHISPER_MAX_DURATION
 from core.cache import get_cached, save_cache, delete_cache, delete_whisper_cache, get_whisper_cache, save_whisper_cache, get_video_info_cache, save_video_info_cache, video_fingerprint
 from core.whisper import transcribe_video_async, is_model_available
+from core.tag_extractor import extract_tags, detect_platform
 
 from api.routes import extract_url, _download_subtitle_content, downloader
 from api.summary_routes import (
@@ -589,7 +590,18 @@ async def summarize_stream(req: SummarizeRequest):
                 "mindmap_markdown": mindmap_md,
                 "notes": notes_full,
             }, ensure_ascii=False)
-            save_cache(canonical_url, info.title, subtitle_text, sub_source, save_cache_json, fingerprint=fp, part_info=_build_part_info(canonical_url, info=info))
+            platform_name = detect_platform(canonical_url, info.extractor or "")
+            save_cache(canonical_url, info.title, subtitle_text, sub_source, save_cache_json, fingerprint=fp, part_info=_build_part_info(canonical_url, info=info), platform=platform_name)
+
+            # ── 标签提取（后台执行，不阻塞 SSE） ──
+            try:
+                summary_text = result_data.get("summary", "")
+                tags = extract_tags(info.title, summary_text, canonical_url)
+                if tags:
+                    from core.cache import save_tags
+                    save_tags(canonical_url, tags)
+            except Exception:
+                pass  # 标签提取失败不影响主流程
 
             yield ("done", {})
 

@@ -182,7 +182,7 @@ def extract_bilibili_subtitle_by_cid(bvid: str, cid: int, aid: int = None) -> di
                 'text': content,
             })
 
-        full_text = ' '.join(seg['text'] for seg in segments)
+        full_text = '\n'.join(seg['text'] for seg in segments)
         formatted_lines = []
         for seg in segments:
             mm = int(seg['start'] // 60)

@@ -44,11 +44,22 @@ def _ensure_table():
             conn.execute("ALTER TABLE ai_cache ADD COLUMN part_info TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass
+        try:
+            conn.execute("ALTER TABLE ai_cache ADD COLUMN is_favorite INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE ai_cache ADD COLUMN platform TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_ai_cache_url_hash ON ai_cache(url_hash)
         """)
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_ai_cache_fingerprint ON ai_cache(fingerprint)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ai_cache_created_at ON ai_cache(created_at)
         """)
 
 
@@ -97,7 +108,7 @@ def get_cached(url: str, fingerprint: str = None) -> dict | None:
     }
 
 
-def save_cache(url: str, video_title: str = "", subtitle_text: str = "", source: str = "", result_json: str = "", fingerprint: str = None, part_info: str = ""):
+def save_cache(url: str, video_title: str = "", subtitle_text: str = "", source: str = "", result_json: str = "", fingerprint: str = None, part_info: str = "", platform: str = ""):
     """保存或更新 AI 结果缓存。有指纹时按指纹去重，避免同视频多 URL 产生多条记录。"""
     h = _url_hash(url)
     tz = timezone(timedelta(hours=8))
@@ -108,21 +119,21 @@ def save_cache(url: str, video_title: str = "", subtitle_text: str = "", source:
             existing = conn.execute("SELECT url_hash FROM ai_cache WHERE fingerprint = ?", (fingerprint,)).fetchone()
             if existing:
                 conn.execute(
-                    "UPDATE ai_cache SET url=?, url_hash=?, video_title=?, subtitle_text=?, source=?, result_json=?, updated_at=?, part_info=? WHERE fingerprint=?",
-                    (url, h, video_title, subtitle_text, source, result_json, now, part_info, fingerprint),
+                    "UPDATE ai_cache SET url=?, url_hash=?, video_title=?, subtitle_text=?, source=?, result_json=?, updated_at=?, part_info=?, platform=? WHERE fingerprint=?",
+                    (url, h, video_title, subtitle_text, source, result_json, now, part_info, platform, fingerprint),
                 )
                 return
         # 无指纹或指纹未命中：按 url_hash 更新/插入
         existing = conn.execute("SELECT url_hash FROM ai_cache WHERE url_hash = ?", (h,)).fetchone()
         if existing:
             conn.execute(
-                "UPDATE ai_cache SET video_title=?, subtitle_text=?, source=?, result_json=?, updated_at=?, fingerprint=COALESCE(NULLIF(?, ''), fingerprint), part_info=? WHERE url_hash=?",
-                (video_title, subtitle_text, source, result_json, now, fingerprint or '', part_info, h),
+                "UPDATE ai_cache SET video_title=?, subtitle_text=?, source=?, result_json=?, updated_at=?, fingerprint=COALESCE(NULLIF(?, ''), fingerprint), part_info=?, platform=? WHERE url_hash=?",
+                (video_title, subtitle_text, source, result_json, now, fingerprint or '', part_info, platform, h),
             )
         else:
             conn.execute(
-                "INSERT INTO ai_cache (url_hash, url, fingerprint, video_title, subtitle_text, source, result_json, part_info, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (h, url, fingerprint or '', video_title, subtitle_text, source, result_json, part_info, now, now),
+                "INSERT INTO ai_cache (url_hash, url, fingerprint, video_title, subtitle_text, source, result_json, part_info, platform, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (h, url, fingerprint or '', video_title, subtitle_text, source, result_json, part_info, platform, now, now),
             )
             conn.execute(
                 "DELETE FROM ai_cache WHERE url_hash NOT IN (SELECT url_hash FROM ai_cache ORDER BY updated_at DESC LIMIT 50)"
@@ -156,8 +167,18 @@ def list_history(limit: int = 20) -> list[dict]:
 
 
 def delete_cache(url: str, fingerprint: str = None):
-    """删除缓存：按指纹 + URL hash 双重清理。"""
+    """删除缓存：按指纹 + URL hash 双重清理，同时级联清理标签关联。"""
     h = _url_hash(url)
+    # 清理标签关联（tags/video_tags 在 knowledge.db 的 videos 表关联）
+    try:
+        from database import get_db
+        with get_db() as conn:
+            video = conn.execute("SELECT id FROM videos WHERE url = ?", (url,)).fetchone()
+            if video:
+                conn.execute("DELETE FROM video_tags WHERE video_id = ?", (video["id"],))
+                conn.execute("DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM video_tags)")
+    except Exception:
+        pass
     with sqlite3.connect(str(DB_PATH)) as conn:
         if fingerprint:
             conn.execute("DELETE FROM ai_cache WHERE fingerprint = ?", (fingerprint,))
@@ -319,3 +340,298 @@ def save_video_info_cache(url: str, info, fingerprint: str = None):
             "INSERT OR REPLACE INTO video_info_cache (url_hash, url, fingerprint, duration, title, info_json, created_at) VALUES (?,?,?,?,?,?,?)",
             (h, url, fingerprint or '', duration, title, json.dumps(info_dict, ensure_ascii=False), now),
         )
+
+
+# ──── 标签读写（复用 database.py 的 tags/video_tags 表） ────
+
+def save_tags(url: str, tags: list[str]):
+    """将标签写入 tags + video_tags 表。通过 URL 匹配 videos 表获取 video_id。"""
+    if not tags:
+        return
+    from database import get_db
+    with get_db() as conn:
+        video = conn.execute("SELECT id FROM videos WHERE url = ?", (url,)).fetchone()
+        if not video:
+            return
+        video_id = video["id"]
+        for tag_name in tags:
+            tag_name = tag_name.strip()
+            if not tag_name:
+                continue
+            conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag_name,))
+            tag_row = conn.execute("SELECT id FROM tags WHERE name = ?", (tag_name,)).fetchone()
+            if tag_row:
+                conn.execute("INSERT OR IGNORE INTO video_tags (video_id, tag_id) VALUES (?, ?)", (video_id, tag_row["id"]))
+
+
+def get_tags_for_url(url: str) -> list[str]:
+    """获取 URL 对应的标签列表。"""
+    from database import get_db
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT t.name FROM tags t
+            JOIN video_tags vt ON t.id = vt.tag_id
+            JOIN videos v ON vt.video_id = v.id
+            WHERE v.url = ?
+            ORDER BY t.name
+        """, (url,)).fetchall()
+    return [r["name"] for r in rows]
+
+
+def get_tags_for_urls(urls: list[str]) -> dict[str, list[str]]:
+    """批量获取多个 URL 的标签，返回 {url: [tag_name, ...]}。"""
+    if not urls:
+        return {}
+    from database import get_db
+    result = {u: [] for u in urls}
+    with get_db() as conn:
+        placeholders = ",".join("?" for _ in urls)
+        rows = conn.execute(f"""
+            SELECT v.url, t.name FROM tags t
+            JOIN video_tags vt ON t.id = vt.tag_id
+            JOIN videos v ON vt.video_id = v.id
+            WHERE v.url IN ({placeholders})
+            ORDER BY t.name
+        """, urls).fetchall()
+        for r in rows:
+            u = r["url"]
+            if u in result:
+                result[u].append(r["name"])
+    return result
+
+
+def get_all_tags() -> list[dict]:
+    """获取所有标签及其使用次数。"""
+    from database import get_db
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT t.id, t.name, COUNT(vt.video_id) as count
+            FROM tags t
+            LEFT JOIN video_tags vt ON t.id = vt.tag_id
+            GROUP BY t.id
+            ORDER BY count DESC, t.name
+        """).fetchall()
+    return [{"id": r["id"], "name": r["name"], "count": r["count"]} for r in rows]
+
+
+# ──── 学习历史增强（搜索/过滤/收藏/多P合并） ────
+
+def _extract_video_key(url: str) -> str:
+    """提取视频唯一标识（用于多P合并）。B站用 BV 号，其他用完整 URL 去掉 ?p=N。"""
+    bv = re.search(r'(BV\w+)', url)
+    if bv:
+        return f"bilibili:{bv.group(1)}"
+    # 其他平台：去掉 ?p=N 参数
+    return re.sub(r'[?&]p=\d+', '', url).rstrip('?&')
+
+
+def _extract_part_index(url: str) -> int:
+    """从 URL 提取分P序号，无分P返回 0。"""
+    m = re.search(r'[?&]p=(\d+)', url)
+    return int(m.group(1)) if m else 0
+
+
+def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
+                          sort: str = "newest", limit: int = 50, offset: int = 0) -> dict:
+    """增强版历史列表：支持搜索、标签过滤、平台过滤，多P视频自动合并。"""
+    from database import get_db
+    conditions = []
+    params = []
+
+    base = """
+        FROM ai_cache ac
+        LEFT JOIN videos v ON ac.url = v.url
+        LEFT JOIN video_tags vt ON v.id = vt.video_id
+        LEFT JOIN tags t ON vt.tag_id = t.id
+    """
+
+    if q:
+        conditions.append("(ac.video_title LIKE ? OR ac.result_json LIKE ?)")
+        like = f"%{q}%"
+        params.extend([like, like])
+
+    if tag:
+        conditions.append("t.name = ?")
+        params.append(tag)
+
+    if platform:
+        conditions.append("(ac.platform = ? OR v.platform = ?)")
+        params.extend([platform, platform])
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    order = "DESC" if sort == "newest" else "ASC"
+
+    with get_db() as conn:
+        rows = conn.execute(f"""
+            SELECT DISTINCT ac.url_hash, ac.url, ac.video_title, ac.result_json,
+                   ac.created_at, ac.is_favorite, ac.platform, ac.part_info,
+                   v.platform as v_platform
+            {base} {where}
+            ORDER BY ac.created_at {order}
+        """, params).fetchall()
+
+    # 批量查询所有 URL 的标签（避免 N+1 查询）
+    all_urls = list(set(row["url"] for row in rows))
+    tags_map = get_tags_for_urls(all_urls)
+
+    # 按 video_key 分组
+    groups = {}
+    group_order = []  # 保持排序顺序
+    for row in rows:
+        key = _extract_video_key(row["url"])
+        if key not in groups:
+            groups[key] = []
+            group_order.append(key)
+        groups[key].append(row)
+
+    # 构建合并后的列表
+    merged = []
+    for key in group_order:
+        parts_raw = groups[key]
+        # 按分P序号排序
+        parts_raw.sort(key=lambda r: _extract_part_index(r["url"]))
+
+        if len(parts_raw) == 1:
+            # 单条记录，直接返回
+            row = parts_raw[0]
+            item = _build_history_item(row, tags_map)
+            item["is_multipart"] = False
+            merged.append(item)
+        else:
+            # 多P合并
+            first = parts_raw[0]
+            parts_list = []
+            latest_time = first["created_at"]
+            any_favorite = False
+            for row in parts_raw:
+                try:
+                    result = json.loads(row["result_json"]) if row["result_json"] else {}
+                except json.JSONDecodeError:
+                    result = {}
+                inner = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
+                part_index = _extract_part_index(row["url"])
+                parts_list.append({
+                    "id": row["url_hash"],
+                    "url": row["url"],
+                    "part_index": part_index,
+                    "part_info": row["part_info"] if "part_info" in row.keys() else "",
+                    "summary_preview": (inner.get("summary") or "")[:100],
+                    "created_at": row["created_at"],
+                })
+                if row["created_at"] > latest_time:
+                    latest_time = row["created_at"]
+                if row["is_favorite"]:
+                    any_favorite = True
+
+            tags = tags_map.get(first["url"], [])
+            platform_name = first["platform"] or ""
+
+            merged.append({
+                "id": key,
+                "url": first["url"],
+                "video_title": first["video_title"],
+                "platform": platform_name,
+                "tags": tags,
+                "created_at": latest_time,
+                "is_favorite": any_favorite,
+                "is_multipart": True,
+                "parts_count": len(parts_list),
+                "parts": parts_list,
+            })
+
+    # 分页（基于合并后的列表）
+    total = len(merged)
+    items = merged[offset:offset + limit]
+
+    return {"total": total, "items": items}
+
+
+def _build_history_item(row, tags_map: dict = None) -> dict:
+    """从单行数据构建历史记录字典。tags_map 可传入预查询的标签映射避免 N+1 查询。"""
+    try:
+        result = json.loads(row["result_json"]) if row["result_json"] else {}
+    except json.JSONDecodeError:
+        result = {}
+    tags = tags_map.get(row["url"], []) if tags_map else get_tags_for_url(row["url"])
+    inner_result = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
+    summary_text = inner_result.get("summary") or result.get("summary") or ""
+    return {
+        "id": row["url_hash"],
+        "url": row["url"],
+        "video_title": row["video_title"] or inner_result.get("title", ""),
+        "platform": row["platform"] or "",
+        "summary_preview": summary_text[:200],
+        "tags": tags,
+        "created_at": row["created_at"],
+        "is_favorite": bool(row["is_favorite"]),
+    }
+
+
+def toggle_favorite(url_hash: str) -> bool:
+    """切换收藏状态，返回新状态。"""
+    with sqlite3.connect(str(DB_PATH)) as conn:
+        row = conn.execute("SELECT is_favorite FROM ai_cache WHERE url_hash = ?", (url_hash,)).fetchone()
+        if not row:
+            return False
+        new_val = 0 if row[0] else 1
+        conn.execute("UPDATE ai_cache SET is_favorite = ? WHERE url_hash = ?", (new_val, url_hash))
+    return bool(new_val)
+
+
+def get_learning_stats() -> dict:
+    """获取学习统计数据。"""
+    tz = timezone(timedelta(hours=8))
+    with sqlite3.connect(str(DB_PATH)) as conn:
+        total_videos = conn.execute("SELECT COUNT(*) FROM ai_cache").fetchone()[0]
+
+        # 笔记总字数（从 JSON 中提取 notes 字段）
+        total_notes_chars = 0
+        rows = conn.execute("SELECT result_json FROM ai_cache WHERE result_json != ''").fetchall()
+        for row in rows:
+            try:
+                data = json.loads(row[0])
+                notes = data.get("notes", "")
+                if not notes:
+                    inner = data.get("result", {})
+                    if isinstance(inner, dict):
+                        notes = inner.get("notes", "")
+                total_notes_chars += len(notes)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # 平均视频时长（从 video_info_cache）
+        avg_duration = conn.execute(
+            "SELECT AVG(duration) FROM video_info_cache WHERE duration > 0"
+        ).fetchone()[0] or 0
+
+        # 平台分布
+        platform_rows = conn.execute("""
+            SELECT CASE WHEN ac.platform != '' THEN ac.platform
+                        WHEN v.platform IS NOT NULL THEN v.platform
+                        ELSE 'unknown' END as p,
+                   COUNT(*) as cnt
+            FROM ai_cache ac
+            LEFT JOIN videos v ON ac.url = v.url
+            GROUP BY p
+            ORDER BY cnt DESC
+        """).fetchall()
+        platform_distribution = {r[0]: r[1] for r in platform_rows}
+
+        # 最近 7 天趋势
+        seven_days_ago = (datetime.now(tz) - timedelta(days=7)).isoformat()
+        trend_rows = conn.execute("""
+            SELECT DATE(created_at) as date, COUNT(*) as count
+            FROM ai_cache
+            WHERE created_at >= ?
+            GROUP BY DATE(created_at)
+            ORDER BY date
+        """, (seven_days_ago,)).fetchall()
+        recent_trend = [{"date": r[0], "count": r[1]} for r in trend_rows]
+
+    return {
+        "total_videos": total_videos,
+        "total_notes_chars": total_notes_chars,
+        "avg_duration_seconds": int(avg_duration),
+        "platform_distribution": platform_distribution,
+        "recent_trend": recent_trend,
+    }
