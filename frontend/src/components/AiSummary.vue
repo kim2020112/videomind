@@ -15,11 +15,11 @@ function renderMarkdown(text) {
 function renderNotesMarkdown(text) {
   if (!text) return ''
   let html = DOMPurify.sanitize(marked.parse(text), { ADD_ATTR: ['data-seconds'] })
-  // 字符串层面替换 [MM:SS] 为可点击 span（跳过 <code> 块内的）
+  // 字符串层面替换 [MM:SS] 为可点击 span（跳过 <code>/<pre>/<a> 块内的）
   html = html.replace(
-    /(<code[\s\S]*?<\/code>|<pre[\s\S]*?<\/pre>)|\[(\d{1,2}:\d{2}(?::\d{2})?)\]/g,
-    (match, codeBlock, ts) => {
-      if (codeBlock) return codeBlock
+    /(<code[\s\S]*?<\/code>|<pre[\s\S]*?<\/pre>|<a[\s\S]*?<\/a>)|\[(\d{1,2}:\d{2}(?::\d{2})?)\]/g,
+    (match, skipBlock, ts) => {
+      if (skipBlock) return skipBlock
       const parts = ts.split(':').map(Number)
       const sec = parts.length === 3 ? parts[0]*3600+parts[1]*60+parts[2] : parts[0]*60+parts[1]
       return `<span class="notes-timestamp" data-seconds="${sec}">${ts}</span>`

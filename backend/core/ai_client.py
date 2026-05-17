@@ -458,16 +458,21 @@ def _parse_segments_from_text(subtitle_text: str) -> list[dict]:
     return segments
 
 
-def inject_notes_timestamps(notes_md: str, subtitle_text: str) -> str:
+def inject_notes_timestamps(notes_md: str, subtitle_text: str, segments: list[dict] = None) -> str:
     """为笔记 section 标题注入字幕时间点。
 
     对没有 [MM:SS] 的 ## 标题，从 section 内容中提取前 100 字，
     与字幕 segments 做文本匹配，找到最相关的 segment 并注入其 start 时间。
+
+    segments 优先使用传入的精确数据（含 start/end/text），降级到从文本解析。
     """
-    if not notes_md or not subtitle_text:
+    if not notes_md:
         return notes_md
 
-    segments = _parse_segments_from_text(subtitle_text)
+    if not segments:
+        if not subtitle_text:
+            return notes_md
+        segments = _parse_segments_from_text(subtitle_text)
     if not segments:
         return notes_md
 

@@ -587,7 +587,15 @@ async def summarize_stream(req: SummarizeRequest):
 
             # 为笔记 section 注入字幕时间点
             if notes_full:
-                notes_full = inject_notes_timestamps(notes_full, subtitle_text)
+                sub_segments = None
+                try:
+                    from database import get_subtitle_from_db as _get_sub
+                    _sub = _get_sub(canonical_url)
+                    if _sub:
+                        sub_segments = _sub.get("segments")
+                except Exception:
+                    pass
+                notes_full = inject_notes_timestamps(notes_full, subtitle_text, segments=sub_segments)
 
             # ── 持久化 ──
             save_cache_json = json.dumps({

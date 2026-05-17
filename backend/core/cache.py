@@ -54,6 +54,16 @@ def _ensure_table():
             conn.execute("ALTER TABLE ai_cache ADD COLUMN platform TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass
+        try:
+            conn.execute("ALTER TABLE ai_cache ADD COLUMN notes_chars INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        # 回填已有记录的 notes_chars（只处理 notes_chars=0 的记录）
+        rows = conn.execute("SELECT url_hash, result_json FROM ai_cache WHERE notes_chars = 0 AND result_json != ''").fetchall()
+        for row in rows:
+            nc = _compute_notes_chars(row[1])
+            if nc > 0:
+                conn.execute("UPDATE ai_cache SET notes_chars = ? WHERE url_hash = ?", (nc, row[0]))
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_ai_cache_url_hash ON ai_cache(url_hash)
         """)
@@ -118,36 +128,59 @@ def get_cached(url: str, fingerprint: str = None) -> dict | None:
     }
 
 
+def _compute_notes_chars(result_json: str) -> int:
+    """从 result_json 中提取 notes 字段并计算字数。"""
+    if not result_json:
+        return 0
+    try:
+        data = json.loads(result_json)
+        notes = data.get("notes", "")
+        if not notes:
+            inner = data.get("result", {})
+            if isinstance(inner, dict):
+                notes = inner.get("notes", "")
+        return len(notes)
+    except (json.JSONDecodeError, TypeError):
+        return 0
+
+
+def _cleanup_old_cache(conn):
+    """保留最新的 50 条缓存，删除超出的旧记录。"""
+    conn.execute(
+        "DELETE FROM ai_cache WHERE url_hash NOT IN (SELECT url_hash FROM ai_cache ORDER BY updated_at DESC LIMIT 50)"
+    )
+
+
 def save_cache(url: str, video_title: str = "", subtitle_text: str = "", source: str = "", result_json: str = "", fingerprint: str = None, part_info: str = "", platform: str = ""):
     """保存或更新 AI 结果缓存。有指纹时按指纹去重，避免同视频多 URL 产生多条记录。"""
     h = _url_hash(url)
     tz = timezone(timedelta(hours=8))
     now = datetime.now(tz).isoformat()
+    nc = _compute_notes_chars(result_json)
     with sqlite3.connect(str(DB_PATH)) as conn:
         # 有指纹：先查是否已有同指纹记录
         if fingerprint:
             existing = conn.execute("SELECT url_hash FROM ai_cache WHERE fingerprint = ?", (fingerprint,)).fetchone()
             if existing:
                 conn.execute(
-                    "UPDATE ai_cache SET url=?, url_hash=?, video_title=?, subtitle_text=?, source=?, result_json=?, updated_at=?, part_info=?, platform=? WHERE fingerprint=?",
-                    (url, h, video_title, subtitle_text, source, result_json, now, part_info, platform, fingerprint),
+                    "UPDATE ai_cache SET url=?, url_hash=?, video_title=?, subtitle_text=?, source=?, result_json=?, updated_at=?, part_info=?, platform=?, notes_chars=? WHERE fingerprint=?",
+                    (url, h, video_title, subtitle_text, source, result_json, now, part_info, platform, nc, fingerprint),
                 )
+                _cleanup_old_cache(conn)
                 return
         # 无指纹或指纹未命中：按 url_hash 更新/插入
         existing = conn.execute("SELECT url_hash FROM ai_cache WHERE url_hash = ?", (h,)).fetchone()
         if existing:
             conn.execute(
-                "UPDATE ai_cache SET video_title=?, subtitle_text=?, source=?, result_json=?, updated_at=?, fingerprint=COALESCE(NULLIF(?, ''), fingerprint), part_info=?, platform=? WHERE url_hash=?",
-                (video_title, subtitle_text, source, result_json, now, fingerprint or '', part_info, platform, h),
+                "UPDATE ai_cache SET video_title=?, subtitle_text=?, source=?, result_json=?, updated_at=?, fingerprint=COALESCE(NULLIF(?, ''), fingerprint), part_info=?, platform=?, notes_chars=? WHERE url_hash=?",
+                (video_title, subtitle_text, source, result_json, now, fingerprint or '', part_info, platform, nc, h),
             )
         else:
             conn.execute(
-                "INSERT INTO ai_cache (url_hash, url, fingerprint, video_title, subtitle_text, source, result_json, part_info, platform, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (h, url, fingerprint or '', video_title, subtitle_text, source, result_json, part_info, platform, now, now),
+                "INSERT INTO ai_cache (url_hash, url, fingerprint, video_title, subtitle_text, source, result_json, part_info, platform, notes_chars, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (h, url, fingerprint or '', video_title, subtitle_text, source, result_json, part_info, platform, nc, now, now),
             )
-            conn.execute(
-                "DELETE FROM ai_cache WHERE url_hash NOT IN (SELECT url_hash FROM ai_cache ORDER BY updated_at DESC LIMIT 50)"
-            )
+        _cleanup_old_cache(conn)
 
 
 def list_history(limit: int = 20) -> list[dict]:
@@ -625,20 +658,8 @@ def get_learning_stats() -> dict:
     with sqlite3.connect(str(DB_PATH)) as conn:
         total_videos = conn.execute("SELECT COUNT(*) FROM ai_cache").fetchone()[0]
 
-        # 笔记总字数（从 JSON 中提取 notes 字段）
-        total_notes_chars = 0
-        rows = conn.execute("SELECT result_json FROM ai_cache WHERE result_json != ''").fetchall()
-        for row in rows:
-            try:
-                data = json.loads(row[0])
-                notes = data.get("notes", "")
-                if not notes:
-                    inner = data.get("result", {})
-                    if isinstance(inner, dict):
-                        notes = inner.get("notes", "")
-                total_notes_chars += len(notes)
-            except (json.JSONDecodeError, TypeError):
-                pass
+        # 笔记总字数（预计算字段直接 SUM，无需加载 JSON）
+        total_notes_chars = conn.execute("SELECT COALESCE(SUM(notes_chars), 0) FROM ai_cache").fetchone()[0]
 
         # 平均视频时长（从 video_info_cache）
         avg_duration = conn.execute(
