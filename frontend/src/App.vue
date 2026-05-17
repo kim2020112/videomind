@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick } from 'vue'
 import { useDownloader } from './composables/useDownloader.js'
 import NavBar from './components/NavBar.vue'
 import HeroSection from './components/HeroSection.vue'
@@ -7,6 +7,7 @@ import FeaturesSection from './components/FeaturesSection.vue'
 import FooterSection from './components/FooterSection.vue'
 import AiSummary from './components/AiSummary.vue'
 import HistoryPage from './components/HistoryPage.vue'
+import VideoPlayerModal from './components/VideoPlayerModal.vue'
 import { useSummary } from './composables/useSummary.js'
 import { useChat } from './composables/useChat.js'
 
@@ -51,6 +52,34 @@ const showSubtitles = ref(false)
 const showFullDescription = ref(false)
 const showChapters = ref(false)
 const currentView = ref('home') // 'home' | 'history'
+
+// 视频播放 Modal
+const showVideoModal = ref(false)
+const videoStreamUrl = ref('')
+const videoCurrentTime = ref(0)
+const videoPlayerRef = ref(null)
+
+function openVideoModal() {
+  const su = videoInfo.value?.stream_url
+  if (!su) return
+  videoStreamUrl.value = su
+  showVideoModal.value = true
+}
+
+function handleSeekVideo(seconds) {
+  if (!showVideoModal.value) {
+    openVideoModal()
+    nextTick(() => {
+      setTimeout(() => videoPlayerRef.value?.seekTo(seconds), 300)
+    })
+  } else {
+    videoPlayerRef.value?.seekTo(seconds)
+  }
+}
+
+function onVideoSeek(time) {
+  videoCurrentTime.value = time
+}
 
 function toggleHistory() {
   if (currentView.value === 'history') {
@@ -442,9 +471,9 @@ function formatTime(timestamp) {
         <!-- Video Info Card -->
         <div v-if="videoInfo" class="video-card">
           <div class="video-info">
-            <div class="video-thumbnail-wrapper">
+            <div class="video-thumbnail-wrapper" :class="{ clickable: videoInfo.stream_url }" @click="openVideoModal">
               <img v-if="videoInfo.thumbnail" :src="videoInfo.thumbnail" class="video-thumbnail" />
-              <div class="video-thumbnail-play">
+              <div v-if="videoInfo.stream_url" class="video-thumbnail-play">
                 <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
               </div>
               <span v-if="videoInfo.duration_string" class="video-thumbnail-duration">{{ videoInfo.duration_string }}</span>
@@ -485,7 +514,8 @@ function formatTime(timestamp) {
               <div
                 v-for="(ch, i) in videoInfo.chapters"
                 :key="i"
-                class="chapter-row"
+                class="chapter-row chapter-row-clickable"
+                @click="handleSeekVideo(ch.start_time)"
               >
                 <span class="chapter-time">{{ formatDuration(ch.start_time) }}</span>
                 <span class="chapter-title">{{ ch.title }}</span>
@@ -751,6 +781,8 @@ function formatTime(timestamp) {
               :onFetchSubtitle="handleFetchSubtitle"
               :onSendQuestion="handleSendQuestion"
               :onSwitchPart="switchSummarizePart"
+              :onSeekVideo="handleSeekVideo"
+              :currentVideoTime="videoCurrentTime"
             />
           </div>
         </div>
@@ -784,6 +816,15 @@ function formatTime(timestamp) {
 
     <FeaturesSection />
     <FooterSection />
+    <VideoPlayerModal
+      ref="videoPlayerRef"
+      :visible="showVideoModal"
+      :streamUrl="videoStreamUrl"
+      :videoTitle="videoInfo?.title || ''"
+      :videoUrl="videoInfo?.webpage_url || ''"
+      @close="showVideoModal = false"
+      @seek="onVideoSeek"
+    />
   </div>
 </template>
 
@@ -880,6 +921,9 @@ function formatTime(timestamp) {
   flex-shrink: 0;
   border-radius: var(--radius);
   overflow: hidden;
+}
+.video-thumbnail-wrapper.clickable {
+  cursor: pointer;
 }
 
 .video-thumbnail {
@@ -1192,6 +1236,12 @@ function formatTime(timestamp) {
 }
 .chapter-row:hover {
   background: var(--bg-card-hover);
+}
+.chapter-row-clickable {
+  cursor: pointer;
+}
+.chapter-row-clickable:hover .chapter-time {
+  color: #BFDBFE;
 }
 .chapter-time {
   font-size: 0.75rem;

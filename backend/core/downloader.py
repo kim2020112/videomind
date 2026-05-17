@@ -3,6 +3,7 @@ import uuid
 import os
 import math
 import tempfile
+import time
 from typing import Optional, Callable
 from asyncio import Queue
 
@@ -459,6 +460,32 @@ class VideoDownloader:
                 seen_langs.add(lang)
                 subtitles.append(SubtitleTrack(lang=lang, name=name, ext=ext, is_auto=True))
 
+        # 提取最佳视频流 URL 用于在线播放（合并流优先，否则降级到纯视频流）
+        stream_url = None
+        stream_expires_at = None
+        combined_fmts = [
+            f for f in raw_formats
+            if (f.get('vcodec', 'none') or 'none') != 'none'
+            and (f.get('acodec', 'none') or 'none') != 'none'
+            and f.get('url')
+        ]
+        if combined_fmts:
+            best = max(combined_fmts, key=lambda f: f.get('height') or 0)
+            stream_url = best['url']
+        else:
+            # DASH 降级：使用最佳纯视频流（无声音，但可预览画面）
+            video_only_fmts = [
+                f for f in raw_formats
+                if (f.get('vcodec', 'none') or 'none') != 'none'
+                and (f.get('acodec', 'none') or 'none') == 'none'
+                and f.get('url')
+            ]
+            if video_only_fmts:
+                best = max(video_only_fmts, key=lambda f: f.get('height') or 0)
+                stream_url = best['url']
+        if stream_url:
+            stream_expires_at = int(time.time()) + 1800
+
         return VideoInfo(
             title=title,
             webpage_url=info.get('webpage_url', url),
@@ -475,6 +502,8 @@ class VideoDownloader:
             parts=parts,
             chapters=chapters,
             subtitles=subtitles,
+            stream_url=stream_url,
+            stream_expires_at=stream_expires_at,
         )
 
     def _download_concat_parts(self, url: str, format_id: str, task_id: str, task_dir: str,

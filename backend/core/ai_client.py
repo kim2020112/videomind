@@ -438,3 +438,123 @@ def stream_flashcards(content_summary: str, video_title: str = ""):
             yield ("flashcards", [])
     except Exception as e:
         yield ("error", {"message": str(e)})
+
+
+def _parse_segments_from_text(subtitle_text: str) -> list[dict]:
+    """从带 [MM:SS] 时间戳的字幕文本中解析出 segments。"""
+    segments = []
+    for line in subtitle_text.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r'\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]\s*(.*)', line)
+        if m:
+            mm, ss = int(m.group(1)), int(m.group(2))
+            extra = int(m.group(3)) if m.group(3) else 0
+            start = mm * 60 + ss + extra
+            text = m.group(4).strip()
+            if text:
+                segments.append({'start': start, 'text': text})
+    return segments
+
+
+def inject_notes_timestamps(notes_md: str, subtitle_text: str) -> str:
+    """为笔记 section 标题注入字幕时间点。
+
+    对没有 [MM:SS] 的 ## 标题，从 section 内容中提取前 100 字，
+    与字幕 segments 做文本匹配，找到最相关的 segment 并注入其 start 时间。
+    """
+    if not notes_md or not subtitle_text:
+        return notes_md
+
+    segments = _parse_segments_from_text(subtitle_text)
+    if not segments:
+        return notes_md
+
+    lines = notes_md.split('\n')
+    result = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # 检测 ## 标题行
+        if re.match(r'^#{1,3}\s+', line) and not re.search(r'\[\d{1,2}:\d{2}(?::\d{2})?\]', line):
+            # 提取标题文本（去掉 # 前缀）
+            heading = re.sub(r'^#{1,3}\s+', '', line).strip()
+            # 收集该 section 的内容（直到下一个标题或文件结尾）
+            content_lines = []
+            j = i + 1
+            while j < len(lines) and not re.match(r'^#{1,3}\s+', lines[j]):
+                if lines[j].strip():
+                    content_lines.append(lines[j].strip())
+                j += 1
+            body_text = ' '.join(content_lines)[:200]
+
+            # 在 segments 中找最佳匹配
+            best_ts = _find_best_timestamp(heading, body_text, segments)
+            if best_ts is not None:
+                mm = int(best_ts // 60)
+                ss = int(best_ts % 60)
+                line = f"{line} [{mm:02d}:{ss:02d}]"
+
+        result.append(line)
+        i += 1
+
+    return '\n'.join(result)
+
+
+def _longest_common_substr_len(a: str, b: str) -> int:
+    """最长公共子串长度。"""
+    if not a or not b:
+        return 0
+    max_len = 0
+    for i in range(len(a)):
+        for j in range(len(b)):
+            k = 0
+            while i + k < len(a) and j + k < len(b) and a[i+k] == b[j+k]:
+                k += 1
+            if k > max_len:
+                max_len = k
+    return max_len
+
+
+def _find_best_timestamp(heading: str, body: str, segments: list[dict]) -> float | None:
+    """在 segments 中找到与 heading+body 最相关的 segment，返回其 start 时间。
+
+    优先用 heading 做长子串匹配（精确），其次用 body 做 bigram 匹配（模糊）。
+    """
+    if not segments:
+        return None
+
+    clean_heading = heading.replace(' ', '')
+    clean_body = body.replace(' ', '')
+
+    best_score = 0.0
+    best_start = None
+
+    for seg in segments:
+        seg_text = seg.get('text', '')
+        if not seg_text:
+            continue
+        clean_seg = seg_text.replace(' ', '')
+        if not clean_seg:
+            continue
+
+        # 策略1：heading 长子串匹配（权重高）
+        lcs = _longest_common_substr_len(clean_heading, clean_seg)
+        heading_score = lcs / min(len(clean_heading), len(clean_seg)) if min(len(clean_heading), len(clean_seg)) > 0 else 0
+
+        # 策略2：body bigram 匹配（补充）
+        body_score = 0.0
+        if clean_body and len(clean_body) >= 2:
+            body_bigrams = {clean_body[i:i+2] for i in range(len(clean_body) - 1)}
+            seg_bigrams = {clean_seg[i:i+2] for i in range(len(clean_seg) - 1)}
+            if body_bigrams and seg_bigrams:
+                overlap = len(body_bigrams & seg_bigrams)
+                body_score = overlap / min(len(body_bigrams), len(seg_bigrams))
+
+        score = max(heading_score * 1.5, body_score)  # heading 匹配加权
+        if score > best_score:
+            best_score = score
+            best_start = seg.get('start')
+
+    return best_start if best_score > 0.15 else None

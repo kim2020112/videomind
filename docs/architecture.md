@@ -145,6 +145,36 @@ URL → 查 ai_cache (命中→SSE重放)
     → 无字幕: 基于视频简介降级总结 / 返回400
 ```
 
+### 3.4 视频在线播放 + AI 联动
+
+```
+┌─ 播放流程 ──────────────────────────────────────────────────┐
+│  parse_info() 时从 yt-dlp formats 提取 stream_url            │
+│  → 合并流优先（vcodec+acodec），DASH 降级到纯视频流           │
+│  → stream_expires_at = now + 1800s                           │
+│  → 前端封面图点击 → VideoPlayerModal → /api/video/stream 代理  │
+│  → 播放失败 → /api/video/refresh 轻量级刷新 → 重新播放        │
+└──────────────────────────────────────────────────────────────┘
+
+┌─ 字幕联动 ──────────────────────────────────────────────────┐
+│  /api/subtitle/text 返回 segments[{start, end, text}]        │
+│  → Bilibili CC: API 直接返回 segments                        │
+│  → yt-dlp SRT/VTT/JSON3: extract_subtitle_segments() 解析    │
+│  → Whisper: 无 segments（纯文本无时间戳）                     │
+│  → segments 持久化到 DB，缓存命中时一并返回                   │
+│  → 前端: 字幕时间戳可点击 → seekTo(seconds)                   │
+│  → 前端: currentVideoTime → isActiveSegment → 高亮+自动滚动   │
+└──────────────────────────────────────────────────────────────┘
+
+┌─ 笔记联动 ──────────────────────────────────────────────────┐
+│  AI 笔记生成后 → inject_notes_timestamps(notes, subtitle)     │
+│  → 解析 section 标题 + 正文，匹配字幕段落（LCS+bigram）       │
+│  → 标题末尾注入 [MM:SS]                                      │
+│  → 前端 renderNotesMarkdown() 替换为可点击 <span>             │
+│  → 事件委托 click → onSeekVideo(seconds)                      │
+└──────────────────────────────────────────────────────────────┘
+```
+
 ## 4. API 设计
 
 ### 4.1 REST 接口
@@ -156,7 +186,9 @@ URL → 查 ai_cache (命中→SSE重放)
 | GET | `/api/thumbnail` | 缩略图代理 | `?url=...` | 图片二进制流 |
 | GET | `/api/subtitle` | 下载字幕文件 | `?url=...&lang=...&auto=false` | SRT/VTT 字幕文件 |
 | GET | `/api/subtitle/translate` | 翻译字幕 | `?url=...&lang=...&target=zh-Hans` | 翻译后的字幕文件 |
-| GET | `/api/subtitle/text` | 字幕文本提取 | `?url=...&lang=zh` | `{"text": "...", "lang": "zh", ...}` |
+| GET | `/api/subtitle/text` | 字幕文本提取 | `?url=...&lang=zh` | `{"text": "...", "lang": "zh", "segments": [...], ...}` |
+| GET | `/api/video/stream` | 视频流代理 | `?url=...` | 视频二进制流（支持 Range 请求） |
+| GET | `/api/video/refresh` | 刷新过期视频直链 | `?url=...` | `{"stream_url": "...", "stream_expires_at": ...}` |
 | POST | `/api/summarize` | AI 视频总结（同步） | `{"url": "..."}` | SummaryResult |
 | POST | `/api/summarize/stream` | AI 视频总结（SSE 流式） | `{"url": "...", "lang": "zh"}` | SSE 事件流 |
 | POST | `/api/chat/stream` | AI 问答（SSE 流式） | `{"subtitle_text": "...", "question": "...", "history": []}` | SSE 事件流 |
@@ -254,7 +286,8 @@ data: {"type": "done", "data": {}}
 - url（视频链接）
 
 **VideoInfo**：视频元数据
-- title, webpage_url, duration, thumbnail, description, uploader, view_count, extractor, formats[], parts[]
+- title, webpage_url, duration, thumbnail, description, uploader, view_count, extractor, formats[], parts[], chapters[]
+- stream_url（视频流直链，parse 时提取，30 分钟过期）, stream_expires_at（过期时间戳）
 
 **FormatOption**：格式选项
 - format_id, ext, resolution, height, fps, vcodec, acodec, filesize, is_audio_only, is_video_only, is_combined
@@ -358,6 +391,10 @@ App.vue（~1900 行，视图路由：home / history）
 | 前端组件拆分 | HistoryPage.vue 独立组件 | App.vue 2607 行过大；HistoryPage 自行管理状态，emit 通信；CSS scoped 隔离 |
 | AI SDK 端点 | Anthropic 兼容端点 (`/anthropic`) | 支持流式 MessageStream（thinking + text 双轨）；OpenAI 兼容端点无此能力 |
 | Markdown 渲染 | `marked` + `DOMPurify` + `v-html` | 轻量无框架依赖；XSS 防护；AI 输出的结构化内容可读性大幅提升 |
+| 视频在线播放 | HTML5 原生 `<video>` + 流式代理 | 不引入外部播放器库；`/api/video/stream` 代理解决 CDN Referer 限制；Range 请求支持 seek |
+| 视频流缓存 | parse_info 时提取 stream_url + 过期刷新 | 避免重复调 yt-dlp；30 分钟过期；`/api/video/refresh` 轻量级重新提取 formats |
+| 字幕 segments | extract_subtitle_segments() 从 SRT/VTT/JSON3 解析 | 所有字幕源统一返回 `{start, end, text}`；持久化到 DB；前端字幕高亮+跳转依赖精确时间 |
+| 笔记时间戳注入 | 后端确定性注入（LCS+bigram 匹配） | 不依赖 LLM 生成时间点（LLM 不准）；双策略匹配：标题 LCS（1.5x 权重）+ 正文 bigram |
 
 ## 7. 平台兼容层
 
@@ -490,7 +527,8 @@ videomind/
 │   │   ├── components/
 │   │   │   ├── NavBar.vue          # 顶部导航栏（毛玻璃效果，品牌 + 菜单 + 按钮）
 │   │   │   ├── HistoryPage.vue     # 学习历史页（搜索+标签+收藏+删除+多P折叠+语义搜索+统计，scoped CSS）
-│   │   │   ├── AiSummary.vue       # AI 总结组件（流式摘要+章节大纲+思维导图+AI 问答，Markdown 渲染，含 CJK 宽度修正）
+│   │   │   ├── AiSummary.vue       # AI 总结组件（流式摘要+章节大纲+思维导图+AI 问答，Markdown 渲染，含 CJK 宽度修正，字幕高亮同步+时间点跳转）
+│   │   │   ├── VideoPlayerModal.vue # 视频播放弹窗（HTML5 原生播放器，ESC/遮罩关闭，stream_url 过期自动刷新，timeupdate 同步字幕）
 │   │   │   ├── HeroSection.vue     # Hero 区域（深色背景 + 光晕 + 输入框 + 平台标签流）
 │   │   │   ├── FeaturesSection.vue # 特性展示（6 卡片 3 列，含 Pro 卡片）
 │   │   │   ├── FooterSection.vue   # 页脚（品牌 + 链接 + 平台列表 + 版权）

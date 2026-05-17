@@ -21,6 +21,7 @@ from core.ai_client import (
     stream_summarize, stream_chat, stream_generate_notes,
     generate_mindmap, correct_subtitle,
     stream_chunk_summaries, _split_text,
+    inject_notes_timestamps,
 )
 from config import SUBTITLE_CORRECTION_ENABLED, WHISPER_MAX_DURATION
 from core.cache import get_cached, save_cache, delete_cache, delete_whisper_cache, get_whisper_cache, save_whisper_cache, get_video_info_cache, save_video_info_cache, video_fingerprint
@@ -583,6 +584,10 @@ async def summarize_stream(req: SummarizeRequest):
                         notes_full += data.get("text", "")
             except Exception as e:
                 yield ("warn", {"message": f"笔记生成失败: {str(e)}"})
+
+            # 为笔记 section 注入字幕时间点
+            if notes_full:
+                notes_full = inject_notes_timestamps(notes_full, subtitle_text)
 
             # ── 持久化 ──
             save_cache_json = json.dumps({

@@ -4,7 +4,7 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException, Query
 import re as _re
-from core.summarizer import clean_subtitle_text, _clean_danmaku_xml, extract_bilibili_subtitle, extract_bilibili_subtitle_by_cid
+from core.summarizer import clean_subtitle_text, _clean_danmaku_xml, extract_bilibili_subtitle, extract_bilibili_subtitle_by_cid, extract_subtitle_segments
 from core.whisper import transcribe_video, is_model_available
 from core.cache import get_whisper_cache, save_whisper_cache, get_video_info_cache, save_video_info_cache, video_fingerprint
 from core.ai_client import correct_subtitle
@@ -62,6 +62,7 @@ async def get_subtitle_text(
                 cached_sub["full_text"], cached_sub["language"],
                 f"{cached_sub['language']}（{cached_sub['source']}，缓存）",
                 "txt", True,
+                cached_sub.get("segments"),
             )
 
         # 1. 优先尝试 Bilibili CC 字幕 API（多P视频按 cid 获取对应分P字幕）
@@ -87,7 +88,7 @@ async def get_subtitle_text(
             text = bilibili_sub['text']
             sub_lang = bilibili_sub['language']
             _pi = _build_part_info(url)
-            save_subtitle_to_db(url, "bilibili_cc", sub_lang, bilibili_sub['text'], part_info=_pi)
+            save_subtitle_to_db(url, "bilibili_cc", sub_lang, bilibili_sub['text'], part_info=_pi, segments=bilibili_sub.get('segments', []))
             return _build_response(
                 text, sub_lang,
                 f"{sub_lang}（{'自动生成' if bilibili_sub['subtitle_type'] == 'auto' else '人工字幕'}）",
@@ -116,14 +117,16 @@ async def get_subtitle_text(
                     )
                     if ext == 'xml' or selected.lang == 'danmaku':
                         clean_text = _clean_danmaku_xml(raw_content)
+                        segments = []
                     else:
                         clean_text = clean_subtitle_text(raw_content, ext)
+                        segments = extract_subtitle_segments(raw_content, ext)
 
                     if len(clean_text.strip()) >= 20:
                         source = "youtube_auto" if selected.is_auto else "ytdlp_native"
                         _pi = _build_part_info(url, info)
-                        save_subtitle_to_db(canonical_url, source, selected.lang, clean_text, info.title, platform, part_info=_pi)
-                        return _build_response(clean_text, selected.lang, selected.name, ext, selected.is_auto)
+                        save_subtitle_to_db(canonical_url, source, selected.lang, clean_text, info.title, platform, part_info=_pi, segments=segments)
+                        return _build_response(clean_text, selected.lang, selected.name, ext, selected.is_auto, segments)
                 except Exception as e:
                     sub_error = str(e)
 

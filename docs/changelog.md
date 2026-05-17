@@ -1,5 +1,43 @@
 # 变更记录
 
+## [2.9.0] - 2026-05-17
+
+### 新增
+
+- **视频在线播放**（`frontend/src/components/VideoPlayerModal.vue` + `backend/api/routes.py`）：
+  - 解析视频时自动提取最佳视频流 URL（`stream_url`），30 分钟过期
+  - 封面图点击打开全屏播放弹窗（HTML5 原生 `<video>`，`controls autoplay`）
+  - Bilibili DASH 视频降级支持：无合并流时使用纯视频流（无声音但可预览画面）
+  - 播放链接过期时自动调用 `/api/video/refresh` 轻量级刷新
+  - ESC 键 / 遮罩点击关闭弹窗
+  - 流式代理 `/api/video/stream`：解决 Bilibili CDN 的 Referer 403 限制，支持 Range 请求（视频 seek）
+
+- **字幕时间点跳转 + 高亮同步**（`frontend/src/components/AiSummary.vue` + `backend/core/summarizer.py` + `backend/api/subtitle_text_routes.py`）：
+  - 字幕 segments（含精确 start/end 时间）从后端传递到前端，覆盖所有字幕来源（Bilibili CC / yt-dlp SRT/VTT/JSON3）
+  - 字幕时间戳蓝色可点击，点击跳转视频对应位置
+  - 当前播放字幕自动高亮（蓝色背景）+ 自动滚动到可见区域
+  - 新增 `extract_subtitle_segments()` 函数：从 SRT/VTT/JSON3 原始内容解析 `{start, end, text}` segments
+  - segments 持久化到 `subtitles` 表的 `segments_json` 列，DB 缓存命中时一并返回
+
+- **AI 笔记时间点跳转**（`backend/core/ai_client.py` + `backend/api/stream_routes.py` + `backend/prompts/notes/v1.txt` + `frontend/src/components/AiSummary.vue`）：
+  - 笔记 section 标题自动注入 `[MM:SS]` 时间戳（后端确定性注入，不依赖 LLM 生成）
+  - 匹配策略：LCS（标题）+ bigram（正文），双重匹配取最佳对应字幕段落
+  - 前端 `renderNotesMarkdown()` 将 `[MM:SS]` 替换为 Notion 风格的可点击内联标签
+  - 事件委托处理点击，跳转视频到对应时间点
+  - Prompt 追加第 8 条要求：关键知识点附带 `[MM:SS]` 时间点
+
+- **章节标题跳转**（`frontend/src/App.vue`）：
+  - 视频章节（`videoInfo.chapters`）区域可点击，跳转视频到章节起始时间
+  - 需视频作者手动添加章节，无章节的视频不显示该区域
+
+### 变更
+
+- **VideoInfo 模型扩展**（`backend/core/models.py`）：新增 `stream_url`（视频流直链）和 `stream_expires_at`（过期时间戳）字段
+- **parse_info 提取 stream_url**（`backend/core/downloader.py`）：从 yt-dlp formats 中提取最佳视频流 URL，合并流优先，DASH 降级到纯视频流
+- **database.py segments 支持**：`save_subtitle_to_db()` 和 `get_subtitle_from_db()` 支持 `segments_json` 字段的读写
+
+---
+
 ## [2.8.0] - 2026-05-17
 
 ### 新增

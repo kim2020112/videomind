@@ -12,6 +12,30 @@ function renderMarkdown(text) {
   return DOMPurify.sanitize(marked.parse(text))
 }
 
+function renderNotesMarkdown(text) {
+  if (!text) return ''
+  let html = DOMPurify.sanitize(marked.parse(text), { ADD_ATTR: ['data-seconds'] })
+  // 字符串层面替换 [MM:SS] 为可点击 span（跳过 <code> 块内的）
+  html = html.replace(
+    /(<code[\s\S]*?<\/code>|<pre[\s\S]*?<\/pre>)|\[(\d{1,2}:\d{2}(?::\d{2})?)\]/g,
+    (match, codeBlock, ts) => {
+      if (codeBlock) return codeBlock
+      const parts = ts.split(':').map(Number)
+      const sec = parts.length === 3 ? parts[0]*3600+parts[1]*60+parts[2] : parts[0]*60+parts[1]
+      return `<span class="notes-timestamp" data-seconds="${sec}">${ts}</span>`
+    }
+  )
+  return html
+}
+
+function onNotesClick(e) {
+  const ts = e.target.closest('.notes-timestamp')
+  if (ts) {
+    const sec = parseFloat(ts.dataset.seconds)
+    if (!isNaN(sec)) props.onSeekVideo?.(sec)
+  }
+}
+
 const props = defineProps({
   result: Object,
   loading: Boolean,
@@ -43,6 +67,8 @@ const props = defineProps({
   onFetchSubtitle: Function,
   onSendQuestion: Function,
   onSwitchPart: Function,
+  onSeekVideo: Function,
+  currentVideoTime: { type: Number, default: 0 },
 })
 
 const isLimitError = computed(() => props.error && props.error.includes('免费次数'))
@@ -97,17 +123,25 @@ const hasNotes = computed(() => !!props.notesMarkdown)
 const hasSubtitle = computed(() => !!props.subtitleText)
 
 const subtitleSegments = computed(() => {
+  // 优先使用后端 segments（有精确 start/end 时间）
+  const segs = props.subtitleInfo?.segments
+  if (segs && segs.length > 0) {
+    return segs.map(s => {
+      const totalSec = Math.floor(s.start)
+      const mm = String(Math.floor(totalSec / 60)).padStart(2, '0')
+      const ss = String(totalSec % 60).padStart(2, '0')
+      return { time: `${mm}:${ss}`, seconds: s.start, end: s.end, text: s.text }
+    })
+  }
+  // 降级：从文本解析
   if (!props.subtitleText) return []
   let lines = props.subtitleText.split('\n').map(l => l.trim()).filter(l => l.length > 0)
-  // 如果只有一行（无换行），按标点或空格分段
   if (lines.length <= 1 && props.subtitleText.length > 50) {
-    // 先尝试按中文标点分段
     let split = props.subtitleText
       .replace(/([。！？；])/g, '$1\n')
       .split('\n')
       .map(l => l.trim())
       .filter(l => l.length > 0)
-    // 如果分段后每段都很长（说明标点少），按空格分段，每段约30-50字
     if (split.length <= 3) {
       const words = props.subtitleText.split(/\s+/)
       split = []
@@ -129,13 +163,27 @@ const subtitleSegments = computed(() => {
   return lines.map(line => {
     const timeMatch = line.match(/^\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\s*(.*)/)
     if (timeMatch) {
-      return { time: timeMatch[1], text: timeMatch[2] }
+      return { time: timeMatch[1], seconds: null, end: null, text: timeMatch[2] }
     }
-    return { time: null, text: line }
+    return { time: null, seconds: null, end: null, text: line }
   })
 })
 
 const hasSubtitleSegments = computed(() => subtitleSegments.value.length > 0)
+
+function isActiveSegment(seg) {
+  return seg.seconds != null && seg.end != null
+    && props.currentVideoTime >= seg.seconds
+    && props.currentVideoTime < seg.end
+}
+
+// 当前播放字幕自动滚动
+const subtitleWrapperRef = ref(null)
+watch(() => props.currentVideoTime, () => {
+  if (!subtitleWrapperRef.value) return
+  const active = subtitleWrapperRef.value.querySelector('.subtitle-segment.active')
+  if (active) active.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+})
 
 const showDownloadMenu = ref(false)
 const downloadDropdownRef = ref(null)
@@ -851,10 +899,10 @@ function downloadNotes() {
               </div>
             </div>
           </div>
-          <div class="subtitle-text-wrapper">
+          <div class="subtitle-text-wrapper" ref="subtitleWrapperRef">
             <div class="subtitle-segments">
-              <div v-for="(seg, i) in subtitleSegments" :key="i" class="subtitle-segment">
-                <span v-if="seg.time" class="subtitle-time">{{ seg.time }}</span>
+              <div v-for="(seg, i) in subtitleSegments" :key="i" class="subtitle-segment" :class="{ active: isActiveSegment(seg) }">
+                <span v-if="seg.time" class="subtitle-time" :class="{ clickable: seg.seconds != null, active: isActiveSegment(seg) }" @click="seg.seconds != null && onSeekVideo?.(seg.seconds)">{{ seg.time }}</span>
                 <span class="subtitle-line">{{ seg.text }}</span>
               </div>
             </div>
@@ -924,7 +972,7 @@ function downloadNotes() {
               <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/></svg>
             </button>
           </div>
-          <div class="notes-content prose prose-invert prose-sm max-w-none" v-html="renderMarkdown(notesMarkdown)"></div>
+          <div class="notes-content prose prose-invert prose-sm max-w-none" v-html="renderNotesMarkdown(notesMarkdown)" @click="onNotesClick"></div>
         </div>
         <div v-else class="notes-empty">笔记将在总结完成后自动生成</div>
       </div>
@@ -1156,6 +1204,21 @@ function downloadNotes() {
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
+.subtitle-time.clickable {
+  cursor: pointer;
+  color: #93C5FD;
+}
+.subtitle-time.clickable:hover {
+  color: #BFDBFE;
+}
+.subtitle-time.active {
+  color: #60A5FA;
+  font-weight: 600;
+}
+.subtitle-segment.active {
+  background: rgba(59, 130, 246, 0.08);
+  border-radius: 4px;
+}
 .subtitle-line {
   flex: 1;
   font-size: 0.875rem;
@@ -1381,6 +1444,23 @@ function downloadNotes() {
 .notes-content :deep(strong) { color: #F8FAFC; font-weight: 600; }
 .notes-content :deep(a) { color: var(--accent-blue); }
 .notes-content :deep(hr) { border-color: var(--border); margin: 1rem 0; }
+.notes-content :deep(.notes-timestamp) {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 0.375rem;
+  margin: 0 0.125rem;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border-radius: 4px;
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  color: #93C5FD;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.notes-content :deep(.notes-timestamp:hover) {
+  background: rgba(59, 130, 246, 0.25);
+}
 .notes-loading { display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 2rem; }
 .notes-empty { padding: 2rem; text-align: center; color: var(--text-muted); }
 

@@ -110,10 +110,11 @@ def get_or_create_video(url: str, title: str = "", platform: str = "") -> int:
 
 
 def get_subtitle_from_db(url: str) -> dict | None:
-    """从 subtitles 表查询已缓存的字幕文本。返回 {full_text, source, language} 或 None。"""
+    """从 subtitles 表查询已缓存的字幕文本。返回 {full_text, source, language, segments} 或 None。"""
+    import json as _json
     with get_db() as conn:
         row = conn.execute("""
-            SELECT s.full_text, s.source, s.language
+            SELECT s.full_text, s.source, s.language, s.segments_json
             FROM subtitles s
             JOIN videos v ON s.video_id = v.id
             WHERE v.url = ?
@@ -122,14 +123,21 @@ def get_subtitle_from_db(url: str) -> dict | None:
         """, (url,)).fetchone()
     if not row:
         return None
+    segments = []
+    if row["segments_json"]:
+        try:
+            segments = _json.loads(row["segments_json"])
+        except (_json.JSONDecodeError, TypeError):
+            pass
     return {
         "full_text": row["full_text"],
         "source": row["source"],
         "language": row["language"],
+        "segments": segments,
     }
 
 
-def save_subtitle_to_db(url: str, source: str, language: str, full_text: str, title: str = "", platform: str = "", part_info: str = ""):
+def save_subtitle_to_db(url: str, source: str, language: str, full_text: str, title: str = "", platform: str = "", part_info: str = "", segments: list = None):
     """将字幕文本持久化到 subtitles 表。覆盖同 URL 的旧字幕。"""
     with get_db() as conn:
         # 确保 video 记录存在
@@ -158,8 +166,10 @@ def save_subtitle_to_db(url: str, source: str, language: str, full_text: str, ti
             )
             video_id = cursor.lastrowid
         # 先删除该 video 的旧字幕，再插入
+        import json as _json
         conn.execute("DELETE FROM subtitles WHERE video_id = ?", (video_id,))
+        seg_json = _json.dumps(segments, ensure_ascii=False) if segments else None
         conn.execute(
-            "INSERT INTO subtitles (video_id, source, language, full_text) VALUES (?, ?, ?, ?)",
-            (video_id, source, language, full_text),
+            "INSERT INTO subtitles (video_id, source, language, full_text, segments_json) VALUES (?, ?, ?, ?, ?)",
+            (video_id, source, language, full_text, seg_json),
         )

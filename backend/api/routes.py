@@ -1,5 +1,5 @@
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Request
+from fastapi.responses import FileResponse, Response, StreamingResponse
 import urllib.request
 import http.client
 import uuid
@@ -90,6 +90,88 @@ async def parse_video(req: ParseRequest):
         return info
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"解析失败: {str(e)}")
+
+
+@router.get("/api/video/refresh")
+async def refresh_stream_url(url: str):
+    """刷新过期的视频直链，轻量级（仅提取 formats，不完整 parse）。"""
+    try:
+        import time as _time
+        import yt_dlp
+        url = extract_url(url)
+        ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True, 'noplaylist': True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        raw_formats = info.get('formats', [])
+        combined = [
+            f for f in raw_formats
+            if (f.get('vcodec', 'none') or 'none') != 'none'
+            and (f.get('acodec', 'none') or 'none') != 'none'
+            and f.get('url')
+        ]
+        if combined:
+            best = max(combined, key=lambda f: f.get('height') or 0)
+        else:
+            # DASH 降级：纯视频流
+            video_only = [
+                f for f in raw_formats
+                if (f.get('vcodec', 'none') or 'none') != 'none'
+                and (f.get('acodec', 'none') or 'none') == 'none'
+                and f.get('url')
+            ]
+            if not video_only:
+                return {"stream_url": None, "stream_expires_at": None}
+            best = max(video_only, key=lambda f: f.get('height') or 0)
+        return {
+            "stream_url": best['url'],
+            "stream_expires_at": int(_time.time()) + 1800,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"刷新失败: {str(e)}")
+
+
+@router.get("/api/video/stream")
+async def proxy_video_stream(url: str, request: Request):
+    """代理视频流请求，解决 Bilibili 等平台 CDN 的 Referer 限制。"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://www.bilibili.com/",
+    }
+    # 转发浏览器的 Range 请求（视频 seek 需要）
+    range_header = request.headers.get("range")
+    if range_header:
+        headers["Range"] = range_header
+
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        resp = urllib.request.urlopen(req, timeout=30)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"视频源请求失败: {str(e)}")
+
+    def stream():
+        try:
+            while True:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            resp.close()
+
+    resp_headers = {
+        "Content-Type": resp.headers.get("Content-Type", "video/mp4"),
+        "Accept-Ranges": "bytes",
+        "Access-Control-Allow-Origin": "*",
+    }
+    cl = resp.headers.get("Content-Length")
+    if cl:
+        resp_headers["Content-Length"] = cl
+    cr = resp.headers.get("Content-Range")
+    if cr:
+        resp_headers["Content-Range"] = cr
+
+    status_code = resp.status if resp.status in (200, 206) else 200
+    return StreamingResponse(stream(), status_code=status_code, headers=resp_headers)
 
 
 @router.get("/api/thumbnail")

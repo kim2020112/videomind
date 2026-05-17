@@ -82,6 +82,99 @@ def _clean_plain_text(content: str) -> str:
     return '\n'.join(texts)
 
 
+def extract_subtitle_segments(raw_content: str, ext: str) -> list[dict]:
+    """从原始字幕内容中提取带时间信息的 segments。
+    返回 [{start: float, end: float, text: str}, ...]
+    """
+    if ext == "srt":
+        return _extract_srt_segments(raw_content)
+    elif ext in ("vtt", "webvtt"):
+        return _extract_vtt_segments(raw_content)
+    elif ext in ("json3", "srv1", "srv2", "srv3"):
+        return _extract_json_segments(raw_content)
+    return []
+
+
+def _parse_ts(ts: str) -> float:
+    """解析 SRT/VTT 时间戳为秒数。支持 '00:01:23,456' 和 '00:01:23.456'。"""
+    ts = ts.strip().replace(',', '.')
+    parts = ts.split(':')
+    if len(parts) == 3:
+        h, m, s = parts
+        return int(h) * 3600 + int(m) * 60 + float(s)
+    elif len(parts) == 2:
+        m, s = parts
+        return int(m) * 60 + float(s)
+    return 0.0
+
+
+def _extract_srt_segments(content: str) -> list[dict]:
+    blocks = re.split(r'\n\s*\n', content.strip())
+    segments = []
+    for block in blocks:
+        lines = block.strip().split('\n')
+        if len(lines) < 3:
+            continue
+        ts_match = re.match(r'([\d:,.]+)\s*-->\s*([\d:,.]+)', lines[1])
+        if not ts_match:
+            continue
+        start = _parse_ts(ts_match.group(1))
+        end = _parse_ts(ts_match.group(2))
+        text = ' '.join(l.strip() for l in lines[2:] if l.strip())
+        text = re.sub(r'<[^>]+>', '', text)
+        if text:
+            segments.append({'start': start, 'end': end, 'text': text})
+    return segments
+
+
+def _extract_vtt_segments(content: str) -> list[dict]:
+    lines = content.strip().split('\n')
+    segments = []
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        ts_match = re.match(r'([\d:,.]+)\s*-->\s*([\d:,.]+)', line)
+        if ts_match:
+            start = _parse_ts(ts_match.group(1))
+            end = _parse_ts(ts_match.group(2))
+            i += 1
+            text_lines = []
+            while i < len(lines):
+                l = lines[i].strip()
+                if not l or '-->' in l:
+                    break
+                l = re.sub(r'<[^>]+>', '', l)
+                if l and not l.isdigit():
+                    text_lines.append(l)
+                i += 1
+            text = ' '.join(text_lines)
+            if text:
+                segments.append({'start': start, 'end': end, 'text': text})
+        else:
+            i += 1
+    return segments
+
+
+def _extract_json_segments(content: str) -> list[dict]:
+    try:
+        data = json.loads(content)
+        segments = []
+        for event in data.get('events', []):
+            t_start = event.get('tStartMs', 0) / 1000.0
+            duration = event.get('dDurationMs', 0) / 1000.0
+            text_parts = []
+            for seg in event.get('segs', []):
+                t = seg.get('utf8', '')
+                if t and t.strip() and t.strip() != '\n':
+                    text_parts.append(t.strip())
+            text = ' '.join(text_parts)
+            if text:
+                segments.append({'start': t_start, 'end': t_start + duration, 'text': text})
+        return segments
+    except (json.JSONDecodeError, KeyError):
+        return []
+
+
 def _clean_danmaku_xml(content: str) -> str:
     """清洗弹幕 XML，提取弹幕文本和时间戳。"""
     try:

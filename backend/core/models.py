@@ -71,6 +71,8 @@ class VideoInfo(BaseModel):
     parts: list[VideoPart] = []
     chapters: list[VideoChapter] = []
     subtitles: list[SubtitleTrack] = []
+    stream_url: Optional[str] = None
+    stream_expires_at: Optional[int] = None
 
     @field_validator('view_count', mode='before')
     @classmethod
