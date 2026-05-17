@@ -431,6 +431,38 @@ def _extract_part_index(url: str) -> int:
     return int(m.group(1)) if m else 0
 
 
+def _get_total_parts_map(urls: list[str]) -> dict[str, int]:
+    """批量查询多P视频的总分P数。返回 {url: total_parts}。"""
+    # 按 BV 号分组，每组只需查一次 video_info_cache
+    bv_urls: dict[str, list[str]] = {}
+    for url in urls:
+        bv = re.search(r'(BV\w+)', url)
+        if bv:
+            bv_urls.setdefault(bv.group(1), []).append(url)
+    if not bv_urls:
+        return {}
+    from database import get_db
+    result: dict[str, int] = {}
+    with get_db() as conn:
+        for bv, group_urls in bv_urls.items():
+            # 用任意一个分P的 URL 查 video_info_cache
+            h = _url_hash(group_urls[0])
+            row = conn.execute(
+                "SELECT info_json FROM video_info_cache WHERE url_hash = ?", (h,)
+            ).fetchone()
+            if row and row[0]:
+                try:
+                    info = json.loads(row[0])
+                    parts = info.get("parts") or []
+                    total = len(parts) if parts else 0
+                    if total > 0:
+                        for u in group_urls:
+                            result[u] = total
+                except (json.JSONDecodeError, TypeError):
+                    pass
+    return result
+
+
 def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
                           sort: str = "newest", limit: int = 50, offset: int = 0) -> dict:
     """增强版历史列表：支持搜索、标签过滤、平台过滤，多P视频自动合并。"""
@@ -473,6 +505,9 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
     # 批量查询所有 URL 的标签（避免 N+1 查询）
     all_urls = list(set(row["url"] for row in rows))
     tags_map = get_tags_for_urls(all_urls)
+
+    # 批量查询多P视频的总分P数（从 video_info_cache 的 parts 字段）
+    total_parts_map = _get_total_parts_map(all_urls)
 
     # 按 video_key 分组
     groups = {}
@@ -525,6 +560,7 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
 
             tags = tags_map.get(first["url"], [])
             platform_name = first["platform"] or ""
+            total_parts = total_parts_map.get(first["url"], 0)
 
             merged.append({
                 "id": key,
@@ -536,6 +572,7 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
                 "is_favorite": any_favorite,
                 "is_multipart": True,
                 "parts_count": len(parts_list),
+                "total_parts": total_parts,
                 "parts": parts_list,
             })
 
