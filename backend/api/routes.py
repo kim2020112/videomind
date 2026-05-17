@@ -77,6 +77,7 @@ _CDN_REFERER = {
     'xhscdn.com':       'https://www.xiaohongshu.com/',
     'hdslb.com':        'https://www.bilibili.com/',
     'bilivideo.com':    'https://www.bilibili.com/',
+    'bilibili.com':     'https://www.bilibili.com/',
     'douyinvod.com':    'https://www.douyin.com/',
     '365yg.com':        'https://www.douyin.com/',
     'amemv.com':        'https://www.douyin.com/',
@@ -84,6 +85,7 @@ _CDN_REFERER = {
     'ixigua.com':       'https://www.ixigua.com/',
     'ytimg.com':        'https://www.youtube.com/',
     'googlevideo.com':  'https://www.youtube.com/',
+    'youtube.com':      'https://www.youtube.com/',
 }
 
 
@@ -160,12 +162,17 @@ async def refresh_stream_url(url: str):
 
 
 @router.get("/api/video/stream")
-async def proxy_video_stream(url: str, request: Request):
+async def proxy_video_stream(url: str, request: Request, video_url: str = ""):
     """代理视频流请求，解决 Bilibili 等平台 CDN 的 Referer 限制。"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
-    referer = _get_cdn_referer(url)
+    # 优先用原始视频 URL 推导 Referer（CDN 域名可能不在映射表中）
+    referer = None
+    if video_url:
+        referer = _get_cdn_referer(video_url)
+    if not referer:
+        referer = _get_cdn_referer(url)
     if referer:
         headers["Referer"] = referer
     # 转发浏览器的 Range 请求（视频 seek 需要）

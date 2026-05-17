@@ -17,7 +17,11 @@ const loadError = ref(false)
 
 function toProxyUrl(rawUrl) {
   if (!rawUrl) return ''
-  return `/api/video/stream?url=${encodeURIComponent(rawUrl)}`
+  let proxy = `/api/video/stream?url=${encodeURIComponent(rawUrl)}`
+  if (props.videoUrl) {
+    proxy += `&video_url=${encodeURIComponent(props.videoUrl)}`
+  }
+  return proxy
 }
 
 watch(() => props.visible, (v) => {
