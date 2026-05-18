@@ -46,6 +46,14 @@ if _HF_ENDPOINT:
 # 任务队列
 MAX_CONCURRENT_TASKS = int(os.getenv("MAX_CONCURRENT_TASKS", "2"))
 
+# 用户体系
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")       # 空则不自动创建 admin
+REGISTRATION_ENABLED = os.getenv("REGISTRATION_ENABLED", "true").lower() == "true"
+GUEST_SECRET = os.getenv("GUEST_SECRET", "videomind-guest-2026")
+GUEST_DAILY_LIMIT = int(os.getenv("GUEST_DAILY_LIMIT", "3"))
+USER_DAILY_LIMIT = int(os.getenv("USER_DAILY_LIMIT", "20"))
+
 # 确保目录存在
 for d in [DB_PATH.parent, CHROMA_PATH, TEMP_DIR, DOWNLOAD_DIR]:
     d.mkdir(parents=True, exist_ok=True)

@@ -13,6 +13,7 @@
 - **学习历史**：自动保存每次分析结果，支持搜索、标签过滤、平台筛选、收藏、语义搜索，随时回顾已学内容
 - **智能标签**：基于规则自动提取视频标签（编程语言、AI/ML、框架等），支持按标签筛选历史
 - **视频下载**：保留原下载功能，支持多清晰度选择
+- **用户认证**：注册登录 + 游客模式，三级权限（Guest/User/Admin），按用户隔离学习历史和标签
 - **移动端适配**：响应式布局，手机浏览器可正常使用 URL 输入、AI 总结、分P选择等全部功能
 
 ## 支持平台
@@ -52,6 +53,9 @@ cd frontend && npm install
 AI_API_KEY=your_api_key
 AI_BASE_URL=https://api.deepseek.com/anthropic
 AI_MODEL=deepseek-v4-flash
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=your_admin_password
+GUEST_SECRET=random_secret_key
 ```
 
 ### 启动
@@ -76,6 +80,8 @@ cd frontend && npm run dev
           B站CC/yt-dlp    摘要/笔记/导图     SQLite + ChromaDB
                  │              │
           多P视频按P独立获取   流式 SSE 推送（渐进式生成）
+
+用户认证：Session Cookie + 游客 device_id 签名 → 三级权限隔离
 ```
 
 ## API 端点
@@ -88,10 +94,10 @@ cd frontend && npm run dev
 | `POST /api/chat/stream` | AI 问答（SSE 流式） |
 | `GET /api/videos` | 学习历史列表 |
 | `POST /api/ingest` | 保存学习记录 |
-
-## 服务器配置
-
-推荐 4C4G，50G 存储，适合个人使用。
+| `POST /api/auth/register` | 用户注册 |
+| `POST /api/auth/login` | 用户登录 |
+| `GET /api/auth/me` | 当前用户信息 |
+| `GET /api/auth/usage` | 轻量用量查询 |
 
 ## 注意事项
 

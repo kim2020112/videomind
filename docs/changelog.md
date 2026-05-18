@@ -1,5 +1,80 @@
 # 变更记录
 
+## [3.0.0] - 2026-05-18
+
+### 新增
+
+- **用户认证系统**（`backend/core/auth.py` + `backend/api/auth_routes.py` + `frontend/src/composables/useAuth.js`）：
+  - 基于 Session Cookie（`vm_session`，HttpOnly，SameSite=Lax，7 天有效期）的认证机制
+  - 注册/登录/退出/当前用户查询端点
+  - 游客体系：HMAC-SHA256 签名的 device_id，无需注册即可使用基础功能
+  - 权限矩阵：Guest（3次/天，无历史）→ User（20次/天，个人历史）→ Admin（无限制，全局）
+  - 前端 `useAuth()` composable：全局单例状态管理，自动初始化游客身份
+
+- **登录注册 UI**（`frontend/src/components/LoginModal.vue`）：
+  - 深色主题弹窗，支持登录/注册切换
+  - 用户名+密码表单，前端基础校验
+  - 登录成功后自动刷新页面状态
+
+- **用户隔离**（`backend/core/cache.py` + `backend/api/knowledge_routes.py`）：
+  - `user_history` 表：按 user_id/guest_id 隔离学习历史
+  - 标签按用户过滤：通过 `user_history → ai_cache → videos → video_tags → tags` JOIN 链实现
+  - 统计数据按用户过滤：`get_learning_stats()` 和 `get_all_tags()` 支持 user_id/guest_id 参数
+  - 管理员可查看全局数据
+
+- **轻量级用量查询端点**（`backend/api/auth_routes.py`）：
+  - `GET /api/auth/usage` — 只返回 `{used, limit, allowed}`，不返回用户信息
+  - 前端 AI 调用后通过此端点刷新用量，减少网络开销
+
+### 变更
+
+- **auth.py 统一使用 get_db()**（`backend/core/auth.py`）：
+  - 所有 DB 操作从手动 `sqlite3.connect()` 改为 `database.get_db()` 上下文管理器
+  - 自动获得 WAL 模式、事务管理、异常 rollback
+  - 删除死代码：`toggle_favorite(history_id)`、`get_user_history()`、`delete_user_history()`（API 路由使用 cache.py 版本）
+
+- **移除 get_user_by_session 冗余写入**（`backend/core/auth.py`）：
+  - 删除每次请求都更新 `last_login_at` 的逻辑，减少无效 DB 写入
+
+- **check_usage_limit 优化**（`backend/core/auth.py`）：
+  - admin 用户直接返回无限额度，避免额外查询
+  - 消除 `get_user_by_id()` 与 `get_today_usage()` 的重复查询
+
+- **get_today_usage 索引优化**（`backend/core/auth.py`）：
+  - 从 `DATE(created_at) = ?` 改为 `created_at >= ?`（当天 00:00 UTC）
+  - 可利用 `idx_usage_user_date` / `idx_usage_guest_date` 索引
+
+- **前端 fetchMe 错误处理优化**（`frontend/src/composables/useAuth.js`）：
+  - HTTP 非 200（如 401/403）时清除用户状态，不再从 localStorage 恢复过期数据
+  - 仅网络故障（catch）时降级恢复 localStorage 缓存
+
+### 修复
+
+- **crypto.randomUUID() HTTP 兼容**（`frontend/src/composables/useAuth.js`）：
+  - `crypto.randomUUID()` 在 HTTP 环境下不可用（需 HTTPS secure context）
+  - 新增 `_generateId()` 函数，HTTP 时降级为 Math.random() UUID 生成
+
+- **游客身份初始化竞态**（`frontend/src/composables/useAuth.js`）：
+  - `ensureGuestId()` 从 fire-and-forget（`.then()`）改为 `async/await`
+  - `init()` 等待 guestId 生成完毕后再调用 `fetchMe()`
+
+- **字幕时间戳缓存覆盖**（`backend/api/stream_routes.py`）：
+  - 缓存命中时原代码调用 `save_subtitle_to_db` 不带 segments，覆盖了已有时间戳数据
+  - 修复：先检查 `get_subtitle_from_db()`，存在则只更新 title/platform
+
+- **标签显示全局而非按用户**（`backend/core/cache.py`）：
+  - `get_all_tags()` 原返回所有标签，改为按 user_history 过滤
+
+- **统计数据重复计数**（`backend/core/cache.py`）：
+  - `get_learning_stats()` 的 `total_videos` 原直接查 user_history，未关联 ai_cache
+  - 孤立 user_history 记录（无对应 ai_cache）被计入，导致计数偏高
+  - 修复：JOIN ai_cache 过滤有效记录
+
+- **退出登录后停留在历史页**（`frontend/src/components/NavBar.vue`）：
+  - 退出登录后 emit `go-home` 事件，自动返回首页
+
+---
+
 ## [2.9.0] - 2026-05-17
 
 ### 新增

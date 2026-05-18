@@ -39,6 +39,7 @@
 │  │  /api/parse  /api/download  /api/health     │  │
 │  │  /api/subtitle/text  /api/summarize          │  │
 │  │  /api/summarize/stream  /api/chat/stream     │  │
+│  │  /api/auth/*  (login/register/me/usage)      │  │
 │  │  /ws/download/{task_id}  /api/files/{id}     │  │
 │  └──────────────┬─────────────────────────────┘  │
 │                 │                                   │
@@ -201,6 +202,12 @@ URL → 查 ai_cache (命中→SSE重放)
 | GET | `/api/history/stats` | 学习统计数据 | - | `{"total_videos": N, "total_notes_chars": N, ...}` |
 | GET | `/api/history/tags` | 所有标签（含使用次数） | - | `[{"name": "...", "count": N}, ...]` |
 | GET | `/api/search` | 跨视频语义搜索 | `?q=...&limit=10` | `{"results": [...], "query": "..."}` |
+| POST | `/api/auth/register` | 用户注册 | `{"username": "...", "password": "..."}` | `{"status": "ok"}` + Set-Cookie |
+| POST | `/api/auth/login` | 用户登录 | `{"username": "...", "password": "..."}` | `{"status": "ok"}` + Set-Cookie |
+| POST | `/api/auth/logout` | 退出登录 | - | `{"status": "ok"}` + 清除 Cookie |
+| GET | `/api/auth/me` | 当前用户信息 | - | `{"logged_in": true/false, "user": {...}, "usage": {...}}` |
+| GET | `/api/auth/usage` | 轻量用量查询 | - | `{"used": N, "limit": N, "allowed": true/false}` |
+| POST | `/api/auth/guest-sign` | 游客设备签名 | `{"device_id": "..."}` | `{"signature": "..."}` |
 
 ### 4.2 实时通信
 
@@ -280,7 +287,23 @@ data: {"type": "done", "data": {}}
 
 `concat_parts: true` 触发分P合并下载；`selected_parts` 为空时下载全部分P。
 
-### 4.3 数据模型
+### 4.3 数据库表
+
+| 表名 | 说明 | 关键字段 |
+|------|------|----------|
+| `videos` | 视频元数据 | id, url, title, platform, status |
+| `subtitles` | 字幕文本 | video_id, source, language, full_text, segments_json |
+| `ai_outputs` | AI 输出结果 | video_id, output_type, content |
+| `tags` / `video_tags` | 标签关联 | tag_id, video_id |
+| `users` | 用户账号 | username, password_hash, role, daily_limit, is_active |
+| `sessions` | 登录会话 | id(UUID), user_id, expires_at |
+| `usage_logs` | AI 使用记录 | user_id, guest_id, action, status, created_at |
+| `user_history` | 学习历史 | user_id, guest_id, url_hash, is_favorite |
+| `ai_cache` | AI 结果缓存 | url_hash(PK), result_json, video_title |
+| `whisper_cache` | Whisper 转录缓存 | url_hash(PK), subtitle_text, raw_text |
+| `video_info_cache` | 视频信息缓存 | url_hash(PK), duration, info_json |
+
+### 4.4 数据模型
 
 **ParseRequest**：解析请求
 - url（视频链接）
@@ -321,13 +344,28 @@ data: {"type": "done", "data": {}}
 **ChatRequest**：AI 问答请求
 - subtitle_text（字幕纯文本）, question（用户问题）, history[]（历史对话记录）
 
+**AuthRequest**：认证请求
+- username（用户名，≥2 字符）, password（密码，≥4 字符）
+
+**GuestSignRequest**：游客签名请求
+- device_id（设备标识，≥8 字符）
+
+**用户权限矩阵**：
+
+| 角色 | AI 使用限制 | 学习历史 | 标签/统计 | 典型场景 |
+|------|------------|----------|-----------|----------|
+| Guest | 3 次/天 | 无 | 无 | 未注册用户体验 |
+| User | 20 次/天 | 个人历史 | 个人数据 | 注册用户 |
+| Admin | 无限制 | 全局历史 | 全局数据 | 管理员 |
+
 > AI 总结使用 `anthropic` SDK 调用 DeepSeek 的 Anthropic 兼容端点（`https://api.deepseek.com/anthropic`），而非 OpenAI 兼容端点。
 
 ## 5. 前端组件树
 
 ```
 App.vue（~1900 行，视图路由：home / history）
-├── NavBar.vue                 # 顶部导航（毛玻璃效果，Logo + 学习历史按钮 + 返回首页）
+├── NavBar.vue                 # 顶部导航（毛玻璃效果，Logo + 学习历史按钮 + 用户菜单 + 登录按钮）
+│   └── LoginModal.vue         # 登录注册弹窗（深色主题，登录/注册切换，用户名+密码表单）
 ├── HistoryPage.vue            # 学习历史页（独立组件，自行管理状态，emit('select-item') 通知 App 跳转）
 │   ├── 统计仪表盘             # 学习视频数、笔记字数、平均时长、覆盖平台
 │   ├── 搜索栏                 # 文本搜索 + AI 语义搜索切换 + 排序/平台筛选
@@ -395,6 +433,10 @@ App.vue（~1900 行，视图路由：home / history）
 | 视频流缓存 | parse_info 时提取 stream_url + 过期刷新 | 避免重复调 yt-dlp；30 分钟过期；`/api/video/refresh` 轻量级重新提取 formats |
 | 字幕 segments | extract_subtitle_segments() 从 SRT/VTT/JSON3 解析 | 所有字幕源统一返回 `{start, end, text}`；持久化到 DB；前端字幕高亮+跳转依赖精确时间 |
 | 笔记时间戳注入 | 后端确定性注入（LCS+bigram 匹配） | 不依赖 LLM 生成时间点（LLM 不准）；双策略匹配：标题 LCS（1.5x 权重）+ 正文 bigram |
+| 用户认证 | Session Cookie + 游客 device_id 签名 | 1-5 人小规模，无需 JWT/OAuth；HttpOnly Cookie 防 XSS；游客无需注册即可体验 |
+| 用户隔离 | user_history 表 + user_id/guest_id | ai_cache 全局共享（同视频不重复处理），历史记录按用户隔离；管理员可查看全局 |
+| 数据库连接 | database.get_db() 上下文管理器 | 统一 WAL 模式、事务管理、自动 rollback；auth.py 等模块不再手动管理连接 |
+| 用量查询 | 独立 /api/auth/usage 端点 | AI 调用后只需刷新用量数字，无需拉取完整用户信息；减少网络开销 |
 
 ## 7. 平台兼容层
 
@@ -511,9 +553,14 @@ videomind/
 │   │   ├── summary_routes.py        # AI 总结路由（/api/summarize，含无字幕降级+Whisper）
 │   │   ├── stream_routes.py         # SSE 流式端点（/api/summarize/stream + /api/chat/stream，含视频缓存预检）
 │   │   ├── subtitle_text_routes.py  # 字幕文本提取端点（/api/subtitle/text，含Whisper兜底）
-│   │   └── knowledge_routes.py      # 知识管理端点（/api/history、/api/search、/api/tags，含收藏/删除/统计）
+│   │   ├── knowledge_routes.py      # 知识管理端点（/api/history、/api/search、/api/tags，含收藏/删除/统计）
+│   │   ├── auth_routes.py           # 认证路由（/api/auth/*，注册/登录/退出/me/usage/guest-sign）
+│   │   └── task_routes.py           # 异步任务路由
+│   ├── database.py                  # 数据库初始化 + get_db() 上下文管理器（WAL/事务/rollback）
+│   ├── config.py                    # 配置管理（环境变量加载）
 │   ├── core/
 │   │   ├── ...
+│   │   ├── auth.py                  # 用户认证核心（Session/密码/游客签名/使用次数统计/历史记录）
 │   │   └── tag_extractor.py         # 智能标签提取器（100+ 关键词映射 + 平台识别）
 │   ├── data/
 │   │   ├── chroma/              # ChromaDB 向量数据库
@@ -539,6 +586,7 @@ videomind/
 │   │   │   ├── DownloadHistory.vue  # 备用（当前未使用）
 │   │   │   └── HelloWorld.vue       # 备用（Vite 脚手架默认组件，当前未使用）
 │   │   └── composables/
+│   │       ├── useAuth.js          # 用户认证状态管理（登录/注册/退出/游客身份/用量查询）
 │   │       ├── useDownloader.js    # 下载 API/WebSocket 对接（核心状态管理）
 │   │       ├── useSummary.js       # AI 总结状态管理（SSE 流式接收、Markdown 渲染、字幕文本获取）
 │   │       └── useChat.js          # AI 问答状态管理（流式对话、历史记录）

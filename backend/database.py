@@ -64,6 +64,55 @@ CREATE INDEX IF NOT EXISTS idx_videos_created ON videos(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_subtitles_video ON subtitles(video_id);
 CREATE INDEX IF NOT EXISTS idx_ai_outputs_video_type ON ai_outputs(video_id, output_type);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    role TEXT DEFAULT 'user',
+    daily_limit INTEGER DEFAULT 20,
+    is_active INTEGER DEFAULT 1,
+    is_deleted INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_login_at DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS usage_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    guest_id TEXT,
+    action TEXT NOT NULL,
+    status TEXT DEFAULT 'SUCCESS',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_usage_user_date ON usage_logs(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_guest_date ON usage_logs(guest_id, created_at);
+
+CREATE TABLE IF NOT EXISTS user_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    guest_id TEXT,
+    url_hash TEXT NOT NULL,
+    url TEXT NOT NULL,
+    video_title TEXT DEFAULT '',
+    platform TEXT DEFAULT '',
+    is_favorite INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_history_user ON user_history(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_history_guest ON user_history(guest_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_history_url_hash ON user_history(url_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_history_user_url ON user_history(user_id, url_hash) WHERE user_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_history_guest_url ON user_history(guest_id, url_hash) WHERE guest_id IS NOT NULL;
 """
 
 
@@ -72,6 +121,9 @@ def get_db():
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    conn.execute("PRAGMA cache_size=10000")
     conn.execute("PRAGMA foreign_keys=ON")
     try:
         yield conn

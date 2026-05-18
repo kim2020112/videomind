@@ -1,6 +1,8 @@
 <script setup>
 import { ref } from 'vue'
+import { useAuth } from '../composables/useAuth.js'
 
+const { getAuthHeaders } = useAuth()
 const emit = defineEmits(['select-item'])
 
 const historySearchQuery = ref('')
@@ -30,10 +32,11 @@ async function fetchHistoryPage() {
     params.set('limit', '12')
     params.set('offset', '0')
 
+    const authH = getAuthHeaders()
     const [historyRes, tagsRes, statsRes] = await Promise.all([
-      fetch(`/api/history?${params}`),
-      fetch('/api/history/tags'),
-      fetch('/api/history/stats'),
+      fetch(`/api/history?${params}`, { headers: authH }),
+      fetch('/api/history/tags', { headers: authH }),
+      fetch('/api/history/stats', { headers: authH }),
     ])
 
     if (historyRes.ok) {
@@ -60,7 +63,7 @@ async function loadMoreHistory() {
     params.set('limit', '12')
     params.set('offset', String(historyItems.value.length))
 
-    const res = await fetch(`/api/history?${params}`)
+    const res = await fetch(`/api/history?${params}`, { headers: getAuthHeaders() })
     if (res.ok) {
       const data = await res.json()
       historyItems.value.push(...(data.items || []))
@@ -113,7 +116,7 @@ async function toggleFavorite(item) {
   try {
     const targetId = item.is_multipart ? item.parts[0]?.id : item.id
     if (!targetId) return
-    const res = await fetch(`/api/history/${targetId}/favorite`, { method: 'POST' })
+    const res = await fetch(`/api/history/${targetId}/favorite`, { method: 'POST', headers: getAuthHeaders() })
     if (res.ok) {
       const data = await res.json()
       item.is_favorite = data.is_favorite
@@ -126,7 +129,8 @@ async function deleteHistoryItem(item) {
     if (!confirm(`确定删除「${item.video_title}」的全部 ${item.parts_count} 个分P？`)) return
     try {
       deletingHistoryId.value = item.id
-      await Promise.all(item.parts.map(p => fetch(`/api/history/${p.id}`, { method: 'DELETE' })))
+      const authH = getAuthHeaders()
+      await Promise.all(item.parts.map(p => fetch(`/api/history/${p.id}`, { method: 'DELETE', headers: authH })))
       historyItems.value = historyItems.value.filter(h => h.id !== item.id)
     } catch { alert('删除失败，请稍后重试') } finally {
       deletingHistoryId.value = null
@@ -136,7 +140,7 @@ async function deleteHistoryItem(item) {
   if (!confirm(`确定删除「${item.video_title}」？`)) return
   try {
     deletingHistoryId.value = item.id
-    await fetch(`/api/history/${item.id}`, { method: 'DELETE' })
+    await fetch(`/api/history/${item.id}`, { method: 'DELETE', headers: getAuthHeaders() })
     historyItems.value = historyItems.value.filter(h => h.id !== item.id)
   } catch { alert('删除失败，请稍后重试') } finally {
     deletingHistoryId.value = null

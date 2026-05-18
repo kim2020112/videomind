@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Request
 from typing import Optional
 from database import get_db
 from core.cache import list_history_enhanced, toggle_favorite, get_learning_stats, get_all_tags, delete_cache
 from core.vectorstore import query_chunks
+from api.auth_routes import get_identity
 
 router = APIRouter(prefix="/api", tags=["knowledge"])
 
@@ -87,6 +88,7 @@ async def list_tags():
 
 @router.get("/history")
 async def list_history(
+    request: Request,
     q: Optional[str] = None,
     tag: Optional[str] = None,
     platform: Optional[str] = None,
@@ -94,38 +96,57 @@ async def list_history(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    """学习历史列表：支持搜索、标签过滤、平台过滤。"""
-    return list_history_enhanced(q=q, tag=tag, platform=platform, sort=sort, limit=limit, offset=offset)
+    """学习历史列表：支持搜索、标签过滤、平台过滤。按用户隔离。"""
+    identity = get_identity(request)
+    return list_history_enhanced(
+        q=q, tag=tag, platform=platform, sort=sort, limit=limit, offset=offset,
+        user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+        role=identity.get("role"),
+    )
 
 
 @router.post("/history/{url_hash}/favorite")
-async def toggle_favorite_endpoint(url_hash: str):
-    """切换收藏状态。"""
-    new_state = toggle_favorite(url_hash)
+async def toggle_favorite_endpoint(url_hash: str, request: Request):
+    """切换收藏状态。按用户隔离。"""
+    identity = get_identity(request)
+    new_state = toggle_favorite(url_hash, user_id=identity.get("user_id"), guest_id=identity.get("guest_id"))
     return {"is_favorite": new_state}
 
 
 @router.delete("/history/{url_hash}")
-async def delete_history(url_hash: str):
-    """删除学习历史记录。"""
+async def delete_history(url_hash: str, request: Request):
+    """删除学习历史记录。按用户隔离。"""
+    identity = get_identity(request)
     with get_db() as conn:
-        row = conn.execute("SELECT url FROM ai_cache WHERE url_hash = ?", (url_hash,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="记录不存在")
-        delete_cache(row[0])
+        # 先从 user_history 删除该用户的记录
+        if identity.get("user_id"):
+            conn.execute(
+                "DELETE FROM user_history WHERE url_hash = ? AND user_id = ?",
+                (url_hash, identity["user_id"]),
+            )
+        elif identity.get("guest_id"):
+            conn.execute(
+                "DELETE FROM user_history WHERE url_hash = ? AND guest_id = ?",
+                (url_hash, identity["guest_id"]),
+            )
     return {"ok": True}
 
 
 @router.get("/history/stats")
-async def get_stats():
-    """学习统计数据。"""
-    return get_learning_stats()
+async def get_stats(request: Request):
+    """学习统计数据。按用户过滤。"""
+    identity = get_identity(request)
+    return get_learning_stats(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"), role=identity.get("role"))
 
 
 @router.get("/history/tags")
-async def list_history_tags():
-    """获取所有标签（含使用次数）。"""
-    return get_all_tags()
+async def list_history_tags(request: Request):
+    """获取标签（含使用次数）。按用户隔离。"""
+    identity = get_identity(request)
+    return get_all_tags(
+        user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+        role=identity.get("role"),
+    )
 
 
 # ──── 全局知识搜索 ────

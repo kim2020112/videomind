@@ -1,8 +1,10 @@
 import { ref } from 'vue'
+import { useAuth } from './useAuth.js'
 
 const API_BASE = '/api'
 
 export function useSummary() {
+  const { getAuthHeaders, refreshUsage } = useAuth()
   const summaryResult = ref(null)
   const isSummarizing = ref(false)
   const summarizeError = ref('')
@@ -75,7 +77,7 @@ export function useSummary() {
 
       const response = await fetch(`${API_BASE}/summarize/stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify(body),
       })
 
@@ -159,6 +161,7 @@ export function useSummary() {
     } finally {
       isSummarizing.value = false
       regeneratingMode.value = ''
+      refreshUsage()
     }
   }
 

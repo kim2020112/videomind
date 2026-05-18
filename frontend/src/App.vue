@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed, nextTick, onMounted } from 'vue'
 import { useDownloader } from './composables/useDownloader.js'
 import NavBar from './components/NavBar.vue'
 import HeroSection from './components/HeroSection.vue'
@@ -10,6 +10,10 @@ import HistoryPage from './components/HistoryPage.vue'
 import VideoPlayerModal from './components/VideoPlayerModal.vue'
 import { useSummary } from './composables/useSummary.js'
 import { useChat } from './composables/useChat.js'
+import { useAuth } from './composables/useAuth.js'
+
+const { init: initAuth } = useAuth()
+onMounted(() => initAuth())
 
 const {
   videoInfo,

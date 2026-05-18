@@ -16,11 +16,15 @@ from api.stream_routes import router as stream_router
 from api.task_routes import router as task_router
 from api.knowledge_routes import router as knowledge_router
 from api.ai_routes import router as ai_router
+from api.auth_routes import router as auth_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    from core.auth import ensure_admin, cleanup_expired_sessions
+    ensure_admin()
+    cleanup_expired_sessions()
     print(f"[启动] 下载目录: {DOWNLOAD_DIR}")
     print(f"[启动] 临时目录: {TEMP_DIR}")
     print(f"[启动] API 文档: http://localhost:8000/docs")
@@ -49,6 +53,7 @@ app.include_router(stream_router)
 app.include_router(task_router)
 app.include_router(knowledge_router)
 app.include_router(ai_router)
+app.include_router(auth_router)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIST = os.path.join(os.path.dirname(BASE_DIR), "frontend", "dist")
@@ -65,6 +70,5 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=8000,
-        reload=True,
         log_level="info",
     )

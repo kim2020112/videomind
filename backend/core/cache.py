@@ -8,6 +8,17 @@ import time
 from datetime import datetime, timezone, timedelta
 from config import DB_PATH
 
+
+def _conn():
+    """创建带优化 pragmas 的 SQLite 连接。"""
+    c = sqlite3.connect(str(DB_PATH))
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA synchronous=NORMAL")
+    c.execute("PRAGMA temp_store=MEMORY")
+    c.execute("PRAGMA cache_size=10000")
+    c.execute("PRAGMA foreign_keys=ON")
+    return c
+
 _initialized = False
 
 
@@ -23,7 +34,7 @@ def video_fingerprint(extractor: str, video_id: str) -> str:
 # ──── AI 缓存 ────
 
 def _ensure_table():
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with _conn() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS ai_cache (
                 url_hash TEXT PRIMARY KEY,
@@ -92,7 +103,7 @@ def get_cached(url: str, fingerprint: str = None) -> dict | None:
     tz = timezone(timedelta(hours=8))
     # 多P视频（URL 含 ?p=N）跳过指纹匹配，避免不同分P命中同一缓存
     is_multipart = bool(re.search(r'[?&]p=\d+', url))
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with _conn() as conn:
         row = None
         # 指纹优先（多P视频跳过）
         if fingerprint and not is_multipart:
@@ -103,10 +114,16 @@ def get_cached(url: str, fingerprint: str = None) -> dict | None:
             # 同视频但不同 URL：更新 url_hash 映射
             if row:
                 old_url = row[0]
-                if _url_hash(old_url) != h:
+                old_h = _url_hash(old_url)
+                if old_h != h:
                     conn.execute(
                         "UPDATE ai_cache SET url = ?, url_hash = ?, updated_at = ? WHERE fingerprint = ?",
                         (url, h, datetime.now(tz).isoformat(), fingerprint),
+                    )
+                    # 同步更新 user_history 中引用旧 url_hash 的记录，避免其他用户历史丢失
+                    conn.execute(
+                        "UPDATE user_history SET url_hash = ?, url = ? WHERE url_hash = ?",
+                        (h, url, old_h),
                     )
         # URL hash 兜底
         if not row:
@@ -157,7 +174,7 @@ def save_cache(url: str, video_title: str = "", subtitle_text: str = "", source:
     tz = timezone(timedelta(hours=8))
     now = datetime.now(tz).isoformat()
     nc = _compute_notes_chars(result_json)
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with _conn() as conn:
         # 有指纹：先查是否已有同指纹记录
         if fingerprint:
             existing = conn.execute("SELECT url_hash FROM ai_cache WHERE fingerprint = ?", (fingerprint,)).fetchone()
@@ -185,7 +202,7 @@ def save_cache(url: str, video_title: str = "", subtitle_text: str = "", source:
 
 def list_history(limit: int = 20) -> list[dict]:
     """列出历史学习记录。"""
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with _conn() as conn:
         rows = conn.execute(
             "SELECT url, video_title, source, result_json, part_info, created_at FROM ai_cache ORDER BY updated_at DESC LIMIT ?",
             (limit,),
@@ -222,7 +239,7 @@ def delete_cache(url: str, fingerprint: str = None):
                 conn.execute("DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM video_tags)")
     except Exception:
         pass
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with _conn() as conn:
         if fingerprint:
             conn.execute("DELETE FROM ai_cache WHERE fingerprint = ?", (fingerprint,))
         conn.execute("DELETE FROM ai_cache WHERE url_hash = ?", (h,))
@@ -231,7 +248,7 @@ def delete_cache(url: str, fingerprint: str = None):
 def delete_whisper_cache(url: str, fingerprint: str = None):
     """删除 Whisper 缓存。"""
     h = _url_hash(url)
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with _conn() as conn:
         if fingerprint:
             conn.execute("DELETE FROM whisper_cache WHERE fingerprint = ?", (fingerprint,))
         conn.execute("DELETE FROM whisper_cache WHERE url_hash = ?", (h,))
@@ -240,7 +257,7 @@ def delete_whisper_cache(url: str, fingerprint: str = None):
 # ──── Whisper 转录缓存 ────
 
 def _ensure_whisper_table():
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with _conn() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS whisper_cache (
                 url_hash TEXT PRIMARY KEY,
@@ -265,7 +282,7 @@ def _ensure_whisper_table():
 def get_whisper_cache(url: str, fingerprint: str = None) -> str | None:
     """获取缓存的 Whisper 转录文本（校正后）。先指纹，再 URL。"""
     h = _url_hash(url)
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with _conn() as conn:
         if fingerprint:
             row = conn.execute(
                 "SELECT subtitle_text FROM whisper_cache WHERE fingerprint = ?",
@@ -285,7 +302,7 @@ def save_whisper_cache(url: str, subtitle_text: str, language: str = "", raw_tex
     h = _url_hash(url)
     tz = timezone(timedelta(hours=8))
     now = datetime.now(tz).isoformat()
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with _conn() as conn:
         if fingerprint:
             existing = conn.execute("SELECT url_hash FROM whisper_cache WHERE fingerprint = ?", (fingerprint,)).fetchone()
             if existing:
@@ -303,7 +320,7 @@ def save_whisper_cache(url: str, subtitle_text: str, language: str = "", raw_tex
 # ──── 视频信息缓存（避免重复 yt-dlp 解析） ────
 
 def _ensure_video_info_table():
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with _conn() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS video_info_cache (
                 url_hash TEXT PRIMARY KEY,
@@ -325,7 +342,7 @@ def get_video_info_cache(url: str, fingerprint: str = None) -> dict | None:
     """获取缓存的视频基本信息。先指纹，再 URL。"""
     h = _url_hash(url)
     is_multipart = bool(re.search(r'[?&]p=\d+', url))
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with _conn() as conn:
         if fingerprint and not is_multipart:
             row = conn.execute(
                 "SELECT duration, title, info_json FROM video_info_cache WHERE fingerprint = ?",
@@ -364,7 +381,7 @@ def save_video_info_cache(url: str, info, fingerprint: str = None):
     duration = info_dict.get("duration") or 0
     title = info_dict.get("title") or ""
 
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with _conn() as conn:
         if fingerprint:
             existing = conn.execute("SELECT url_hash FROM video_info_cache WHERE fingerprint = ?", (fingerprint,)).fetchone()
             if existing:
@@ -437,17 +454,45 @@ def get_tags_for_urls(urls: list[str]) -> dict[str, list[str]]:
     return result
 
 
-def get_all_tags() -> list[dict]:
-    """获取所有标签及其使用次数。"""
+def get_all_tags(user_id: int = None, guest_id: str = None, role: str = "guest") -> list[dict]:
+    """获取标签及其使用次数。Admin 看全局，普通用户只看自己的。"""
     from database import get_db
+    is_admin = (role == "admin")
     with get_db() as conn:
-        rows = conn.execute("""
-            SELECT t.id, t.name, COUNT(vt.video_id) as count
-            FROM tags t
-            LEFT JOIN video_tags vt ON t.id = vt.tag_id
-            GROUP BY t.id
-            ORDER BY count DESC, t.name
-        """).fetchall()
+        if is_admin:
+            rows = conn.execute("""
+                SELECT t.id, t.name, COUNT(vt.video_id) as count
+                FROM tags t
+                LEFT JOIN video_tags vt ON t.id = vt.tag_id
+                GROUP BY t.id
+                ORDER BY count DESC, t.name
+            """).fetchall()
+        elif user_id:
+            rows = conn.execute("""
+                SELECT t.id, t.name, COUNT(DISTINCT vt.video_id) as count
+                FROM user_history uh
+                JOIN ai_cache ac ON uh.url_hash = ac.url_hash
+                JOIN videos v ON ac.url = v.url
+                JOIN video_tags vt ON v.id = vt.video_id
+                JOIN tags t ON vt.tag_id = t.id
+                WHERE uh.user_id = ?
+                GROUP BY t.id
+                ORDER BY count DESC, t.name
+            """, (user_id,)).fetchall()
+        elif guest_id:
+            rows = conn.execute("""
+                SELECT t.id, t.name, COUNT(DISTINCT vt.video_id) as count
+                FROM user_history uh
+                JOIN ai_cache ac ON uh.url_hash = ac.url_hash
+                JOIN videos v ON ac.url = v.url
+                JOIN video_tags vt ON v.id = vt.video_id
+                JOIN tags t ON vt.tag_id = t.id
+                WHERE uh.guest_id = ?
+                GROUP BY t.id
+                ORDER BY count DESC, t.name
+            """, (guest_id,)).fetchall()
+        else:
+            return []
     return [{"id": r["id"], "name": r["name"], "count": r["count"]} for r in rows]
 
 
@@ -500,19 +545,55 @@ def _get_total_parts_map(urls: list[str]) -> dict[str, int]:
     return result
 
 
+def add_history(user_id: int = None, guest_id: str = None,
+                url_hash: str = "", url: str = "",
+                title: str = "", platform: str = ""):
+    """写入 user_history 记录。"""
+    with _conn() as conn:
+        conn.execute(
+            "INSERT INTO user_history (user_id, guest_id, url_hash, url, video_title, platform) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, guest_id, url_hash, url, title, platform),
+        )
+
+
 def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
-                          sort: str = "newest", limit: int = 50, offset: int = 0) -> dict:
-    """增强版历史列表：支持搜索、标签过滤、平台过滤，多P视频自动合并。"""
+                          sort: str = "newest", limit: int = 50, offset: int = 0,
+                          user_id: int = None, guest_id: str = None,
+                          role: str = "guest") -> dict:
+    """增强版历史列表：支持搜索、标签过滤、平台过滤，多P视频自动合并。按用户隔离。Admin 看全局。"""
     from database import get_db
     conditions = []
     params = []
 
-    base = """
-        FROM ai_cache ac
-        LEFT JOIN videos v ON ac.url = v.url
-        LEFT JOIN video_tags vt ON v.id = vt.video_id
-        LEFT JOIN tags t ON vt.tag_id = t.id
-    """
+    is_admin = (role == "admin")
+
+    if is_admin:
+        # Admin：直接查 ai_cache 全局数据
+        base = """
+            FROM ai_cache ac
+            LEFT JOIN videos v ON ac.url = v.url
+            LEFT JOIN video_tags vt ON v.id = vt.video_id
+            LEFT JOIN tags t ON vt.tag_id = t.id
+        """
+    else:
+        # 普通用户/游客：从 user_history 出发 JOIN ai_cache
+        base = """
+            FROM user_history uh
+            JOIN ai_cache ac ON uh.url_hash = ac.url_hash
+            LEFT JOIN videos v ON ac.url = v.url
+            LEFT JOIN video_tags vt ON v.id = vt.video_id
+            LEFT JOIN tags t ON vt.tag_id = t.id
+        """
+        # 用户过滤
+        if user_id:
+            conditions.append("uh.user_id = ?")
+            params.append(user_id)
+        elif guest_id:
+            conditions.append("uh.guest_id = ?")
+            params.append(guest_id)
+        else:
+            # 无身份信息，返回空
+            return {"total": 0, "items": []}
 
     if q:
         conditions.append("(ac.video_title LIKE ? OR ac.result_json LIKE ?)")
@@ -531,13 +612,22 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
     order = "DESC" if sort == "newest" else "ASC"
 
     with get_db() as conn:
-        rows = conn.execute(f"""
-            SELECT DISTINCT ac.url_hash, ac.url, ac.video_title, ac.result_json,
-                   ac.created_at, ac.is_favorite, ac.platform, ac.part_info,
-                   v.platform as v_platform
-            {base} {where}
-            ORDER BY ac.created_at {order}
-        """, params).fetchall()
+        if is_admin:
+            rows = conn.execute(f"""
+                SELECT DISTINCT ac.url_hash, ac.url, ac.video_title, ac.result_json,
+                       ac.created_at, ac.is_favorite, ac.platform, ac.part_info,
+                       v.platform as v_platform
+                {base} {where}
+                ORDER BY ac.created_at {order}
+            """, params).fetchall()
+        else:
+            rows = conn.execute(f"""
+                SELECT DISTINCT ac.url_hash, ac.url, ac.video_title, ac.result_json,
+                       uh.created_at, uh.is_favorite, ac.platform, ac.part_info,
+                       v.platform as v_platform
+                {base} {where}
+                ORDER BY uh.created_at {order}
+            """, params).fetchall()
 
     # 批量查询所有 URL 的标签（避免 N+1 查询）
     all_urls = list(set(row["url"] for row in rows))
@@ -641,53 +731,190 @@ def _build_history_item(row, tags_map: dict = None) -> dict:
     }
 
 
-def toggle_favorite(url_hash: str) -> bool:
-    """切换收藏状态，返回新状态。"""
-    with sqlite3.connect(str(DB_PATH)) as conn:
-        row = conn.execute("SELECT is_favorite FROM ai_cache WHERE url_hash = ?", (url_hash,)).fetchone()
+def toggle_favorite(url_hash: str, user_id: int = None, guest_id: str = None) -> bool:
+    """切换收藏状态（基于 user_history），返回新状态。"""
+    with _conn() as conn:
+        if user_id:
+            row = conn.execute(
+                "SELECT is_favorite FROM user_history WHERE url_hash = ? AND user_id = ?",
+                (url_hash, user_id),
+            ).fetchone()
+        elif guest_id:
+            row = conn.execute(
+                "SELECT is_favorite FROM user_history WHERE url_hash = ? AND guest_id = ?",
+                (url_hash, guest_id),
+            ).fetchone()
+        else:
+            return False
         if not row:
             return False
         new_val = 0 if row[0] else 1
-        conn.execute("UPDATE ai_cache SET is_favorite = ? WHERE url_hash = ?", (new_val, url_hash))
+        if user_id:
+            conn.execute(
+                "UPDATE user_history SET is_favorite = ? WHERE url_hash = ? AND user_id = ?",
+                (new_val, url_hash, user_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE user_history SET is_favorite = ? WHERE url_hash = ? AND guest_id = ?",
+                (new_val, url_hash, guest_id),
+            )
     return bool(new_val)
 
 
-def get_learning_stats() -> dict:
-    """获取学习统计数据。"""
+def get_learning_stats(user_id: int = None, guest_id: str = None, role: str = "guest") -> dict:
+    """获取学习统计数据。按用户过滤。Admin 看全局，无身份返回空。"""
     tz = timezone(timedelta(hours=8))
-    with sqlite3.connect(str(DB_PATH)) as conn:
-        total_videos = conn.execute("SELECT COUNT(*) FROM ai_cache").fetchone()[0]
+    is_admin = (role == "admin")
 
-        # 笔记总字数（预计算字段直接 SUM，无需加载 JSON）
-        total_notes_chars = conn.execute("SELECT COALESCE(SUM(notes_chars), 0) FROM ai_cache").fetchone()[0]
+    # 无身份：返回空统计
+    if not is_admin and not user_id and not guest_id:
+        return {
+            "total_videos": 0,
+            "total_notes_chars": 0,
+            "avg_duration_seconds": 0,
+            "platform_distribution": {},
+            "recent_trend": [],
+        }
 
-        # 平均视频时长（从 video_info_cache）
-        avg_duration = conn.execute(
-            "SELECT AVG(duration) FROM video_info_cache WHERE duration > 0"
-        ).fetchone()[0] or 0
+    with _conn() as conn:
+        if is_admin:
+            total_videos = conn.execute("SELECT COUNT(*) FROM ai_cache").fetchone()[0]
+        elif user_id:
+            total_videos = conn.execute(
+                "SELECT COUNT(*) FROM user_history uh JOIN ai_cache ac ON uh.url_hash = ac.url_hash WHERE uh.user_id = ?", (user_id,)
+            ).fetchone()[0]
+        else:
+            total_videos = conn.execute(
+                "SELECT COUNT(*) FROM user_history uh JOIN ai_cache ac ON uh.url_hash = ac.url_hash WHERE uh.guest_id = ?", (guest_id,)
+            ).fetchone()[0]
+
+        # 笔记总字数
+        if is_admin:
+            total_notes_chars = conn.execute("SELECT COALESCE(SUM(notes_chars), 0) FROM ai_cache").fetchone()[0]
+        elif user_id:
+            total_notes_chars = conn.execute("""
+                SELECT COALESCE(SUM(ac.notes_chars), 0)
+                FROM user_history uh JOIN ai_cache ac ON uh.url_hash = ac.url_hash
+                WHERE uh.user_id = ?
+            """, (user_id,)).fetchone()[0]
+        else:
+            total_notes_chars = conn.execute("""
+                SELECT COALESCE(SUM(ac.notes_chars), 0)
+                FROM user_history uh JOIN ai_cache ac ON uh.url_hash = ac.url_hash
+                WHERE uh.guest_id = ?
+            """, (guest_id,)).fetchone()[0]
+
+        # 平均视频时长（去重：同一多P视频只算一次）
+        # 用 BV 号去重 bilibili，其他用 URL 去 query string + 去尾斜杠
+        def _video_key(url):
+            bv = re.search(r'(BV\w+)', url)
+            if bv:
+                return bv.group(1)
+            q = url.split('?')[0].rstrip('/')
+            return q
+
+        if is_admin:
+            urls_with_dur = conn.execute("""
+                SELECT ac.url, MIN(vic.duration) as duration
+                FROM ai_cache ac
+                JOIN video_info_cache vic ON ac.url = vic.url
+                WHERE vic.duration > 0
+                GROUP BY ac.url
+            """).fetchall()
+        elif user_id:
+            urls_with_dur = conn.execute("""
+                SELECT ac.url, MIN(vic.duration) as duration
+                FROM user_history uh
+                JOIN ai_cache ac ON uh.url_hash = ac.url_hash
+                JOIN video_info_cache vic ON ac.url = vic.url
+                WHERE uh.user_id = ? AND vic.duration > 0
+                GROUP BY ac.url
+            """, (user_id,)).fetchall()
+        else:
+            urls_with_dur = conn.execute("""
+                SELECT ac.url, MIN(vic.duration) as duration
+                FROM user_history uh
+                JOIN ai_cache ac ON uh.url_hash = ac.url_hash
+                JOIN video_info_cache vic ON ac.url = vic.url
+                WHERE uh.guest_id = ? AND vic.duration > 0
+                GROUP BY ac.url
+            """, (guest_id,)).fetchall()
+
+        # 按 video_key 去重，取每个视频的最小时长（避免重复计数）
+        seen = {}
+        for row in urls_with_dur:
+            key = _video_key(row[0])
+            if key not in seen or row[1] < seen[key]:
+                seen[key] = row[1]
+        avg_duration = sum(seen.values()) / len(seen) if seen else 0
 
         # 平台分布
-        platform_rows = conn.execute("""
-            SELECT CASE WHEN ac.platform != '' THEN ac.platform
-                        WHEN v.platform IS NOT NULL THEN v.platform
-                        ELSE 'unknown' END as p,
-                   COUNT(*) as cnt
-            FROM ai_cache ac
-            LEFT JOIN videos v ON ac.url = v.url
-            GROUP BY p
-            ORDER BY cnt DESC
-        """).fetchall()
+        if is_admin:
+            platform_rows = conn.execute("""
+                SELECT CASE WHEN ac.platform != '' THEN ac.platform
+                            WHEN v.platform IS NOT NULL THEN v.platform
+                            ELSE 'unknown' END as p,
+                       COUNT(*) as cnt
+                FROM ai_cache ac
+                LEFT JOIN videos v ON ac.url = v.url
+                GROUP BY p
+                ORDER BY cnt DESC
+            """).fetchall()
+        elif user_id:
+            platform_rows = conn.execute("""
+                SELECT CASE WHEN ac.platform != '' THEN ac.platform
+                            WHEN v.platform IS NOT NULL THEN v.platform
+                            ELSE 'unknown' END as p,
+                       COUNT(*) as cnt
+                FROM user_history uh
+                JOIN ai_cache ac ON uh.url_hash = ac.url_hash
+                LEFT JOIN videos v ON ac.url = v.url
+                WHERE uh.user_id = ?
+                GROUP BY p
+                ORDER BY cnt DESC
+            """, (user_id,)).fetchall()
+        else:
+            platform_rows = conn.execute("""
+                SELECT CASE WHEN ac.platform != '' THEN ac.platform
+                            WHEN v.platform IS NOT NULL THEN v.platform
+                            ELSE 'unknown' END as p,
+                       COUNT(*) as cnt
+                FROM user_history uh
+                JOIN ai_cache ac ON uh.url_hash = ac.url_hash
+                LEFT JOIN videos v ON ac.url = v.url
+                WHERE uh.guest_id = ?
+                GROUP BY p
+                ORDER BY cnt DESC
+            """, (guest_id,)).fetchall()
         platform_distribution = {r[0]: r[1] for r in platform_rows}
 
         # 最近 7 天趋势
         seven_days_ago = (datetime.now(tz) - timedelta(days=7)).isoformat()
-        trend_rows = conn.execute("""
-            SELECT DATE(created_at) as date, COUNT(*) as count
-            FROM ai_cache
-            WHERE created_at >= ?
-            GROUP BY DATE(created_at)
-            ORDER BY date
-        """, (seven_days_ago,)).fetchall()
+        if is_admin:
+            trend_rows = conn.execute("""
+                SELECT DATE(created_at) as date, COUNT(*) as count
+                FROM ai_cache
+                WHERE created_at >= ?
+                GROUP BY DATE(created_at)
+                ORDER BY date
+            """, (seven_days_ago,)).fetchall()
+        elif user_id:
+            trend_rows = conn.execute("""
+                SELECT DATE(uh.created_at) as date, COUNT(*) as count
+                FROM user_history uh
+                WHERE uh.user_id = ? AND uh.created_at >= ?
+                GROUP BY DATE(uh.created_at)
+                ORDER BY date
+            """, (user_id, seven_days_ago)).fetchall()
+        else:
+            trend_rows = conn.execute("""
+                SELECT DATE(uh.created_at) as date, COUNT(*) as count
+                FROM user_history uh
+                WHERE uh.guest_id = ? AND uh.created_at >= ?
+                GROUP BY DATE(uh.created_at)
+                ORDER BY date
+            """, (guest_id, seven_days_ago)).fetchall()
         recent_trend = [{"date": r[0], "count": r[1]} for r in trend_rows]
 
     return {

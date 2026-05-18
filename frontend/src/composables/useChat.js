@@ -1,8 +1,10 @@
 import { ref } from 'vue'
+import { useAuth } from './useAuth.js'
 
 const API_BASE = '/api'
 
 export function useChat() {
+  const { getAuthHeaders, refreshUsage } = useAuth()
   const chatMessages = ref([])
   const isChatStreaming = ref(false)
   const chatError = ref('')
@@ -25,7 +27,7 @@ export function useChat() {
 
       const response = await fetch(`${API_BASE}/chat/stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ subtitle_text: subtitleContext, question: question.trim(), history }),
       })
 
@@ -63,6 +65,7 @@ export function useChat() {
       chatMessages.value[placeholderIdx].content = '[回答失败，请重试]'
     } finally {
       isChatStreaming.value = false
+      refreshUsage()
     }
   }
 

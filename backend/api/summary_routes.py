@@ -4,10 +4,9 @@
 """
 
 import asyncio
-import datetime
 import re
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from core.summary_models import SummarizeRequest, SummaryResult, ChapterItem, MindMapNode
 from core.summarizer import clean_subtitle_text, summarize_subtitle, summarize_from_description, extract_bilibili_subtitle, extract_bilibili_subtitle_by_cid
@@ -18,12 +17,10 @@ from config import SUBTITLE_CORRECTION_ENABLED, WHISPER_MAX_DURATION
 
 # 复用已有模块中的工具函数和实例
 from api.routes import extract_url, _download_subtitle_content, downloader
+from api.auth_routes import get_identity
+from core.auth import check_usage_limit, log_usage
 
 router = APIRouter()
-
-# 每日免费次数限制（内存计数，重启清零）
-_summarize_usage: dict[str, int] = {}
-_SUMMARIZE_FREE_LIMIT = 999999  # 开发阶段放行，后续从 .env 读取
 
 
 def _select_subtitle_lang(subtitles, preferred: str = None):
@@ -41,28 +38,15 @@ def _select_subtitle_lang(subtitles, preferred: str = None):
     return subtitles[0] if subtitles else None
 
 
-def get_summarize_usage() -> int:
-    """获取今日已用次数。"""
-    today = datetime.date.today().isoformat()
-    return _summarize_usage.get(today, 0)
-
-
-def inc_summarize_usage():
-    """今日使用次数 +1。"""
-    today = datetime.date.today().isoformat()
-    _summarize_usage[today] = _summarize_usage.get(today, 0) + 1
-
-
 @router.post("/api/summarize", response_model=SummaryResult)
-async def summarize_video(req: SummarizeRequest):
+async def summarize_video(req: SummarizeRequest, request: Request):
     """AI 视频总结：提取字幕 -> DeepSeek 生成摘要/章节/思维导图。"""
-    today = datetime.date.today().isoformat()
-    used = _summarize_usage.get(today, 0)
-    if used >= _SUMMARIZE_FREE_LIMIT:
-        raise HTTPException(
-            status_code=429,
-            detail=f"今日免费次数已用完（每日 {_SUMMARIZE_FREE_LIMIT} 次），请明天再试或升级 Pro"
-        )
+    identity = get_identity(request)
+    allowed, used, limit = check_usage_limit(
+        identity.get("user_id"), identity.get("guest_id"), identity.get("guest_sig")
+    )
+    if not allowed:
+        raise HTTPException(status_code=429, detail=f"今日 AI 次数已用完（{used}/{limit}）")
 
     try:
         url = extract_url(req.url)
@@ -96,7 +80,8 @@ async def summarize_video(req: SummarizeRequest):
                 result = await asyncio.get_event_loop().run_in_executor(
                     None, summarize_from_description, title, desc
                 )
-                _summarize_usage[today] = used + 1
+                log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                          action="summary", status="SUCCESS")
                 return SummaryResult(
                     summary=f"⚠️ {_no_cc_msg}视频时长 {int(cached_info['duration'])} 秒超过 {WHISPER_MAX_DURATION} 秒限制，以下总结基于视频简介生成，仅供参考。\n\n" + result.get("summary", ""),
                     chapters=[ChapterItem(**ch) for ch in result.get("chapters", [])],
@@ -140,7 +125,8 @@ async def summarize_video(req: SummarizeRequest):
                 result = await asyncio.get_event_loop().run_in_executor(
                     None, summarize_subtitle, whisper_text, info.title
                 )
-                _summarize_usage[today] = used + 1
+                log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                          action="summary", status="SUCCESS")
                 return SummaryResult(
                     summary="⚠️ 该视频无原生字幕，以下总结基于 Whisper 语音识别结果生成。\n\n" + result.get("summary", ""),
                     chapters=[ChapterItem(**ch) for ch in result.get("chapters", [])],
@@ -152,7 +138,8 @@ async def summarize_video(req: SummarizeRequest):
             result = await asyncio.get_event_loop().run_in_executor(
                 None, summarize_from_description, info.title, info.description
             )
-            _summarize_usage[today] = used + 1
+            log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                      action="summary", status="SUCCESS")
             chapters = [ChapterItem(**ch) for ch in result.get("chapters", [])]
             mindmap = MindMapNode(title=info.title[:20], children=[])
             return SummaryResult(
@@ -203,7 +190,8 @@ async def summarize_video(req: SummarizeRequest):
                 result = await asyncio.get_event_loop().run_in_executor(
                     None, summarize_subtitle, whisper_text, info.title
                 )
-                _summarize_usage[today] = used + 1
+                log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                          action="summary", status="SUCCESS")
                 return SummaryResult(
                     summary="⚠️ 该视频原生字幕不可用，以下总结基于 Whisper 语音识别结果生成。\n\n" + result.get("summary", ""),
                     chapters=[ChapterItem(**ch) for ch in result.get("chapters", [])],
@@ -215,7 +203,8 @@ async def summarize_video(req: SummarizeRequest):
                 result = await asyncio.get_event_loop().run_in_executor(
                     None, summarize_from_description, info.title, info.description
                 )
-                _summarize_usage[today] = used + 1
+                log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                          action="summary", status="SUCCESS")
                 chapters = [ChapterItem(**ch) for ch in result.get("chapters", [])]
                 mindmap = MindMapNode(title=info.title[:20], children=[])
                 return SummaryResult(
@@ -229,7 +218,8 @@ async def summarize_video(req: SummarizeRequest):
             None, summarize_subtitle, clean_text, info.title
         )
 
-        _summarize_usage[today] = used + 1
+        log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                  action="summary", status="SUCCESS")
 
         chapters = [ChapterItem(**ch) for ch in result.get("chapters", [])]
         mindmap = MindMapNode(title="视频内容", children=[])

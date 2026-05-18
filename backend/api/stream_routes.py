@@ -7,7 +7,7 @@ import asyncio
 import json
 import re
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from core.summary_models import SummarizeRequest, SummaryResult, ChapterItem, MindMapNode, ChatRequest
@@ -29,9 +29,10 @@ from core.whisper import transcribe_video_async, is_model_available
 from core.tag_extractor import extract_tags, detect_platform
 
 from api.routes import extract_url, _download_subtitle_content, downloader
-from api.summary_routes import (
-    _select_subtitle_lang, inc_summarize_usage,
-)
+from api.summary_routes import _select_subtitle_lang
+from api.auth_routes import get_identity
+from core.auth import check_usage_limit, log_usage, add_user_history
+from core.cache import _url_hash
 
 router = APIRouter()
 
@@ -183,10 +184,11 @@ async def _get_subtitle_text(url: str, info, lang: str = None, fingerprint: str 
 
 
 @router.post("/api/summarize/stream")
-async def summarize_stream(req: SummarizeRequest):
+async def summarize_stream(req: SummarizeRequest, request: Request):
     """SSE 流式 AI 视频总结。"""
     try:
         url = extract_url(req.url)
+        identity = get_identity(request)
 
         # ── 缓存检查 ──
         cached = get_cached(url)
@@ -201,10 +203,37 @@ async def summarize_stream(req: SummarizeRequest):
 
         if cached and cached.get("result_json") and req.mode == "full" and not req.force:
             result_data = json.loads(cached["result_json"])
-            # 确保 videos 表有记录（历史记录依赖此表）
-            from database import save_subtitle_to_db as _save_sub
-            _save_sub(url, cached.get("source", ""), "", cached.get("subtitle_text", ""),
-                      cached.get("video_title", ""), part_info=cached.get("part_info", ""))
+            # 确保 videos 表有记录（历史记录依赖此表），但不覆盖已有字幕（保留 segments）
+            from database import get_subtitle_from_db as _get_sub, save_subtitle_to_db as _save_sub, get_db as _get_db
+            if not _get_sub(url):
+                _save_sub(url, cached.get("source", ""), "", cached.get("subtitle_text", ""),
+                          cached.get("video_title", ""), part_info=cached.get("part_info", ""))
+            else:
+                # 字幕已存在，只补全 videos 表的 title/platform/part_info
+                with _get_db() as _conn:
+                    _vid = _conn.execute("SELECT id FROM videos WHERE url = ?", (url,)).fetchone()
+                    if _vid:
+                        _updates, _params = [], []
+                        if cached.get("video_title"):
+                            _updates.append("title = ?")
+                            _params.append(cached["video_title"])
+                        if cached.get("platform"):
+                            _updates.append("platform = ?")
+                            _params.append(cached["platform"])
+                        if cached.get("part_info"):
+                            _updates.append("part_info = ?")
+                            _params.append(cached["part_info"])
+                        if _updates:
+                            _params.append(_vid["id"])
+                            _conn.execute(f"UPDATE videos SET {', '.join(_updates)} WHERE id = ?", _params)
+            # 缓存命中：记录历史 + 日志（不消耗 AI 次数）
+            add_user_history(
+                user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                url_hash=_url_hash(url), url=url,
+                title=cached.get("video_title", ""), platform=cached.get("platform", ""),
+            )
+            log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                      action="summary", status="CACHE_HIT")
 
             def _replay():
                 yield ("progress", {"stage": "cache_hit", "message": "已有学习记录，直接加载"})
@@ -225,6 +254,13 @@ async def summarize_stream(req: SummarizeRequest):
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
             )
+
+        # ── AI 使用次数检查（非缓存命中路径） ──
+        allowed, used, limit = check_usage_limit(
+            identity.get("user_id"), identity.get("guest_id"), identity.get("guest_sig")
+        )
+        if not allowed:
+            raise HTTPException(status_code=429, detail=f"今日 AI 次数已用完（{used}/{limit}）")
 
         # ── 部分重新生成（mode != "full"）：从缓存取字幕，只跑指定组件 ──
         if req.mode != "full":
@@ -333,7 +369,8 @@ async def summarize_stream(req: SummarizeRequest):
                         yield (event_type, data)
                         if event_type == "result":
                             result_data = data
-                    inc_summarize_usage()
+                    log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                              action="summary", status="SUCCESS")
                     merged = json.dumps({**old_result, "result": result_data}, ensure_ascii=False)
 
                 elif req.mode == "mindmap":
@@ -357,6 +394,11 @@ async def summarize_stream(req: SummarizeRequest):
 
                 _pi = _build_part_info(cache_url, info=locals().get('info'), parts=(cached_info or {}).get('parts'))
                 save_cache(cache_url, video_title, subtitle_text, sub_source, merged, fingerprint=fp, part_info=_pi)
+                add_user_history(
+                    user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                    url_hash=_url_hash(cache_url), url=cache_url,
+                    title=video_title, platform="",
+                )
                 yield ("done", {})
 
             return StreamingResponse(
@@ -399,7 +441,8 @@ async def summarize_stream(req: SummarizeRequest):
                     yield ("warn", {"message": f"{_no_cc_msg}视频时长 {int(duration)} 秒超过 {WHISPER_MAX_DURATION} 秒限制，跳过语音识别"})
                     yield ("progress", {"stage": "summary_generating", "message": "正在基于视频简介生成总结..."})
                     result = summarize_from_description(title, desc)
-                    inc_summarize_usage()
+                    log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                              action="summary", status="SUCCESS")
                     result["summary"] = f"⚠️ {_no_cc_msg}{_long_video_msg}，以下总结基于视频简介生成，仅供参考。\n\n" + result.get("summary", "")
                     yield ("result", result)
                     yield ("done", {})
@@ -426,6 +469,14 @@ async def summarize_stream(req: SummarizeRequest):
             cached = get_cached(canonical_url, fingerprint=fp)
             if cached and cached.get("result_json") and req.mode == "full" and not req.force:
                 result_data = json.loads(cached["result_json"])
+                # 记录用户历史 + 日志
+                add_user_history(
+                    user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                    url_hash=_url_hash(canonical_url), url=canonical_url,
+                    title=cached.get("video_title", ""), platform=cached.get("platform", ""),
+                )
+                log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                          action="summary", status="CACHE_HIT")
                 def _replay_fp():
                     yield ("progress", {"stage": "cache_hit", "message": "已有学习记录，直接加载"})
                     result = result_data.get("result", {})
@@ -463,7 +514,8 @@ async def summarize_stream(req: SummarizeRequest):
                     yield ("warn", {"message": "该视频无字幕，将基于视频简介生成总结"})
                 yield ("progress", {"stage": "summary_generating", "message": "正在基于视频简介生成总结..."})
                 result = summarize_from_description(info.title, info.description)
-                inc_summarize_usage()
+                log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                          action="summary", status="SUCCESS")
                 result["summary"] = "⚠️ 该视频无字幕，以下总结基于视频简介生成，仅供参考。\n\n" + result.get("summary", "")
                 yield ("result", result)
                 yield ("done", {})
@@ -513,6 +565,7 @@ async def summarize_stream(req: SummarizeRequest):
             if len(chunks) > 1:
                 result_data = {}
                 subtitle_for_rest = subtitle_text
+                summary_failed = False
 
                 for cevt, cdata in stream_chunk_summaries(subtitle_text, info.title):
                     if cevt == "first_chunk_ready":
@@ -522,8 +575,9 @@ async def summarize_stream(req: SummarizeRequest):
                         })
                         for sevt, sdata in stream_summarize(cdata["text"], info.title):
                             if sevt == "error":
-                                yield ("done", {})
-                                return
+                                yield ("warn", {"message": f"AI 摘要生成失败: {sdata.get('message', '未知错误')}，视频和字幕仍可正常使用"})
+                                summary_failed = True
+                                break
                             if sevt == "result":
                                 sdata["is_partial"] = True
                                 result_data = sdata
@@ -537,32 +591,40 @@ async def summarize_stream(req: SummarizeRequest):
 
                     elif cevt == "all_chunks_ready":
                         subtitle_for_rest = cdata["text"]
-                        yield ("progress", {
-                            "stage": "summary_final",
-                            "message": "正在基于完整字幕生成全面摘要...",
-                        })
-                        for sevt, sdata in stream_summarize(cdata["text"], info.title):
-                            if sevt == "error":
-                                yield ("done", {})
-                                return
-                            if sevt == "result":
-                                sdata["is_partial"] = False
-                                result_data = sdata
-                            yield (sevt, sdata)
+                        if not summary_failed:
+                            yield ("progress", {
+                                "stage": "summary_final",
+                                "message": "正在基于完整字幕生成全面摘要...",
+                            })
+                            for sevt, sdata in stream_summarize(cdata["text"], info.title):
+                                if sevt == "error":
+                                    yield ("warn", {"message": f"AI 摘要生成失败: {sdata.get('message', '未知错误')}，视频和字幕仍可正常使用"})
+                                    summary_failed = True
+                                    break
+                                if sevt == "result":
+                                    sdata["is_partial"] = False
+                                    result_data = sdata
+                                yield (sevt, sdata)
 
-                inc_summarize_usage()
+                if not summary_failed:
+                    log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                              action="summary", status="SUCCESS")
             else:
                 yield ("progress", {"stage": "summary_generating", "message": "正在生成 AI 摘要..."})
                 result_data = {}
+                summary_failed = False
                 for event_type, data in stream_summarize(subtitle_text, info.title):
                     if event_type == "error":
-                        yield ("done", {})
-                        return
+                        yield ("warn", {"message": f"AI 摘要生成失败: {data.get('message', '未知错误')}，视频和字幕仍可正常使用"})
+                        summary_failed = True
+                        break
                     if event_type == "result":
                         result_data = data
                     yield (event_type, data)
 
-                inc_summarize_usage()
+                if not summary_failed:
+                    log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                              action="summary", status="SUCCESS")
                 subtitle_for_rest = subtitle_text
 
             # 2. 思维导图
@@ -606,6 +668,13 @@ async def summarize_stream(req: SummarizeRequest):
             platform_name = detect_platform(canonical_url, info.extractor or "")
             save_cache(canonical_url, info.title, subtitle_text, sub_source, save_cache_json, fingerprint=fp, part_info=_build_part_info(canonical_url, info=info), platform=platform_name)
 
+            # ── 记录用户历史 ──
+            add_user_history(
+                user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                url_hash=_url_hash(canonical_url), url=canonical_url,
+                title=info.title, platform=platform_name,
+            )
+
             # ── 标签提取（后台执行，不阻塞 SSE） ──
             try:
                 summary_text = result_data.get("summary", "")
@@ -631,15 +700,24 @@ async def summarize_stream(req: SummarizeRequest):
 
 
 @router.post("/api/chat/stream")
-async def chat_stream(req: ChatRequest):
+async def chat_stream(req: ChatRequest, request: Request):
     """SSE 流式 AI 问答。"""
     if not req.subtitle_text or len(req.subtitle_text.strip()) < 10:
         raise HTTPException(status_code=400, detail="字幕内容为空，无法进行问答")
+
+    identity = get_identity(request)
+    allowed, used, limit = check_usage_limit(
+        identity.get("user_id"), identity.get("guest_id"), identity.get("guest_sig")
+    )
+    if not allowed:
+        raise HTTPException(status_code=429, detail=f"今日 AI 次数已用完（{used}/{limit}）")
 
     try:
         def _gen():
             for event_type, data in stream_chat(req.subtitle_text, req.question, [h.model_dump() for h in req.history]):
                 yield (event_type, data)
+            log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                      action="qa", status="SUCCESS")
             yield ("done", {})
 
         return StreamingResponse(

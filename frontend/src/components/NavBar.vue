@@ -1,8 +1,20 @@
 <script setup>
+import { ref } from 'vue'
+import { useAuth } from '../composables/useAuth.js'
+import LoginModal from './LoginModal.vue'
+
 defineProps({
   currentView: { type: String, default: 'home' }
 })
-defineEmits(['toggle-history', 'go-home'])
+const emit = defineEmits(['toggle-history', 'go-home'])
+
+const { user, usage, isLoggedIn, displayName, logout } = useAuth()
+const showLogin = ref(false)
+
+async function handleLogout() {
+  await logout()
+  emit('go-home')
+}
 </script>
 
 <template>
@@ -26,15 +38,35 @@ defineEmits(['toggle-history', 'go-home'])
 
       <!-- Actions -->
       <div class="navbar-actions">
-        <button class="btn-history" :class="{ active: currentView === 'history' }" @click="$emit('toggle-history')">
+        <!-- 用量提示 -->
+        <span v-if="usage.limit > 0 && usage.limit < 999999" class="usage-badge">
+          AI {{ usage.used }}/{{ usage.limit }}
+        </span>
+
+        <button v-if="isLoggedIn" class="btn-history" :class="{ active: currentView === 'history' }" @click="$emit('toggle-history')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-history-icon">
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
           </svg>
           学习历史
         </button>
+
+        <!-- 用户状态 -->
+        <template v-if="isLoggedIn">
+          <div class="user-menu">
+            <span class="user-name">{{ displayName }}</span>
+            <button class="btn-logout" @click="handleLogout" title="退出登录">
+              <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 102 0V4a1 1 0 00-1-1zm10.293 9.293a1 1 0 001.414 1.414l3-3a1 1 0 000-1.414l-3-3a1 1 0 10-1.414 1.414L14.586 9H7a1 1 0 100 2h7.586l-1.293 1.293z" clip-rule="evenodd"/></svg>
+            </button>
+          </div>
+        </template>
+        <template v-else>
+          <button class="btn-login" @click="showLogin = true">登录</button>
+        </template>
       </div>
     </div>
   </nav>
+
+  <LoginModal :visible="showLogin" @close="showLogin = false" />
 </template>
 
 <style scoped>
@@ -108,7 +140,18 @@ defineEmits(['toggle-history', 'go-home'])
 .navbar-actions {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: 0.75rem;
+}
+
+.usage-badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 0.25rem 0.625rem;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  white-space: nowrap;
 }
 
 .btn-history {
@@ -143,6 +186,55 @@ defineEmits(['toggle-history', 'go-home'])
   height: 16px;
 }
 
+.user-menu {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.75rem;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.user-name {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.btn-logout {
+  width: 24px;
+  height: 24px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: all 0.15s;
+}
+.btn-logout:hover { color: #fca5a5; background: rgba(239, 68, 68, 0.1); }
+.btn-logout svg { width: 16px; height: 16px; }
+
+.btn-login {
+  padding: 0.5rem 1rem;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.15), rgba(6, 182, 212, 0.1));
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 8px;
+  color: #93c5fd;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-login:hover {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.25), rgba(6, 182, 212, 0.2));
+  border-color: rgba(59, 130, 246, 0.5);
+}
+
 @media (max-width: 768px) {
   .navbar-links {
     display: none;
@@ -151,5 +243,7 @@ defineEmits(['toggle-history', 'go-home'])
   .navbar-container {
     padding: 1rem;
   }
+
+  .usage-badge { display: none; }
 }
 </style>

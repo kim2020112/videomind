@@ -2,12 +2,35 @@ import yt_dlp
 import uuid
 import os
 import math
+import shutil
 import tempfile
 import time
 from typing import Optional, Callable
 from asyncio import Queue
 
 from .models import VideoInfo, FormatOption, ProgressData, VideoPart, VideoChapter, SubtitleTrack
+
+# 下载清理策略
+_MAX_DOWNLOADS = 20       # 最多保留 20 个下载
+_MAX_AGE_DAYS = 7         # 超过 7 天自动删除
+
+
+def _cleanup_downloads(output_dir: str):
+    """清理过期和超额的下载目录。"""
+    if not os.path.isdir(output_dir):
+        return
+    entries = []
+    for name in os.listdir(output_dir):
+        path = os.path.join(output_dir, name)
+        if os.path.isdir(path):
+            entries.append((path, os.path.getmtime(path)))
+    # 按修改时间排序（最新在前）
+    entries.sort(key=lambda x: x[1], reverse=True)
+    now = time.time()
+    cutoff = now - _MAX_AGE_DAYS * 86400
+    for i, (path, mtime) in enumerate(entries):
+        if mtime < cutoff or i >= _MAX_DOWNLOADS:
+            shutil.rmtree(path, ignore_errors=True)
 
 
 def _is_bilibili(url: str) -> bool:
@@ -197,6 +220,7 @@ class VideoDownloader:
         self.ffmpeg_location = ffmpeg_location
         self._progress_queues: dict[str, Queue] = {}
         os.makedirs(output_dir, exist_ok=True)
+        _cleanup_downloads(output_dir)
 
     def register_progress_queue(self, task_id: str, queue: Queue):
         self._progress_queues[task_id] = queue
@@ -245,8 +269,18 @@ class VideoDownloader:
             'noplaylist': True,
             'listsubtitles': True,
         }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        last_err = None
+        for attempt in range(3):
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                break
+            except Exception as e:
+                last_err = e
+                if attempt < 2:
+                    time.sleep(2 * (2 ** attempt))
+        else:
+            raise last_err
 
         raw_formats = info.get('formats', [])
         formats = []
@@ -603,6 +637,7 @@ class VideoDownloader:
             queue = self._progress_queues.get(task_id)
             if queue:
                 queue.put_nowait(ProgressData(status='completed', percent=100, file_path=file_path))
+            _cleanup_downloads(self.output_dir)
             return file_path
 
         output_template = os.path.join(task_dir, '%(title).100s.%(ext)s')
@@ -643,4 +678,5 @@ class VideoDownloader:
         if queue:
             queue.put_nowait(ProgressData(status='completed', percent=100, file_path=file_path))
 
+        _cleanup_downloads(self.output_dir)
         return file_path

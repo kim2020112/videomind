@@ -2,12 +2,32 @@
 
 import json
 import re
+import time
 
 import anthropic
 from config import AI_API_KEY, AI_BASE_URL, AI_MODEL, AI_PROVIDER, PROMPT_VERSION, BASE_DIR
 
 MAX_SUBTITLE_CHARS = 60000
 JSON_BLOCK_RE = re.compile(r'```(?:json)?\s*\n?(.*?)\n?```', re.DOTALL)
+
+# ──── 重试工具 ────
+
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 2  # 秒，指数退避基数
+
+
+def _retry(fn, *args, **kwargs):
+    """带指数退避的重试包装器。最多重试 _MAX_RETRIES 次。"""
+    last_err = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            last_err = e
+            if attempt < _MAX_RETRIES - 1:
+                delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                time.sleep(delay)
+    raise last_err
 
 
 # ──── Prompt 加载 ────
@@ -95,10 +115,12 @@ def _chunk_summarize(subtitle_text: str, video_title: str) -> str:
     client = _get_client()
     partials = []
     for i, chunk in enumerate(chunks):
-        resp = client.messages.create(
-            model=AI_MODEL, max_tokens=1000,
-            messages=[{"role": "user", "content": f"请对以下视频字幕片段（第 {i+1}/{len(chunks)} 部分）生成简要摘要，100-200字：\n\n---\n{chunk}\n---"}],
-        )
+        def _call():
+            return client.messages.create(
+                model=AI_MODEL, max_tokens=1000,
+                messages=[{"role": "user", "content": f"请对以下视频字幕片段（第 {i+1}/{len(chunks)} 部分）生成简要摘要，100-200字：\n\n---\n{chunk}\n---"}],
+            )
+        resp = _retry(_call)
         partials.append(_extract_text(resp))
     return "\n\n".join(partials)
 
@@ -154,7 +176,7 @@ def summarize(subtitle_text: str, video_title: str = "") -> dict:
         video_title=f"视频标题：{video_title}\n\n" if video_title else "",
         subtitle_text=_chunk_summarize(subtitle_text, video_title),
     )
-    resp = client.messages.create(
+    resp = _retry(client.messages.create,
         model=AI_MODEL, max_tokens=4000,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -172,7 +194,7 @@ def generate_notes(subtitle_text: str, video_title: str = "") -> dict:
         video_title=f"视频标题：{video_title}\n\n" if video_title else "",
         subtitle_text=_chunk_summarize(subtitle_text, video_title),
     )
-    resp = client.messages.create(
+    resp = _retry(client.messages.create,
         model=AI_MODEL, max_tokens=6000,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -190,7 +212,7 @@ def generate_mindmap(subtitle_text: str, video_title: str = "") -> str:
         video_title=f"视频标题：{video_title}\n\n" if video_title else "",
         subtitle_text=_chunk_summarize(subtitle_text, video_title),
     )
-    resp = client.messages.create(
+    resp = _retry(client.messages.create,
         model=AI_MODEL, max_tokens=2000, temperature=0.5,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -222,7 +244,7 @@ def rag_answer(question: str, context_chunks: list[str], history: list = None) -
 - 用中文回答，保持简洁准确
 - 使用 Markdown 格式"""
 
-    resp = client.messages.create(
+    resp = _retry(client.messages.create,
         model=AI_MODEL, max_tokens=2000,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -250,7 +272,7 @@ def correct_subtitle(subtitle_text: str, video_title: str = "", video_descriptio
     )
 
     try:
-        resp = client.messages.create(
+        resp = _retry(client.messages.create,
             model=AI_MODEL, max_tokens=min(len(truncated) * 2, 16000),
             temperature=0.1,
             messages=[{"role": "user", "content": prompt}],
