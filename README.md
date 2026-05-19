@@ -82,10 +82,10 @@ cd ../backend && python main.py  # FastAPI 托管前端静态文件
 ```
 用户输入 URL → 字幕获取 → AI 处理流水线 → 知识存储
                  │              │               │
-          B站CC/yt-dlp    摘要/笔记/导图     SQLite + ChromaDB
-          Whisper 兜底        │              │
-                 │        core/pipeline/    用户认证/隔离
-          多P视频按P独立获取  流式 SSE 推送（渐进式生成）
+          B站CC(按cid)   摘要/笔记/导图     SQLite + ChromaDB
+          yt-dlp/Whisper     │              │
+          多P按P独立获取  core/pipeline/    用户认证/隔离
+          无字幕不降级P1   流式 SSE 推送（渐进式生成）
 ```
 
 ## API 端点

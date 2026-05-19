@@ -106,6 +106,27 @@ function scrollParts(dir) {
   el.scrollBy({ left: dir * 200, behavior: 'smooth' })
 }
 
+function scrollToActivePart() {
+  const el = partsNavScroll.value
+  if (!el) return
+  const activeBtn = el.querySelector('.parts-nav-btn.active')
+  if (activeBtn) {
+    activeBtn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' })
+  }
+}
+
+// 切换分P时自动滚动到当前激活的按钮
+watch(() => props.currentSummarizePart, () => {
+  nextTick(scrollToActivePart)
+})
+
+// 多P列表首次加载时（如从历史记录进入），也滚动到激活按钮
+watch(() => props.multiParts.length, (len) => {
+  if (len > 1 && props.currentSummarizePart > 1) {
+    nextTick(scrollToActivePart)
+  }
+})
+
 // 分P标题 tooltip
 const tooltip = ref({ visible: false, text: '', x: 0, y: 0 })
 let tooltipTimer = null

@@ -74,8 +74,11 @@ async def get_subtitle_text(
                             bilibili_sub = extract_bilibili_subtitle_by_cid(bvid, part.cid)
                     except Exception:
                         pass  # 下载器解析失败，降级到直接提取字幕
-        if not bilibili_sub:
-            bilibili_sub = extract_bilibili_subtitle(url)
+            if not bilibili_sub and not p_match:
+                bilibili_sub = extract_bilibili_subtitle(url)
+            elif bilibili_sub and bilibili_sub.get('has_subtitle') and len(bilibili_sub.get('text', '').strip()) < 100:
+                # 分P字幕内容过短，视为无效，不降级到P1
+                bilibili_sub = None
         if bilibili_sub and bilibili_sub['has_subtitle']:
             text = bilibili_sub['text']
             sub_lang = bilibili_sub['language']

@@ -112,6 +112,7 @@ def _build_part_info(url: str, info=None, parts: list = None) -> str:
 def try_get_bilibili_cc_subtitle(url: str, cached_info: dict = None) -> dict | None:
     """尝试获取 B站 CC 字幕（支持多P分P cid 精确获取）。
     返回字幕 dict（has_subtitle, text, language 等）或 None。
+    多P视频指定分P无CC字幕时返回 None，不降级到P1。
     """
     if 'bilibili' not in url.lower():
         return None
@@ -125,6 +126,8 @@ def try_get_bilibili_cc_subtitle(url: str, cached_info: dict = None) -> dict | N
             bvid = extract_bvid(url)
             if bvid:
                 return extract_bilibili_subtitle_by_cid(bvid, part['cid'])
+        # 多P指定分P无法获取CC字幕，返回 None（不降级到P1）
+        return None
 
     return extract_bilibili_subtitle(url)
 
@@ -203,6 +206,12 @@ async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = No
                 if bvid:
                     logger.info(f"尝试B站分P字幕 bvid={bvid} cid={part.cid}")
                     bilibili_sub = extract_bilibili_subtitle_by_cid(bvid, part.cid)
+            # 分P无独立CC字幕时，不降级到P1（内容不同），继续后续管线
+            if bilibili_sub and bilibili_sub.get('has_subtitle') and len(bilibili_sub.get('text', '').strip()) < 100:
+                logger.info(f"分P字幕内容过短(len={len(bilibili_sub.get('text',''))}), 视为无效")
+                bilibili_sub = None
+            elif not bilibili_sub:
+                logger.info(f"分P无CC字幕，继续后续管线")
         else:
             bvid = extract_bvid(url)
             logger.info(f"尝试B站CC字幕 bvid={bvid or 'N/A'}")

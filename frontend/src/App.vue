@@ -179,6 +179,15 @@ async function handleFetchSubtitle() {
 async function switchSummarizePart(partIndex) {
   if (partIndex === currentSummarizePart.value) return
   currentSummarizePart.value = partIndex
+  // 更新 URL 以同步视频信息卡片和分P列表高亮
+  const bvMatch = (videoInfo.value?.webpage_url || '').match(/(BV\w+)/)
+  if (bvMatch) {
+    if (partIndex <= 1) {
+      url.value = `https://www.bilibili.com/video/${bvMatch[1]}`
+    } else {
+      url.value = `https://www.bilibili.com/video/${bvMatch[1]}?p=${partIndex}`
+    }
+  }
   activeTab.value = 'summary'
   // 清除旧分P的字幕文本，避免显示上一分P的内容
   subtitleText.value = ''
@@ -235,6 +244,12 @@ const selectedFormatDetail = computed(() => formats.value.find(f => f.format_id 
 const currentPart = computed(() => {
   const m = url.value.match(/[?&]p=(\d+)/)
   return m ? parseInt(m[1]) : 1
+})
+
+// 当前总结分P的显示信息（时长、标题）
+const currentSummarizePartInfo = computed(() => {
+  if (!videoInfo.value?.parts || videoInfo.value.parts.length <= 1) return null
+  return videoInfo.value.parts.find(p => p.index === currentSummarizePart.value) || null
 })
 
 const isAllPartsSelected = computed(() =>
@@ -359,6 +374,11 @@ async function handleParse() {
   showFullDescription.value = false
   try {
     await parseVideo(url.value.trim())
+    // 从 URL 中检测分P编号，设置 AI 总结的当前P
+    const pMatch = url.value.match(/[?&]p=(\d+)/)
+    if (pMatch) {
+      currentSummarizePart.value = parseInt(pMatch[1])
+    }
     // 静默入库（fire-and-forget）
     fetch('/api/ingest', {
       method: 'POST',
@@ -493,10 +513,13 @@ function formatTime(timestamp) {
               <div v-if="videoInfo.stream_url" class="video-thumbnail-play">
                 <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
               </div>
-              <span v-if="videoInfo.duration_string" class="video-thumbnail-duration">{{ videoInfo.duration_string }}</span>
+              <span v-if="videoInfo.duration_string" class="video-thumbnail-duration">{{ currentSummarizePartInfo?.duration ? formatDuration(currentSummarizePartInfo.duration) : videoInfo.duration_string }}</span>
             </div>
             <div class="video-details">
-              <h3 class="video-title">{{ videoInfo.title }}</h3>
+              <h3 class="video-title">
+                {{ videoInfo.title }}
+                <span v-if="currentSummarizePartInfo && currentSummarizePartInfo.index > 1" class="part-badge">P{{ currentSummarizePartInfo.index }}</span>
+              </h3>
               <div class="video-meta-row">
                 <span class="video-meta-item">{{ videoInfo.extractor }}</span>
                 <span v-if="videoInfo.uploader" class="video-meta-item">{{ videoInfo.uploader }}</span>
@@ -973,6 +996,19 @@ function formatTime(timestamp) {
   color: var(--text-primary);
   margin-bottom: 0.625rem;
   line-height: 1.4;
+}
+
+.part-badge {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: 0.5rem;
+  padding: 0.125rem 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #93C5FD;
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border-radius: 6px;
 }
 
 .video-meta-row {
