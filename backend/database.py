@@ -1,6 +1,9 @@
 import sqlite3
 from contextlib import contextmanager
 from config import DB_PATH
+from core.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS videos (
@@ -143,7 +146,7 @@ def init_db():
             conn.execute("ALTER TABLE videos ADD COLUMN part_info TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass
-    print(f"[数据库] 初始化完成: {DB_PATH}")
+    logger.info(f"初始化完成: {DB_PATH}")
 
 
 # ──── 字幕持久化查询/写入（供 summarize 和 subtitle 端点复用） ────

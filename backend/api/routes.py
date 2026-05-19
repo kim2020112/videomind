@@ -8,14 +8,23 @@ import re
 import asyncio
 from asyncio import Queue
 
+from core.pipeline.subtitle import _download_subtitle_content
+from core.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 from core.cache import save_video_info_cache
 
 
 def extract_url(text: str) -> str:
     """从用户输入中提取第一个 http/https URL，兼容手机分享的带标题文本。"""
+    if not text or not text.strip():
+        raise ValueError("请输入有效的视频链接")
     text = text.strip()
     m = re.search(r'https?://\S+', text)
-    url = m.group(0).rstrip('.,;)】。') if m else text
+    if not m:
+        raise ValueError("未检测到有效的视频链接，请输入包含 http/https 的 URL")
+    url = m.group(0).rstrip('.,;)】。')
     return _resolve_short_url(url)
 
 
@@ -37,7 +46,7 @@ def _resolve_short_url(url: str) -> str:
                     return f'https://www.bilibili.com/video/{bv.group(1)}'
                 return location
         except Exception:
-            pass
+            logger.warning(f"Bilibili短链接解析失败: {url[:80]}")
         finally:
             conn.close()
         return url
@@ -56,7 +65,7 @@ def _resolve_short_url(url: str) -> str:
             if vid:
                 return f'https://www.douyin.com/video/{vid.group(1)}'
         except Exception:
-            pass
+            logger.warning(f"抖音短链接解析失败: {url[:80]}")
         finally:
             conn.close()
         return url
@@ -238,52 +247,6 @@ async def proxy_thumbnail(url: str):
         raise HTTPException(status_code=502, detail=f"缩略图获取失败: {e}")
 
 
-def _download_subtitle_content(url: str, lang: str, is_auto: bool) -> tuple[str, str]:
-    """用 yt-dlp 下载字幕文件，返回 (文件内容, 文件扩展名)。
-    支持 YouTube 翻译字幕（lang 如 "zh-Hans-en" 表示从英文翻译的中文）。
-    """
-    import yt_dlp
-    import tempfile
-    import glob
-
-    tmpdir = tempfile.mkdtemp(prefix='subtitle_')
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'skip_download': True,
-        'noplaylist': True,
-        'writesubtitles': True,
-        'writeautomaticsub': True,  # 始终启用自动字幕（含翻译字幕）
-        'subtitleslangs': [lang],
-        'subtitlesformat': 'srt/vtt/json3/best',
-        'outtmpl': os.path.join(tmpdir, '%(id)s'),
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.extract_info(url, download=True)
-
-    # 查找下载的字幕文件
-    candidates = glob.glob(os.path.join(tmpdir, '*'))
-    sub_files = [f for f in candidates if os.path.isfile(f)
-                 and os.path.splitext(f)[1].lower() in ('.srt', '.vtt', '.json3', '.srv1', '.srv2', '.srv3')]
-    if not sub_files:
-        # 尝试匹配所有文件
-        sub_files = [f for f in candidates if os.path.isfile(f) and not f.endswith('.part')]
-    if not sub_files:
-        raise Exception('字幕下载失败，可能该视频没有此语言的字幕')
-
-    sub_file = sub_files[0]
-    ext = os.path.splitext(sub_file)[1].lstrip('.')
-    with open(sub_file, 'r', encoding='utf-8', errors='replace') as f:
-        content = f.read()
-
-    # 清理临时目录
-    import shutil
-    shutil.rmtree(tmpdir, ignore_errors=True)
-
-    return content, ext
-
-
 def _parse_srt(content: str) -> list[dict]:
     """解析 SRT 字幕，返回 [{index, time, text}]。"""
     import re
@@ -389,7 +352,7 @@ async def translate_subtitle(url: str, lang: str, target: str, auto: bool = Fals
                 if content and len(content.strip()) > 10:
                     yt_translated = True
             except Exception:
-                pass  # 降级到外部翻译
+                logger.warning(f"YouTube原生翻译失败，降级到外部翻译")
 
         if not yt_translated:
             content, ext = await asyncio.get_event_loop().run_in_executor(

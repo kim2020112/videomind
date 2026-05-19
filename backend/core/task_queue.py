@@ -40,6 +40,7 @@ class TaskQueue:
         self._queue: asyncio.Queue = asyncio.Queue()
         self._tasks: dict[str, Task] = {}
         self._handlers: dict[TaskType, Callable] = {}
+        self._max_concurrent = max_concurrent
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._started = False
 
@@ -59,7 +60,8 @@ class TaskQueue:
         return self._tasks.get(task_id)
 
     def _start_workers(self):
-        asyncio.create_task(self._worker())
+        for _ in range(self._max_concurrent):
+            asyncio.create_task(self._worker())
         self._started = True
 
     async def _worker(self):

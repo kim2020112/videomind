@@ -12,21 +12,35 @@ function renderMarkdown(text) {
   return DOMPurify.sanitize(marked.parse(text))
 }
 
+const _markdownCache = new Map()
+function cachedMarkdown(text) {
+  if (!text) return ''
+  if (_markdownCache.has(text)) return _markdownCache.get(text)
+  const result = DOMPurify.sanitize(marked.parse(text))
+  _markdownCache.set(text, result)
+  return result
+}
+
 function renderNotesMarkdown(text) {
   if (!text) return ''
   let html = DOMPurify.sanitize(marked.parse(text), { ADD_ATTR: ['data-seconds'] })
-  // 字符串层面替换 [MM:SS] 为可点击 span（跳过 <code>/<pre>/<a> 块内的）
+  // 替换 [MM:SS] 或 空格+MM:SS 为可点击 span（跳过 <code>/<pre>/<a> 块内的）
   html = html.replace(
-    /(<code[\s\S]*?<\/code>|<pre[\s\S]*?<\/pre>|<a[\s\S]*?<\/a>)|\[(\d{1,2}:\d{2}(?::\d{2})?)\]/g,
-    (match, skipBlock, ts) => {
+    /(<code[\s\S]*?<\/code>|<pre[\s\S]*?<\/pre>|<a[\s\S]*?<\/a>)|\[(\d{1,2}:\d{2}(?::\d{2})?)\]|(\s)(\d{1,2}:\d{2}(?::\d{2})?)(?=\s|<|$)/g,
+    (match, skipBlock, brTs, spaceTs, bareTs) => {
       if (skipBlock) return skipBlock
+      const ts = brTs || bareTs
       const parts = ts.split(':').map(Number)
       const sec = parts.length === 3 ? parts[0]*3600+parts[1]*60+parts[2] : parts[0]*60+parts[1]
-      return `<span class="notes-timestamp" data-seconds="${sec}">${ts}</span>`
+      const prefix = brTs ? '' : (spaceTs || '')
+      return `${prefix}<span class="notes-timestamp" data-seconds="${sec}">${ts}</span>`
     }
   )
   return html
 }
+
+const summaryHtml = computed(() => renderNotesMarkdown(props.streamingText || props.result?.summary))
+const notesHtml = computed(() => renderNotesMarkdown(props.notesMarkdown))
 
 function onNotesClick(e) {
   const ts = e.target.closest('.notes-timestamp')
@@ -163,7 +177,9 @@ const subtitleSegments = computed(() => {
   return lines.map(line => {
     const timeMatch = line.match(/^\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\s*(.*)/)
     if (timeMatch) {
-      return { time: timeMatch[1], seconds: null, end: null, text: timeMatch[2] }
+      const parts = timeMatch[1].split(':').map(Number)
+      const sec = parts.length === 3 ? parts[0]*3600+parts[1]*60+parts[2] : parts[0]*60+parts[1]
+      return { time: timeMatch[1], seconds: sec, end: null, text: timeMatch[2] }
     }
     return { time: null, seconds: null, end: null, text: line }
   })
@@ -300,6 +316,10 @@ watch(() => props.mindmapMarkdown, async (val) => {
 function renderMindmap(md) {
   if (!mindmapSvg.value) return
   try {
+    if (markmapInstance) {
+      markmapInstance.destroy?.()
+      markmapInstance = null
+    }
     mindmapSvg.value.innerHTML = ''
     const transformer = new Transformer()
     const { root } = transformer.transform(md)
@@ -318,7 +338,13 @@ function onFullscreenChange() {
 }
 
 onMounted(() => document.addEventListener('fullscreenchange', onFullscreenChange))
-onUnmounted(() => document.removeEventListener('fullscreenchange', onFullscreenChange))
+onUnmounted(() => {
+  document.removeEventListener('fullscreenchange', onFullscreenChange)
+  if (markmapInstance) {
+    markmapInstance.destroy?.()
+    markmapInstance = null
+  }
+})
 
 function toggleFullscreen() {
   if (!mindmapContainer.value) return
@@ -828,7 +854,7 @@ function downloadNotes() {
 
       <!-- Tab: 摘要 -->
       <div v-show="activeSubTab === 'summary'" class="sub-tab-panel">
-        <div v-if="loading && (!regeneratingMode || regeneratingMode === 'summary') && !streamingText" class="loading-skeleton">
+        <div v-if="loading && (!regeneratingMode || regeneratingMode === 'summary') && !streamingText && !result?.summary" class="loading-skeleton">
           <div class="skeleton-line skeleton-title"></div>
           <div class="skeleton-line skeleton-long"></div>
           <div class="skeleton-line skeleton-medium"></div>
@@ -837,7 +863,7 @@ function downloadNotes() {
         </div>
         <div v-else class="summary-scroll">
           <div class="summary-section">
-            <div class="summary-text prose prose-invert prose-sm max-w-none" v-html="renderMarkdown(streamingText || result.summary)"></div>
+            <div class="summary-text prose prose-invert prose-sm max-w-none" v-html="summaryHtml" @click="onNotesClick"></div>
           </div>
           <div v-if="isPartialSummary && !loading" class="partial-banner">
             <svg viewBox="0 0 20 20" fill="currentColor" class="partial-icon"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/></svg>
@@ -972,7 +998,7 @@ function downloadNotes() {
               <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/></svg>
             </button>
           </div>
-          <div class="notes-content prose prose-invert prose-sm max-w-none" v-html="renderNotesMarkdown(notesMarkdown)" @click="onNotesClick"></div>
+          <div class="notes-content prose prose-invert prose-sm max-w-none" v-html="notesHtml" @click="onNotesClick"></div>
         </div>
         <div v-else class="notes-empty">笔记将在总结完成后自动生成</div>
       </div>
@@ -991,7 +1017,7 @@ function downloadNotes() {
               </div>
               <div v-for="(msg, i) in chatMessages" :key="i" class="chat-message" :class="'chat-msg-' + msg.role">
                 <span class="chat-role">{{ msg.role === 'user' ? '你' : 'AI' }}</span>
-                <div class="chat-content prose prose-invert prose-sm max-w-none" v-html="renderMarkdown(msg.content)"></div>
+                <div class="chat-content prose prose-invert prose-sm max-w-none" v-html="cachedMarkdown(msg.content)"></div>
               </div>
               <div v-if="chatError" class="chat-error">{{ chatError }}</div>
             </div>
@@ -1078,7 +1104,6 @@ function downloadNotes() {
 .parts-nav-btn.active .parts-nav-index { opacity: 1; }
 .parts-nav-title { }
 .parts-nav-spinner { width: 12px; height: 12px; border: 2px solid rgba(99,102,241,0.3); border-top-color: var(--accent-blue, #818CF8); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
-@keyframes spin { to { transform: rotate(360deg); } }
 .parts-tooltip { position: fixed; transform: translateX(-50%) translateY(-100%); padding: 0.375rem 0.75rem; background: rgba(15,23,42,0.95); color: #e2e8f0; font-size: 0.75rem; border-radius: 6px; pointer-events: none; z-index: 9999; max-width: 400px; white-space: normal; word-break: break-all; line-height: 1.4; box-shadow: 0 4px 12px rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); }
 
 .sub-tab-bar { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 1.25rem; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
@@ -1306,7 +1331,7 @@ function downloadNotes() {
 .chat-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .send-icon { width: 18px; height: 18px; }
 .spinner { animation: spin 1.5s linear infinite; }
-@keyframes spin { 100% { transform: rotate(360deg); } }
+/* @keyframes spin defined globally in style.css */
 
 /* 错误 */
 .summary-error { display: flex; align-items: center; gap: 0.75rem; padding: 1rem 1.25rem; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2); border-radius: var(--radius); color: #FCA5A5; font-size: 0.875rem; }

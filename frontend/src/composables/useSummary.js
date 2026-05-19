@@ -109,6 +109,7 @@ export function useSummary() {
                 streamingText.value += event.data.text
                 break
               case 'result':
+                streamingText.value = ''
                 summaryResult.value = event.data
                 isPartialSummary.value = !!event.data.is_partial
                 break

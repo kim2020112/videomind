@@ -27,6 +27,7 @@ frontend/public/design-reference.png
 backend/db/*.db
 backend/db/*.db-shm
 backend/db/*.db-wal
+backend/data/*.db
 backend/data/chroma/
 
 # Whisper 模型文件（太大，单独管理）

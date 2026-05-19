@@ -12,6 +12,9 @@ from config import (
     GUEST_DAILY_LIMIT, USER_DAILY_LIMIT,
 )
 from database import get_db
+from core.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 # ── 密码 ──
 
@@ -99,7 +102,7 @@ def ensure_admin():
     if existing:
         return
     create_user(ADMIN_USERNAME, ADMIN_PASSWORD, role="admin")
-    print(f"[Auth] Admin 用户已创建: {ADMIN_USERNAME}")
+    logger.info(f"Admin 用户已创建: {ADMIN_USERNAME}")
 
 
 # ── 游客签名 ──
@@ -146,17 +149,17 @@ def log_usage(user_id: int = None, guest_id: str = None, action: str = "summary"
 
 
 def get_today_usage(user_id: int = None, guest_id: str = None) -> int:
-    """获取今日使用次数。用范围查询替代 DATE() 以利用索引。"""
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    """获取今日 AI 使用次数（只计 SUCCESS，CACHE_HIT 不计入）。"""
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
     with get_db() as conn:
         if user_id:
             row = conn.execute(
-                "SELECT COUNT(*) as c FROM usage_logs WHERE user_id = ? AND created_at >= ? AND status != 'FAILED'",
+                "SELECT COUNT(*) as c FROM usage_logs WHERE user_id = ? AND created_at >= ? AND status = 'SUCCESS'",
                 (user_id, today_start),
             ).fetchone()
         elif guest_id:
             row = conn.execute(
-                "SELECT COUNT(*) as c FROM usage_logs WHERE guest_id = ? AND created_at >= ? AND status != 'FAILED'",
+                "SELECT COUNT(*) as c FROM usage_logs WHERE guest_id = ? AND created_at >= ? AND status = 'SUCCESS'",
                 (guest_id, today_start),
             ).fetchone()
         else:

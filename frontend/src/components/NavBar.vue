@@ -13,6 +13,7 @@ const showLogin = ref(false)
 
 async function handleLogout() {
   await logout()
+  emit('logout')
   emit('go-home')
 }
 </script>
@@ -21,7 +22,7 @@ async function handleLogout() {
   <nav class="navbar">
     <div class="navbar-container">
       <!-- Logo -->
-      <div class="navbar-logo" @click="$emit('go-home')">
+      <div class="navbar-logo" @click="$emit('go-home')" @keydown.enter="$emit('go-home')" tabindex="0" role="button">
         <div class="logo-icon">
           <svg viewBox="0 0 24 24" fill="currentColor">
             <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-8 12H9.5v-2H11v-2H9.5V9H11V7H9.5v2H8V7H6.5v2H5v2h1.5v2H5v2h1.5v2H8v-2h1.5v2H11v-2zm2.5 2H12v-2h1.5v2zm0-4H12v-2h1.5v2zm0-4H12V7h1.5v2zm4 8H16v-2h1.5v2zm0-4H16v-2h1.5v2zm0-4H16V7h1.5v2z"/>

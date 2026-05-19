@@ -326,4 +326,3 @@ def extract_bilibili_subtitle(url: str) -> dict | None:
 # ──── 别名（兼容旧 import） ────
 
 summarize_subtitle = summarize
-generate_mindmap_markdown = generate_mindmap

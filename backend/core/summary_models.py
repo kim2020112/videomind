@@ -25,7 +25,7 @@ class MindMapNode(BaseModel):
 class SummaryResult(BaseModel):
     summary: str
     chapters: list[ChapterItem] = []
-    mindmap: MindMapNode = MindMapNode(title="视频内容")
+    mindmap: Optional[MindMapNode] = None
 
 
 class ChatMessage(BaseModel):

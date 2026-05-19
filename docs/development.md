@@ -125,6 +125,7 @@ mkdir -p backend/data/whisper_models/faster-whisper-small
 
 - 修改 `backend/core/downloader.py` 来调整 yt-dlp 参数
 - 修改 `backend/core/ai_client.py` 来调整 AI API 调用（统一客户端，含摘要/导图/笔记/问答的流式与非流式实现）
+- 修改 `backend/core/pipeline/` 来调整共享流水线模块（字幕工具集、摘要/笔记/导图/标签生成逻辑）
 - 修改 `backend/core/summarizer.py` 来调整字幕清洗、B 站 CC 字幕提取或降级方案
 - 修改 `backend/core/whisper.py` 来调整 Whisper 模型配置或转录参数
 - 修改 `backend/core/cache.py` 来调整缓存策略或表结构（ai_cache / whisper_cache / video_info_cache / user_history）
@@ -144,9 +145,14 @@ mkdir -p backend/data/whisper_models/faster-whisper-small
 **架构分层**：
 - `core/ai_client.py` — 统一 AI API 客户端，所有 AI 调用入口（流式/非流式），不包含业务逻辑
 - `core/summarizer.py` — 字幕清洗 + B 站 CC 字幕提取 + 降级方案，AI 调用委托给 `ai_client.py`
+- `core/pipeline/` — 共享流水线工具包，消除 core↔api 反向依赖
+  - `subtitle.py`：统一字幕工具集（`extract_bvid()`、`try_get_bilibili_cc_subtitle()`、`transcribe_and_correct()` 等），被所有路由文件共用
+  - `summary.py`、`notes.py`、`mindmap.py`、`tags.py`：各阶段 AI 流水线逻辑
+  - `subtitle_postprocess.py`：时间戳注入与笔记联动后处理
 - `core/cache.py` — SQLite 持久化缓存，URL → AI 结果映射
 - `core/summary_models.py` — Pydantic 数据模型
 - `api/stream_routes.py` — SSE 流式端点，编排缓存→字幕→AI→持久化全流程
+- `api/summary_routes.py` — 同步 AI 总结端点，与 stream_routes.py 共用 pipeline 工具
 - `prompts/{name}/v{N}.txt` — Prompt 模板文件，通过 `{variable}` 占位符注入上下文
 
 **模块详解**：
@@ -262,7 +268,14 @@ videomind/
 │   │   ├── cache.py            # SQLite 持久化缓存（ai_cache + whisper_cache + video_info_cache + user_history）
 │   │   ├── auth.py             # 用户认证核心（Session/密码/游客签名/使用次数统计）
 │   │   ├── summary_models.py   # AI 总结 Pydantic 模型
-│   │   └── models.py           # 视频下载 Pydantic 数据模型
+│   │   ├── models.py           # 视频下载 Pydantic 数据模型
+│   │   └── pipeline/           # 共享流水线工具（api/ 与 core/ 共用）
+│   │       ├── subtitle.py            # 统一字幕工具集
+│   │       ├── summary.py             # 摘要生成流水线
+│   │       ├── notes.py               # 笔记生成流水线
+│   │       ├── mindmap.py             # 思维导图生成流水线
+│   │       ├── tags.py                # 标签提取流水线
+│   │       └── subtitle_postprocess.py # 时间戳注入与笔记联动
 │   ├── prompts/                # Prompt 模板（版本化）
 │   │   ├── summary/v1.txt
 │   │   ├── notes/v1.txt
@@ -300,8 +313,7 @@ videomind/
 │       │   ├── VideoInfo.vue       # 备用（当前未使用）
 │       │   ├── FormatSelector.vue  # 备用（当前未使用）
 │       │   ├── DownloadProgress.vue # 备用（当前未使用）
-│       │   ├── DownloadHistory.vue  # 备用（当前未使用）
-│       │   └── HelloWorld.vue       # 备用（Vite 脚手架默认组件，当前未使用）
+│       │   └── DownloadHistory.vue  # 备用（当前未使用）
 │       └── composables/
 │           ├── useAuth.js      # 用户认证状态管理（登录/注册/退出/游客身份/用量查询）
 │           ├── useDownloader.js # 下载 API/WebSocket 对接（核心状态管理）

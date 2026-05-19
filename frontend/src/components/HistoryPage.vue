@@ -17,6 +17,13 @@ const historyLoading = ref(false)
 const historyLoadingMore = ref(false)
 const historyHasMore = ref(false)
 const deletingHistoryId = ref(null)
+const errorMessage = ref('')
+let errorTimer = null
+function showError(msg) {
+  errorMessage.value = msg
+  clearTimeout(errorTimer)
+  errorTimer = setTimeout(() => { errorMessage.value = '' }, 4000)
+}
 const searchMode = ref('text') // 'text' | 'semantic'
 const semanticResults = ref([])
 const expandedGroups = ref({}) // { groupKey: true/false }
@@ -47,7 +54,7 @@ async function fetchHistoryPage() {
     }
     if (tagsRes.ok) historyTags.value = await tagsRes.json()
     if (statsRes.ok) historyStats.value = await statsRes.json()
-  } catch { alert('加载历史记录失败，请稍后重试') } finally {
+  } catch { showError('加载历史记录失败，请稍后重试') } finally {
     historyLoading.value = false
   }
 }
@@ -69,7 +76,7 @@ async function loadMoreHistory() {
       historyItems.value.push(...(data.items || []))
       historyHasMore.value = historyItems.value.length < historyTotal.value
     }
-  } catch { alert('加载失败，请稍后重试') } finally {
+  } catch { showError('加载失败，请稍后重试') } finally {
     historyLoadingMore.value = false
   }
 }
@@ -83,7 +90,7 @@ async function handleSemanticSearch() {
       const data = await res.json()
       semanticResults.value = data.results || []
     }
-  } catch { alert('语义搜索失败，请稍后重试') } finally {
+  } catch { showError('语义搜索失败，请稍后重试') } finally {
     historyLoading.value = false
   }
 }
@@ -121,7 +128,7 @@ async function toggleFavorite(item) {
       const data = await res.json()
       item.is_favorite = data.is_favorite
     }
-  } catch { alert('操作失败，请稍后重试') }
+  } catch { showError('操作失败，请稍后重试') }
 }
 
 async function deleteHistoryItem(item) {
@@ -132,7 +139,7 @@ async function deleteHistoryItem(item) {
       const authH = getAuthHeaders()
       await Promise.all(item.parts.map(p => fetch(`/api/history/${p.id}`, { method: 'DELETE', headers: authH })))
       historyItems.value = historyItems.value.filter(h => h.id !== item.id)
-    } catch { alert('删除失败，请稍后重试') } finally {
+    } catch { showError('删除失败，请稍后重试') } finally {
       deletingHistoryId.value = null
     }
     return
@@ -142,7 +149,7 @@ async function deleteHistoryItem(item) {
     deletingHistoryId.value = item.id
     await fetch(`/api/history/${item.id}`, { method: 'DELETE', headers: getAuthHeaders() })
     historyItems.value = historyItems.value.filter(h => h.id !== item.id)
-  } catch { alert('删除失败，请稍后重试') } finally {
+  } catch { showError('删除失败，请稍后重试') } finally {
     deletingHistoryId.value = null
   }
 }
@@ -175,6 +182,12 @@ fetchHistoryPage()
 
 <template>
   <section class="history-page">
+    <Transition name="error-toast">
+      <div v-if="errorMessage" class="error-toast" @click="errorMessage = ''">
+        <svg viewBox="0 0 20 20" fill="currentColor" class="error-toast-icon"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/></svg>
+        <span>{{ errorMessage }}</span>
+      </div>
+    </Transition>
     <div class="history-page-container">
       <!-- 统计仪表盘 -->
       <div v-if="historyStats" class="stats-dashboard">
@@ -251,7 +264,7 @@ fetchHistoryPage()
       <!-- 语义搜索结果 -->
       <div v-if="searchMode === 'semantic' && semanticResults.length" class="semantic-results">
         <div class="section-title">知识搜索结果</div>
-        <div v-for="(r, i) in semanticResults" :key="i" class="semantic-card" @click="selectHistory({ url: r.video_url || '' })">
+        <div v-for="(r, i) in semanticResults" :key="i" class="semantic-card" @click="selectHistory({ url: r.video_url || '' })" @keydown.enter="selectHistory({ url: r.video_url || '' })" tabindex="0" role="button">
           <div class="semantic-title">{{ r.video_title || '未知视频' }}</div>
           <div class="semantic-snippet">{{ r.snippet }}</div>
         </div>
@@ -278,13 +291,13 @@ fetchHistoryPage()
               <span v-if="item.platform" class="hp-platform-tag">{{ item.platform }}</span>
             </div>
             <!-- 多P标识 -->
-            <div v-if="item.is_multipart" class="hp-multipart-badge" @click="toggleGroup(item.id)">
+            <div v-if="item.is_multipart" class="hp-multipart-badge" @click="toggleGroup(item.id)" @keydown.enter="toggleGroup(item.id)" tabindex="0" role="button">
               <svg :class="['hp-expand-icon', { expanded: expandedGroups[item.id] }]" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/></svg>
               已学习 {{ item.total_parts ? `${item.parts_count}/${item.total_parts}` : item.parts_count }}P · {{ expandedGroups[item.id] ? '点击关闭' : '点击展开' }}
             </div>
             <!-- 多P分P列表 -->
             <div v-if="item.is_multipart && expandedGroups[item.id]" class="hp-parts-list">
-              <div v-for="part in item.parts" :key="part.id" class="hp-part-item" @click="selectHistory(part)">
+              <div v-for="part in item.parts" :key="part.id" class="hp-part-item" @click="selectHistory(part)" @keydown.enter="selectHistory(part)" tabindex="0" role="button">
                 <span class="hp-part-index">P{{ part.part_index ?? '?' }}</span>
                 <span class="hp-part-title">{{ part.part_info || '总览' }}</span>
                 <span class="hp-part-time">{{ part.created_at?.slice(5, 16) }}</span>
@@ -320,6 +333,30 @@ fetchHistoryPage()
 </template>
 
 <style scoped>
+.error-toast {
+  position: fixed;
+  bottom: 2rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1.25rem;
+  background: rgba(239, 68, 68, 0.95);
+  color: white;
+  font-size: 0.875rem;
+  border-radius: 10px;
+  z-index: 9999;
+  cursor: pointer;
+  box-shadow: 0 4px 20px rgba(239, 68, 68, 0.3);
+  max-width: 90vw;
+}
+.error-toast-icon { width: 18px; height: 18px; flex-shrink: 0; }
+.error-toast-enter-active { animation: toast-in 0.25s ease-out; }
+.error-toast-leave-active { animation: toast-out 0.2s ease-in; }
+@keyframes toast-in { from { opacity: 0; transform: translateX(-50%) translateY(1rem); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+@keyframes toast-out { from { opacity: 1; transform: translateX(-50%) translateY(0); } to { opacity: 0; transform: translateX(-50%) translateY(1rem); } }
+
 /* ── 学习历史页 ── */
 .history-page {
   padding: 2rem;
@@ -530,7 +567,7 @@ fetchHistoryPage()
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
-@keyframes spin { to { transform: rotate(360deg); } }
+/* @keyframes spin defined globally in style.css */
 .history-empty {
   display: flex;
   flex-direction: column;

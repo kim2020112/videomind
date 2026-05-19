@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 from core.task_queue import task_queue
 
@@ -9,7 +9,7 @@ router = APIRouter(prefix="/api", tags=["tasks"])
 async def get_task_status(task_id: str):
     task = task_queue.get_task(task_id)
     if not task:
-        return {"error": "Task not found"}, 404
+        raise HTTPException(status_code=404, detail="Task not found")
     return {
         "id": task.id,
         "type": task.task_type.value,

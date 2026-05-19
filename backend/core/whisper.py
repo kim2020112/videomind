@@ -14,8 +14,12 @@ import tempfile
 import shutil
 
 from config import WHISPER_MODEL, WHISPER_MODELS_DIR
+from core.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 _whisper_semaphore = asyncio.Semaphore(1)
+_model_instance = None
 
 _MODEL_DIR = os.path.join(str(WHISPER_MODELS_DIR), f"faster-whisper-{WHISPER_MODEL}")
 _REQUIRED_FILES = ["config.json", "model.bin", "tokenizer.json", "vocabulary.txt"]
@@ -33,10 +37,10 @@ def is_model_available() -> bool:
 
 # 启动时检查
 if is_model_available():
-    print(f"[Whisper] 模型已就绪: {_MODEL_DIR}")
+    logger.info(f"模型已就绪: {_MODEL_DIR}")
 else:
     missing = [f for f in _REQUIRED_FILES if not os.path.isfile(os.path.join(_MODEL_DIR, f))]
-    print(f"[Whisper] 模型不可用（{_MODEL_DIR}），缺失: {missing or '目录不存在'}。Whisper 转录已禁用。")
+    logger.warning(f"模型不可用（{_MODEL_DIR}），缺失: {missing or '目录不存在'}。Whisper 转录已禁用。")
 
 
 def _download_audio(url: str) -> str:
@@ -59,17 +63,32 @@ def _download_audio(url: str) -> str:
         "noplaylist": True,
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        base = os.path.splitext(ydl.prepare_filename(info))[0]
-        mp3_path = base + ".mp3"
-        if os.path.exists(mp3_path):
-            return mp3_path
-        for f in os.listdir(tmpdir):
-            fp = os.path.join(tmpdir, f)
-            if os.path.isfile(fp) and not f.endswith(".part"):
-                return fp
-        raise FileNotFoundError("音频下载后未找到输出文件")
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            base = os.path.splitext(ydl.prepare_filename(info))[0]
+            mp3_path = base + ".mp3"
+            if os.path.exists(mp3_path):
+                return mp3_path
+            for f in os.listdir(tmpdir):
+                fp = os.path.join(tmpdir, f)
+                if os.path.isfile(fp) and not f.endswith(".part"):
+                    return fp
+            raise FileNotFoundError("音频下载后未找到输出文件")
+    except Exception:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise
+
+
+def _get_model():
+    global _model_instance
+    if _model_instance is None:
+        from faster_whisper import WhisperModel
+        _model_instance = WhisperModel(
+            _MODEL_DIR, device="cpu", compute_type="int8",
+            local_files_only=True,
+        )
+    return _model_instance
 
 
 def transcribe(audio_path: str, language: str = None) -> str:
@@ -79,12 +98,7 @@ def transcribe(audio_path: str, language: str = None) -> str:
             f"Whisper 模型未就绪，请将模型文件放入 {_MODEL_DIR}"
         )
 
-    from faster_whisper import WhisperModel
-
-    model = WhisperModel(
-        _MODEL_DIR, device="cpu", compute_type="int8",
-        local_files_only=True,
-    )
+    model = _get_model()
 
     transcribe_opts = {"beam_size": 5, "vad_filter": True}
     if language:

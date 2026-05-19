@@ -1,4 +1,4 @@
-import { ref, reactive } from 'vue'
+import { ref, reactive, onUnmounted } from 'vue'
 
 const API_BASE = '/api'
 
@@ -188,6 +188,13 @@ export function useDownloader() {
       ws = null
     }
   }
+
+  onUnmounted(() => {
+    if (ws) {
+      ws.close()
+      ws = null
+    }
+  })
 
   return {
     videoInfo,

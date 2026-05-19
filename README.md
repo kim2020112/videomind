@@ -26,7 +26,7 @@ B站 · YouTube · 抖音 · 小红书 · TikTok
 |---|------|
 | 前端 | Vue 3 + Vite + Tailwind CSS |
 | 后端 | FastAPI + Python |
-| AI | DeepSeek API（OpenAI 兼容协议，可切换） |
+| AI | DeepSeek API（Anthropic 兼容协议，可切换） |
 | 存储 | SQLite + ChromaDB |
 | 视频引擎 | yt-dlp |
 
@@ -61,8 +61,13 @@ GUEST_SECRET=random_secret_key
 ### 启动
 
 ```bash
-cd backend && python -m uvicorn main:app --reload --port 8000
+# 开发模式
+cd backend && python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
 cd frontend && npm run dev
+
+# 生产模式（推荐使用 systemd 管理后端进程，限制内存防止 OOM）
+cd frontend && npm run build
+cd ../backend && python main.py  # FastAPI 托管前端静态文件
 ```
 
 ### 访问
@@ -78,10 +83,9 @@ cd frontend && npm run dev
 用户输入 URL → 字幕获取 → AI 处理流水线 → 知识存储
                  │              │               │
           B站CC/yt-dlp    摘要/笔记/导图     SQLite + ChromaDB
-                 │              │
-          多P视频按P独立获取   流式 SSE 推送（渐进式生成）
-
-用户认证：Session Cookie + 游客 device_id 签名 → 三级权限隔离
+          Whisper 兜底        │              │
+                 │        core/pipeline/    用户认证/隔离
+          多P视频按P独立获取  流式 SSE 推送（渐进式生成）
 ```
 
 ## API 端点
@@ -89,11 +93,21 @@ cd frontend && npm run dev
 | 端点 | 说明 |
 |------|------|
 | `POST /api/parse` | 解析视频信息 |
+| `GET /api/video/stream` | 视频流代理（支持 Range，在线播放） |
+| `GET /api/video/refresh` | 刷新过期视频直链 |
+| `GET /api/thumbnail` | 缩略图代理（防盗链） |
+| `POST /api/summarize` | AI 视频总结（同步） |
 | `POST /api/summarize/stream` | AI 总结（SSE 流式） |
-| `GET /api/subtitle/text` | 获取字幕文本 |
 | `POST /api/chat/stream` | AI 问答（SSE 流式） |
-| `GET /api/videos` | 学习历史列表 |
-| `POST /api/ingest` | 保存学习记录 |
+| `GET /api/subtitle` | 下载字幕文件 |
+| `GET /api/subtitle/text` | 获取字幕纯文本 |
+| `GET /api/subtitle/translate` | 翻译字幕 |
+| `POST /api/download` | 创建下载任务 |
+| `WS /ws/download/{task_id}` | WebSocket 下载进度 |
+| `GET /api/history` | 学习历史列表 |
+| `GET /api/history/stats` | 学习统计数据 |
+| `GET /api/history/tags` | 标签列表 |
+| `GET /api/search` | 语义搜索 |
 | `POST /api/auth/register` | 用户注册 |
 | `POST /api/auth/login` | 用户登录 |
 | `GET /api/auth/me` | 当前用户信息 |
@@ -103,3 +117,4 @@ cd frontend && npm run dev
 
 - 基于 yt-dlp 开源项目，仅供学习使用
 - 请尊重版权，仅处理有权访问的内容
+- 生产部署建议用 systemd 限制 Python 进程内存（参考 `CLAUDE.md` 中的资源管理经验），避免 ChromaDB + uvicorn 内存雪崩

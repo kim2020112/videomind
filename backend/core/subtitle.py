@@ -85,8 +85,7 @@ async def _try_platform_subtitle(url: str) -> Optional[SubtitleResult]:
 async def _try_ytdlp_subtitle(
     url: str, preferred_lang: str, downloader
 ) -> Optional[SubtitleResult]:
-    from api.routes import _download_subtitle_content
-    from api.summary_routes import _select_subtitle_lang
+    from core.pipeline.subtitle import _download_subtitle_content, _select_subtitle_lang
 
     info = await asyncio.get_event_loop().run_in_executor(
         None, downloader.parse_info, url

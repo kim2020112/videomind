@@ -1,5 +1,36 @@
 # 变更记录
 
+## [3.1.0] - 2026-05-19
+
+### 变更
+
+- **共享 Pipeline 模块提取**（`backend/core/pipeline/`）：
+  - 新建 `core/pipeline/` 共享工具包，解决 core→api 反向依赖问题
+  - `subtitle.py`：统一字幕工具集（`extract_bvid()`、`_select_subtitle_lang()`、`_download_subtitle_content()`、`try_get_bilibili_cc_subtitle()`、`transcribe_and_correct()`、`fetch_subtitle()`、`save_subtitle()`、`_build_part_info()`）
+  - `summary.py`、`notes.py`、`mindmap.py`、`tags.py`：流水线阶段模块
+  - `subtitle_postprocess.py`：时间戳注入、笔记联动等后处理逻辑
+  - 消除 6 处 Whisper 与 B站 CC 快速路径重复代码（`summary_routes.py`、`stream_routes.py`、`subtitle_text_routes.py` 统一调用共享函数）
+
+- **代码去重与统一**：
+  - `ai_client.py` 新增 `_split_text()` 的 `overlap` 参数，统一 chunking 逻辑
+  - `services/ingest_service.py` 移除本地 `_chunk_text()`，改用 `_split_text(max_chars=500, overlap=50)`
+  - `cache.py` 删除死代码 `add_history()`
+
+- **前端优化**：
+  - `AiSummary.vue`：`renderNotesMarkdown()` 改为 `computed` 缓存；`renderMarkdown()` 添加 Map 记忆化；思维导图渲染前销毁旧 markmap 实例，组件卸载时清理
+  - `HistoryPage.vue`：6 处 `alert()` 替换为固定底部 error toast（自动消失动画）
+  - `useDownloader.js`：新增 `onUnmounted` 自动关闭 WebSocket 连接
+  - 删除死文件 `HelloWorld.vue`；删除 `App.vue` 中未使用的 `.download-button` CSS
+  - 移除 3 处 scoped 重复 `@keyframes spin` 定义（全局 `style.css` 已有）
+
+### 修复
+
+- **输入验证**（`api/routes.py`）：`extract_url()` 空输入和无效链接返回明确错误信息
+- **错误处理规范**：`api/task_routes.py` 改为 `raise HTTPException`；短链解析失败等 `except: pass` 改为 `logger.warning()`
+- **Whisper 临时目录泄漏**（`core/whisper.py`）：yt-dlp 下载失败时清理 tempdir
+- **空思维导图**（`core/summary_models.py`）：`mindmap` 字段改为 `Optional`，无导图时不返回空节点
+- **无障碍**：可点击 `<div>` 添加 `tabindex="0"`、`role="button"`、`@keydown.enter`；封面图 `<img>` 添加 `alt` 属性
+
 ## [3.0.0] - 2026-05-18
 
 ### 新增

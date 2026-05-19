@@ -54,7 +54,6 @@ const summarizeUrl = computed(() => {
 const showDownloadSection = ref(false)
 const showSubtitles = ref(false)
 const showFullDescription = ref(false)
-const showChapters = ref(false)
 const currentView = ref('home') // 'home' | 'history'
 
 // 视频播放 Modal
@@ -330,6 +329,21 @@ function handleSelectAll() {
   }
 }
 
+function handleLogout() {
+  url.value = ''
+  error.value = ''
+  loading.value = false
+  reset()
+  resetSummary()
+  resetChat()
+  activeTab.value = 'summary'
+  showSubtitles.value = false
+  showFullDescription.value = false
+  selectedPartIndices.value = []
+  currentView.value = 'home'
+  window.scrollTo(0, 0)
+}
+
 async function handleParse() {
   if (!url.value.trim()) return
   error.value = ''
@@ -342,7 +356,6 @@ async function handleParse() {
   resetChat()
   reset()
   showSubtitles.value = false
-  showChapters.value = false
   showFullDescription.value = false
   try {
     await parseVideo(url.value.trim())
@@ -447,7 +460,7 @@ function formatTime(timestamp) {
 
 <template>
   <div class="app-container">
-    <NavBar :currentView="currentView" @toggle-history="toggleHistory" @go-home="currentView = 'home'; $nextTick(() => window.scrollTo(0, 0))" />
+    <NavBar :currentView="currentView" @toggle-history="toggleHistory" @logout="handleLogout" @go-home="currentView = 'home'; $nextTick(() => window.scrollTo(0, 0))" />
 
     <!-- 学习历史页 -->
     <HistoryPage v-if="currentView === 'history'" @select-item="handleSelectHistory" />
@@ -475,8 +488,8 @@ function formatTime(timestamp) {
         <!-- Video Info Card -->
         <div v-if="videoInfo" class="video-card">
           <div class="video-info">
-            <div class="video-thumbnail-wrapper" :class="{ clickable: videoInfo.stream_url }" @click="openVideoModal">
-              <img v-if="videoInfo.thumbnail" :src="videoInfo.thumbnail" class="video-thumbnail" />
+            <div class="video-thumbnail-wrapper" :class="{ clickable: videoInfo.stream_url }" @click="openVideoModal" @keydown.enter="openVideoModal" tabindex="0" role="button">
+              <img v-if="videoInfo.thumbnail" :src="videoInfo.thumbnail" :alt="videoInfo.title || '视频缩略图'" class="video-thumbnail" />
               <div v-if="videoInfo.stream_url" class="video-thumbnail-play">
                 <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
               </div>
@@ -497,36 +510,6 @@ function formatTime(timestamp) {
           </div>
 
           <!-- Chapters -->
-          <div v-if="videoInfo.chapters && videoInfo.chapters.length" class="chapters-section">
-            <button
-              type="button"
-              class="chapters-collapse-toggle"
-              :aria-expanded="showChapters"
-              @click="showChapters = !showChapters"
-            >
-              <svg
-                class="subtitle-toggle-chevron"
-                :class="{ rotated: showChapters }"
-                viewBox="0 0 20 20"
-                fill="currentColor"
-              >
-                <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
-              </svg>
-              <span class="subtitle-toggle-label">视频章节（{{ videoInfo.chapters.length }}）</span>
-            </button>
-            <div v-show="showChapters" class="chapters-list">
-              <div
-                v-for="(ch, i) in videoInfo.chapters"
-                :key="i"
-                class="chapter-row chapter-row-clickable"
-                @click="handleSeekVideo(ch.start_time)"
-              >
-                <span class="chapter-time">{{ formatDuration(ch.start_time) }}</span>
-                <span class="chapter-title">{{ ch.title }}</span>
-              </div>
-            </div>
-          </div>
-
           <!-- Video Description -->
           <div v-if="videoInfo.description" class="video-description" :class="{ expanded: showFullDescription }">
             <p class="video-description-text">{{ videoInfo.description }}</p>
@@ -1199,70 +1182,6 @@ function formatTime(timestamp) {
   color: var(--text-muted);
 }
 
-.chapters-section {
-  margin-bottom: 1rem;
-}
-.chapters-collapse-toggle {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.625rem 0.875rem;
-  background: rgba(59, 130, 246, 0.05);
-  border: 1px solid rgba(59, 130, 246, 0.12);
-  border-radius: 10px;
-  color: var(--text-secondary);
-  font-size: 0.8125rem;
-  cursor: pointer;
-  transition: all 0.2s;
-  text-align: left;
-}
-.chapters-collapse-toggle:hover {
-  background: rgba(59, 130, 246, 0.08);
-  border-color: rgba(59, 130, 246, 0.2);
-  color: var(--text-primary);
-}
-.chapters-list {
-  margin-top: 0.5rem;
-  max-height: 240px;
-  overflow-y: auto;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 0.375rem;
-}
-.chapter-row {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.5rem 0.625rem;
-  border-radius: 7px;
-  transition: background 0.15s;
-}
-.chapter-row:hover {
-  background: var(--bg-card-hover);
-}
-.chapter-row-clickable {
-  cursor: pointer;
-}
-.chapter-row-clickable:hover .chapter-time {
-  color: #BFDBFE;
-}
-.chapter-time {
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--accent-blue);
-  font-variant-numeric: tabular-nums;
-  flex-shrink: 0;
-  min-width: 3.5rem;
-}
-.chapter-title {
-  font-size: 0.8125rem;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .subtitle-section {
   margin-bottom: 1.5rem;
 }
@@ -1460,32 +1379,6 @@ function formatTime(timestamp) {
   background: rgba(16, 185, 129, 0.2);
 }
 
-.download-button {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  padding: 1rem;
-  background: linear-gradient(135deg, var(--accent-blue) 0%, var(--accent-cyan) 100%);
-  color: white;
-  border: none;
-  border-radius: var(--radius);
-  font-size: 1rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.download-button:hover:not(:disabled) {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(59, 130, 246, 0.3);
-}
-
-.download-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
 
 .download-icon {
   width: 20px;

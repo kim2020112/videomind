@@ -3,9 +3,14 @@
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import anthropic
-from config import AI_API_KEY, AI_BASE_URL, AI_MODEL, AI_PROVIDER, PROMPT_VERSION, BASE_DIR
+from config import (AI_API_KEY, AI_BASE_URL, AI_MODEL, AI_PROVIDER, PROMPT_VERSION, BASE_DIR,
+                    SUMMARY_PROMPT_VERSION, NOTES_PROMPT_VERSION, MINDMAP_PROMPT_VERSION)
+from core.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 MAX_SUBTITLE_CHARS = 60000
 JSON_BLOCK_RE = re.compile(r'```(?:json)?\s*\n?(.*?)\n?```', re.DOTALL)
@@ -16,25 +21,44 @@ _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 2  # 秒，指数退避基数
 
 
+def _is_recoverable(err: Exception) -> bool:
+    """判断是否为可恢复的错误（网络/超时/服务端/限流），4xx 不可恢复。"""
+    if isinstance(err, (anthropic.APIConnectionError, anthropic.APITimeoutError)):
+        return True
+    if isinstance(err, anthropic.APIStatusError):
+        return err.status_code >= 500 or err.status_code == 429
+    # 非 Anthropic 异常（如 urllib3 连接错误）视为可恢复
+    return isinstance(err, (ConnectionError, TimeoutError, OSError))
+
+
 def _retry(fn, *args, **kwargs):
-    """带指数退避的重试包装器。最多重试 _MAX_RETRIES 次。"""
+    """带指数退避的重试包装器。仅对可恢复错误重试。"""
     last_err = None
     for attempt in range(_MAX_RETRIES):
         try:
             return fn(*args, **kwargs)
         except Exception as e:
             last_err = e
-            if attempt < _MAX_RETRIES - 1:
+            if attempt < _MAX_RETRIES - 1 and _is_recoverable(e):
                 delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                # _retry 始终在 ThreadPoolExecutor 线程中运行，time.sleep 不阻塞事件循环
                 time.sleep(delay)
+            elif not _is_recoverable(e):
+                raise
     raise last_err
 
 
 # ──── Prompt 加载 ────
 
 def _load_prompt(name: str) -> str:
-    """从 prompts/{name}/v{PROMPT_VERSION}.txt 加载 prompt 模板。"""
-    path = BASE_DIR / "prompts" / name / f"v{PROMPT_VERSION}.txt"
+    """从 prompts/{name}/v{version}.txt 加载 prompt 模板。优先使用模块独立版本。"""
+    version_map = {
+        "summary": SUMMARY_PROMPT_VERSION,
+        "notes": NOTES_PROMPT_VERSION,
+        "mindmap": MINDMAP_PROMPT_VERSION,
+    }
+    version = version_map.get(name, PROMPT_VERSION)
+    path = BASE_DIR / "prompts" / name / f"v{version}.txt"
     if not path.exists():
         raise FileNotFoundError(f"Prompt 文件不存在: {path}")
     return path.read_text(encoding="utf-8")
@@ -57,7 +81,8 @@ def _extract_text(response) -> str:
 
 # ──── 文本分片 ────
 
-def _split_text(text: str, max_chars: int = MAX_SUBTITLE_CHARS) -> list[str]:
+def _split_text(text: str, max_chars: int = MAX_SUBTITLE_CHARS, overlap: int = 0) -> list[str]:
+    """按段落分片。overlap > 0 时保留上一片的末尾段落作为重叠。"""
     if len(text) <= max_chars:
         return [text]
     paragraphs = text.split("\n")
@@ -66,10 +91,14 @@ def _split_text(text: str, max_chars: int = MAX_SUBTITLE_CHARS) -> list[str]:
         para_len = len(para) + 1
         if current_len + para_len > max_chars and current:
             chunks.append("\n".join(current))
-            current, current_len = [para], para_len
-        else:
-            current.append(para)
-            current_len += para_len
+            if overlap > 0:
+                keep = current[-1:] if len(current[-1]) < overlap else []
+                current = keep
+                current_len = sum(len(p) for p in current)
+            else:
+                current, current_len = [], 0
+        current.append(para)
+        current_len += para_len
     if current:
         chunks.append("\n".join(current))
     return chunks
@@ -104,24 +133,64 @@ def _parse_json_or_fallback(content: str) -> dict:
     return parsed
 
 
+def _structured_to_markdown(parsed: dict) -> str:
+    """将 v2 JSON 结构化摘要转为 Markdown（前端渲染用）。"""
+    parts = []
+    overview = parsed.get("overview", "")
+    if overview:
+        parts.append(overview)
+
+    key_points = parsed.get("key_points", [])
+    if key_points:
+        parts.append("\n## 核心观点")
+        for kp in key_points:
+            parts.append(f"- {kp}")
+
+    concepts = parsed.get("concepts", [])
+    if concepts:
+        parts.append("\n## 关键概念")
+        for c in concepts:
+            name = c.get("name", "") if isinstance(c, dict) else str(c)
+            desc = c.get("description", "") if isinstance(c, dict) else ""
+            parts.append(f"- **{name}**：{desc}" if desc else f"- **{name}**")
+
+    main_content = parsed.get("main_content", "")
+    if main_content:
+        parts.append(f"\n{main_content}")
+
+    learning_points = parsed.get("learning_points", [])
+    if learning_points:
+        parts.append("\n## 学习要点")
+        for lp in learning_points:
+            parts.append(f"- {lp}")
+
+    return "\n".join(parts) if parts else ""
+
+
 # ──── Chunk Summary Pipeline（长视频） ────
 
 def _chunk_summarize(subtitle_text: str, video_title: str) -> str:
-    """长视频分片摘要 → 合并。返回合并后的摘要文本。"""
+    """长视频分片摘要 → 合并。返回合并后的摘要文本。并发请求以减少延迟。"""
     chunks = _split_text(subtitle_text)
     if len(chunks) == 1:
         return chunks[0]
 
     client = _get_client()
-    partials = []
-    for i, chunk in enumerate(chunks):
-        def _call():
-            return client.messages.create(
-                model=AI_MODEL, max_tokens=1000,
-                messages=[{"role": "user", "content": f"请对以下视频字幕片段（第 {i+1}/{len(chunks)} 部分）生成简要摘要，100-200字：\n\n---\n{chunk}\n---"}],
-            )
-        resp = _retry(_call)
-        partials.append(_extract_text(resp))
+
+    def _summarize_one(idx_chunk):
+        i, chunk = idx_chunk
+        return i, _retry(client.messages.create,
+            model=AI_MODEL, max_tokens=1000,
+            messages=[{"role": "user", "content": f"请对以下视频字幕片段（第 {i+1}/{len(chunks)} 部分）生成简要摘要，100-200字：\n\n---\n{chunk}\n---"}],
+        )
+
+    partials = [None] * len(chunks)
+    with ThreadPoolExecutor(max_workers=min(len(chunks), 4)) as executor:
+        futures = {executor.submit(_summarize_one, (i, c)): i for i, c in enumerate(chunks)}
+        for future in as_completed(futures):
+            i, resp = future.result()
+            partials[i] = _extract_text(resp)
+
     return "\n\n".join(partials)
 
 
@@ -170,7 +239,7 @@ def stream_chunk_summaries(subtitle_text: str, video_title: str = ""):
 # ──── 非流式 API ────
 
 def summarize(subtitle_text: str, video_title: str = "") -> dict:
-    """生成 AI 摘要。v2 prompt 输出 JSON 时自动解析为结构化数据。"""
+    """生成 AI 摘要。v2 prompt 直接输出 Markdown。"""
     client = _get_client()
     prompt = _load_prompt("summary").format(
         video_title=f"视频标题：{video_title}\n\n" if video_title else "",
@@ -181,9 +250,6 @@ def summarize(subtitle_text: str, video_title: str = "") -> dict:
         messages=[{"role": "user", "content": prompt}],
     )
     text = _extract_text(resp)
-    parsed = _parse_json_or_fallback(text)
-    if "overview" in parsed or "key_points" in parsed:
-        return {"summary": parsed.get("overview", text), "structured": parsed, "chapters": [], "key_points": parsed.get("key_points", [])}
     return {"summary": text, "chapters": [], "key_points": []}
 
 
@@ -287,15 +353,14 @@ def correct_subtitle(subtitle_text: str, video_title: str = "", video_descriptio
 
         return corrected
     except Exception as e:
-        print(f"[SubtitleCorrection] 校正失败，使用原始文本: {e}")
+        logger.warning(f"校正失败，使用原始文本: {e}")
         return subtitle_text
 
 
 # ──── 流式 API ────
 
 def stream_summarize(subtitle_text: str, video_title: str = ""):
-    """流式生成 AI 摘要。yield (event_type, data) 兼容现有 SSE。
-    v2 prompt 输出 JSON 时自动解析为结构化数据。"""
+    """流式生成 AI 摘要。yield (event_type, data) 兼容现有 SSE。"""
     client = _get_client()
     prompt = _load_prompt("summary").format(
         video_title=f"视频标题：{video_title}\n\n" if video_title else "",
@@ -316,15 +381,7 @@ def stream_summarize(subtitle_text: str, video_title: str = ""):
                         yield ("text", {"text": delta.text})
 
         full_text = full_text.strip() or "AI 未能生成有效的总结内容，请重试。"
-        parsed = _parse_json_or_fallback(full_text)
-        # 从结构化数据中提取纯文本摘要（用于前端兼容）
-        if "overview" in parsed:
-            summary_text = parsed.get("overview", full_text)
-        elif "summary" in parsed:
-            summary_text = parsed["summary"]
-        else:
-            summary_text = full_text
-        yield ("result", {"summary": summary_text, "structured": parsed})
+        yield ("result", {"summary": full_text})
 
     except Exception as e:
         yield ("error", {"message": str(e)})
@@ -480,12 +537,14 @@ def _parse_segments_from_text(subtitle_text: str) -> list[dict]:
     return segments
 
 
-def inject_notes_timestamps(notes_md: str, subtitle_text: str, segments: list[dict] = None) -> str:
+def inject_notes_timestamps(notes_md: str, subtitle_text: str, segments: list[dict] = None,
+                            max_timestamp: float = 0) -> str:
     """为笔记 section 标题注入字幕时间点。
 
     对没有 [MM:SS] 的 ## 标题，从 section 内容中提取前 100 字，
     与字幕 segments 做文本匹配，找到最相关的 segment 并注入其 start 时间。
 
+    max_timestamp: 视频时长（秒），注入的时间戳不会超过此值。0 表示不限制。
     segments 优先使用传入的精确数据（含 start/end/text），降级到从文本解析。
     """
     if not notes_md:
@@ -497,6 +556,10 @@ def inject_notes_timestamps(notes_md: str, subtitle_text: str, segments: list[di
         segments = _parse_segments_from_text(subtitle_text)
     if not segments:
         return notes_md
+
+    # 计算 segments 的最大时间，用于兜底限制
+    seg_max = max((s.get('start', 0) for s in segments), default=0)
+    effective_max = max_timestamp if max_timestamp > 0 else seg_max
 
     lines = notes_md.split('\n')
     result = []
@@ -519,6 +582,9 @@ def inject_notes_timestamps(notes_md: str, subtitle_text: str, segments: list[di
             # 在 segments 中找最佳匹配
             best_ts = _find_best_timestamp(heading, body_text, segments)
             if best_ts is not None:
+                # 限制时间戳不超过视频时长
+                if effective_max > 0 and best_ts > effective_max:
+                    best_ts = effective_max
                 mm = int(best_ts // 60)
                 ss = int(best_ts % 60)
                 line = f"{line} [{mm:02d}:{ss:02d}]"
@@ -530,18 +596,12 @@ def inject_notes_timestamps(notes_md: str, subtitle_text: str, segments: list[di
 
 
 def _longest_common_substr_len(a: str, b: str) -> int:
-    """最长公共子串长度。"""
+    """最长公共子串长度（使用 difflib.SequenceMatcher）。"""
     if not a or not b:
         return 0
-    max_len = 0
-    for i in range(len(a)):
-        for j in range(len(b)):
-            k = 0
-            while i + k < len(a) and j + k < len(b) and a[i+k] == b[j+k]:
-                k += 1
-            if k > max_len:
-                max_len = k
-    return max_len
+    import difflib
+    match = difflib.SequenceMatcher(None, a, b).find_longest_match(0, len(a), 0, len(b))
+    return match.size
 
 
 def _find_best_timestamp(heading: str, body: str, segments: list[dict]) -> float | None:

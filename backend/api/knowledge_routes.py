@@ -73,7 +73,10 @@ async def delete_video(video_id: int):
         ).fetchone()
         if not video:
             raise HTTPException(status_code=404, detail="Video not found")
+        conn.execute("DELETE FROM video_tags WHERE video_id = ?", (video_id,))
+        conn.execute("DELETE FROM subtitles WHERE video_id = ?", (video_id,))
         conn.execute("DELETE FROM videos WHERE id = ?", (video_id,))
+        conn.execute("DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM video_tags)")
     return {"ok": True}
 
 
@@ -115,20 +118,28 @@ async def toggle_favorite_endpoint(url_hash: str, request: Request):
 
 @router.delete("/history/{url_hash}")
 async def delete_history(url_hash: str, request: Request):
-    """删除学习历史记录。按用户隔离。"""
+    """删除学习历史记录。Admin 全局删除，普通用户按用户隔离。"""
     identity = get_identity(request)
-    with get_db() as conn:
-        # 先从 user_history 删除该用户的记录
-        if identity.get("user_id"):
-            conn.execute(
-                "DELETE FROM user_history WHERE url_hash = ? AND user_id = ?",
-                (url_hash, identity["user_id"]),
-            )
-        elif identity.get("guest_id"):
-            conn.execute(
-                "DELETE FROM user_history WHERE url_hash = ? AND guest_id = ?",
-                (url_hash, identity["guest_id"]),
-            )
+    role = identity.get("role", "guest")
+    if role == "admin":
+        # Admin：全局删除 — 先查 ai_cache 拿 url/fingerprint，再逐个删除
+        with get_db() as conn:
+            row = conn.execute("SELECT url, fingerprint FROM ai_cache WHERE url_hash = ?", (url_hash,)).fetchone()
+            conn.execute("DELETE FROM user_history WHERE url_hash = ?", (url_hash,))
+        if row:
+            delete_cache(row["url"], fingerprint=row["fingerprint"])
+    else:
+        with get_db() as conn:
+            if identity.get("user_id"):
+                conn.execute(
+                    "DELETE FROM user_history WHERE url_hash = ? AND user_id = ?",
+                    (url_hash, identity["user_id"]),
+                )
+            elif identity.get("guest_id"):
+                conn.execute(
+                    "DELETE FROM user_history WHERE url_hash = ? AND guest_id = ?",
+                    (url_hash, identity["guest_id"]),
+                )
     return {"ok": True}
 
 

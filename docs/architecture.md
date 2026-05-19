@@ -541,7 +541,14 @@ videomind/
 │   │   ├── whisper.py          # Faster-Whisper 转录模块（本地模型，CPU/int8）
 │   │   ├── cache.py            # SQLite 持久化缓存（AI 结果 + Whisper 转录 + 视频信息）
 │   │   ├── summary_models.py   # AI 总结 Pydantic 模型（SummarizeRequest、SummaryResult 等）
-│   │   └── models.py           # 视频下载 Pydantic 数据模型
+│   │   ├── models.py           # 视频下载 Pydantic 数据模型
+│   │   └── pipeline/           # 共享流水线工具模块（api/ 与 core/ 共用的基础函数）
+│   │       ├── subtitle.py            # 字幕工具集（extract_bvid / try_get_bilibili_cc_subtitle / transcribe_and_correct 等）
+│   │       ├── summary.py             # 摘要生成流水线阶段
+│   │       ├── notes.py               # 笔记生成流水线阶段
+│   │       ├── mindmap.py             # 思维导图生成流水线阶段
+│   │       ├── tags.py                # 标签提取流水线阶段
+│   │       └── subtitle_postprocess.py # 时间戳注入、笔记联动后处理
 │   ├── prompts/                # AI Prompt 模板（版本化）
 │   │   ├── summary/v1.txt
 │   │   ├── notes/v1.txt
@@ -583,8 +590,7 @@ videomind/
 │   │   │   ├── VideoInfo.vue       # 备用（当前未使用）
 │   │   │   ├── FormatSelector.vue  # 备用（当前未使用）
 │   │   │   ├── DownloadProgress.vue # 备用（当前未使用）
-│   │   │   ├── DownloadHistory.vue  # 备用（当前未使用）
-│   │   │   └── HelloWorld.vue       # 备用（Vite 脚手架默认组件，当前未使用）
+│   │   │   └── DownloadHistory.vue  # 备用（当前未使用）
 │   │   └── composables/
 │   │       ├── useAuth.js          # 用户认证状态管理（登录/注册/退出/游客身份/用量查询）
 │   │       ├── useDownloader.js    # 下载 API/WebSocket 对接（核心状态管理）

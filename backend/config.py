@@ -12,8 +12,11 @@ AI_API_KEY = os.getenv("AI_API_KEY", os.getenv("DEEPSEEK_API_KEY", ""))
 AI_BASE_URL = os.getenv("AI_BASE_URL", os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/anthropic"))
 AI_MODEL = os.getenv("AI_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
 
-# Prompt 版本
+# Prompt 版本（全局默认 + 按模块独立，修改某模块版本只失效该模块缓存）
 PROMPT_VERSION = int(os.getenv("PROMPT_VERSION", "1"))
+SUMMARY_PROMPT_VERSION = int(os.getenv("SUMMARY_PROMPT_VERSION", "2"))
+NOTES_PROMPT_VERSION = int(os.getenv("NOTES_PROMPT_VERSION", str(PROMPT_VERSION)))
+MINDMAP_PROMPT_VERSION = int(os.getenv("MINDMAP_PROMPT_VERSION", str(PROMPT_VERSION)))
 
 # 数据库
 DB_PATH = BASE_DIR / "db" / "knowledge.db"
