@@ -25,7 +25,10 @@ def _url_hash(url: str) -> str:
 
 
 def video_fingerprint(extractor: str, video_id: str) -> str:
-    """构建视频指纹: platform:id (如 bilibili:BV1cW9xB3Ec1)。"""
+    """构建视频指纹: platform:id (如 bilibili:BV1cW9xB3Ec1)。
+    Bilibili 多P视频的 id 带 _pN 后缀，去掉以按视频聚合。"""
+    import re as _re
+    video_id = _re.sub(r'_p\d+$', '', video_id)
     return f"{extractor}:{video_id}"
 
 
@@ -101,8 +104,8 @@ def _init_cache():
 
 def _max_prompt_version() -> int:
     """取所有模块 prompt 版本的最大值，作为缓存版本号。"""
-    from config import SUMMARY_PROMPT_VERSION, NOTES_PROMPT_VERSION, MINDMAP_PROMPT_VERSION
-    return max(SUMMARY_PROMPT_VERSION, NOTES_PROMPT_VERSION, MINDMAP_PROMPT_VERSION)
+    from config import SUMMARY_PROMPT_VERSION, NOTES_PROMPT_VERSION, MINDMAP_PROMPT_VERSION, QANDA_PROMPT_VERSION
+    return max(SUMMARY_PROMPT_VERSION, NOTES_PROMPT_VERSION, MINDMAP_PROMPT_VERSION, QANDA_PROMPT_VERSION)
 
 
 def get_cached(url: str, fingerprint: str = None) -> dict | None:
@@ -158,6 +161,28 @@ def get_cached(url: str, fingerprint: str = None) -> dict | None:
     }
 
 
+def _get_cached_raw(url: str) -> dict | None:
+    """读取缓存行（跳过 prompt_version 检查，供 Q&A 合并写入用）。"""
+    h = _url_hash(url)
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT url, video_title, subtitle_text, source, result_json, part_info, fingerprint, platform FROM ai_cache WHERE url_hash = ?",
+            (h,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "url": row[0],
+        "video_title": row[1],
+        "subtitle_text": row[2],
+        "source": row[3],
+        "result_json": row[4],
+        "part_info": row[5] or "",
+        "fingerprint": row[6] or "",
+        "platform": row[7] or "",
+    }
+
+
 def _compute_notes_chars(result_json: str) -> int:
     """从 result_json 中提取 notes 字段并计算字数。"""
     if not result_json:
@@ -175,13 +200,40 @@ def _compute_notes_chars(result_json: str) -> int:
 
 
 def _cleanup_old_cache(conn):
-    """保留最新的 50 条缓存，删除超出的旧记录，并级联清理关联数据。"""
-    # 找到将被删除的 URL
-    old_urls = conn.execute(
-        "SELECT url FROM ai_cache WHERE url_hash NOT IN (SELECT url_hash FROM ai_cache ORDER BY updated_at DESC LIMIT 50)"
+    """保留最新的 50 个视频的缓存，删除超出的旧记录。
+    按 fingerprint（视频唯一标识，如 bilibili:BVxxx）去重计数：
+    - 一个多P视频（如 185P）算 1 个视频，所有分P都保留
+    - 无 fingerprint 的记录按单条计数，保留最新的 50 条
+    """
+    # 1. 收集需删除的 URL（在删除前收集，用于级联清理）
+    old_urls = []
+    # 有 fingerprint: 找出不在 top 50 的视频
+    kept_fps = conn.execute(
+        "SELECT DISTINCT fingerprint FROM ai_cache WHERE fingerprint != '' ORDER BY updated_at DESC LIMIT 50"
     ).fetchall()
+    if kept_fps:
+        placeholders = ','.join('?' for _ in kept_fps)
+        old = conn.execute(
+            f"SELECT url FROM ai_cache WHERE fingerprint != '' AND fingerprint NOT IN ({placeholders})",
+            [r[0] for r in kept_fps],
+        ).fetchall()
+        old_urls.extend(old)
+        conn.execute(
+            f"DELETE FROM ai_cache WHERE fingerprint != '' AND fingerprint NOT IN ({placeholders})",
+            [r[0] for r in kept_fps],
+        )
+    # 无 fingerprint: 保留最新的 50 条
+    old = conn.execute(
+        "SELECT url FROM ai_cache WHERE (fingerprint = '' OR fingerprint IS NULL) "
+        "AND url_hash NOT IN ("
+        "SELECT url_hash FROM ai_cache WHERE fingerprint = '' OR fingerprint IS NULL ORDER BY updated_at DESC LIMIT 50"
+        ")"
+    ).fetchall()
+    old_urls.extend(old)
     conn.execute(
-        "DELETE FROM ai_cache WHERE url_hash NOT IN (SELECT url_hash FROM ai_cache ORDER BY updated_at DESC LIMIT 50)"
+        "DELETE FROM ai_cache WHERE (fingerprint = '' OR fingerprint IS NULL) AND url_hash NOT IN ("
+        "SELECT url_hash FROM ai_cache WHERE fingerprint = '' OR fingerprint IS NULL ORDER BY updated_at DESC LIMIT 50"
+        ")"
     )
     # 级联清理 knowledge.db 中不再被缓存引用的关联数据
     if old_urls:
@@ -535,9 +587,9 @@ def _extract_video_key(url: str) -> str:
 
 
 def _extract_part_index(url: str) -> int:
-    """从 URL 提取分P序号，无分P返回 0。"""
+    """从 URL 提取分P序号，无分P返回 1（基础 URL 隐含 P1）。"""
     m = re.search(r'[?&]p=(\d+)', url)
-    return int(m.group(1)) if m else 0
+    return int(m.group(1)) if m else 1
 
 
 def _get_total_parts_map(urls: list[str]) -> dict[str, int]:
@@ -566,6 +618,43 @@ def _get_total_parts_map(urls: list[str]) -> dict[str, int]:
                     if total > 0:
                         for u in group_urls:
                             result[u] = total
+                except (json.JSONDecodeError, TypeError):
+                    pass
+    return result
+
+
+def _get_part_details_map(urls: list[str]) -> dict[str, dict[int, dict]]:
+    """批量查询多P视频的分P详情。返回 {url: {part_index: {title, duration}}}。
+    用于历史记录页面展示每P的标题和时长。"""
+    bv_urls: dict[str, list[str]] = {}
+    for url in urls:
+        bv = re.search(r'(BV\w+)', url)
+        if bv:
+            bv_urls.setdefault(bv.group(1), []).append(url)
+    if not bv_urls:
+        return {}
+    result: dict[str, dict[int, dict]] = {}
+    with _get_db() as conn:
+        for bv, group_urls in bv_urls.items():
+            h = _url_hash(group_urls[0])
+            row = conn.execute(
+                "SELECT info_json FROM video_info_cache WHERE url_hash = ?", (h,)
+            ).fetchone()
+            if row and row[0]:
+                try:
+                    info = json.loads(row[0])
+                    parts = info.get("parts") or []
+                    details: dict[int, dict] = {}
+                    for p in parts:
+                        idx = p.get("index")
+                        if idx is not None:
+                            details[idx] = {
+                                "title": p.get("title", ""),
+                                "duration": p.get("duration") or 0,
+                            }
+                    if details:
+                        for u in group_urls:
+                            result[u] = details
                 except (json.JSONDecodeError, TypeError):
                     pass
     return result
@@ -650,6 +739,9 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
     # 批量查询多P视频的总分P数（从 video_info_cache 的 parts 字段）
     total_parts_map = _get_total_parts_map(all_urls)
 
+    # 批量查询多P视频的分P详情（标题、时长）
+    part_details_map = _get_part_details_map(all_urls)
+
     # 按 video_key 分组
     groups = {}
     group_order = []  # 保持排序顺序
@@ -686,11 +778,15 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
                     result = {}
                 inner = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
                 part_index = _extract_part_index(row["url"])
+                # 从 video_info_cache 获取分P详情
+                p_details = (part_details_map.get(row["url"], {})).get(part_index, {})
                 parts_list.append({
                     "id": row["url_hash"],
                     "url": row["url"],
                     "part_index": part_index,
                     "part_info": row["part_info"] if "part_info" in row.keys() else "",
+                    "part_title": p_details.get("title") or row["part_info"] or "",
+                    "part_duration": p_details.get("duration") or 0,
                     "summary_preview": (inner.get("summary") or "")[:100],
                     "created_at": row["created_at"],
                 })

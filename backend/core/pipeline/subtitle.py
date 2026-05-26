@@ -96,6 +96,11 @@ def _build_part_info(url: str, info=None, parts: list = None) -> str:
 
     p_match = re.search(r'[?&]p=(\d+)', url)
     if not p_match:
+        # 基础 URL 隐含 P1
+        if info and hasattr(info, 'parts') and info.parts:
+            part = next((p for p in info.parts if _get(p, 'index') == 1), None)
+            if part:
+                return _get(part, 'title') or "P1"
         return ""
     p_index = int(p_match.group(1))
     if info and hasattr(info, 'parts') and info.parts:
