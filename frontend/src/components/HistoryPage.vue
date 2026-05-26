@@ -299,8 +299,8 @@ fetchHistoryPage()
             <div v-if="item.is_multipart && expandedGroups[item.id]" class="hp-parts-list">
               <div v-for="part in item.parts" :key="part.id" class="hp-part-item" @click="selectHistory(part)" @keydown.enter="selectHistory(part)" tabindex="0" role="button">
                 <span class="hp-part-index">P{{ part.part_index ?? '?' }}</span>
-                <span class="hp-part-title">{{ part.part_info || '总览' }}</span>
-                <span class="hp-part-time">{{ part.created_at?.slice(5, 16) }}</span>
+                <span class="hp-part-title">{{ part.part_title || part.part_info || '未知分P' }}</span>
+                <span v-if="part.part_duration" class="hp-part-time">{{ formatDuration(part.part_duration) }}</span>
               </div>
             </div>
             <p v-if="!item.is_multipart && item.summary_preview" class="hp-card-summary">{{ item.summary_preview }}</p>

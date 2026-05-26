@@ -10,6 +10,7 @@ import HistoryPage from './components/HistoryPage.vue'
 import VideoPlayerModal from './components/VideoPlayerModal.vue'
 import { useSummary } from './composables/useSummary.js'
 import { useChat } from './composables/useChat.js'
+import { useQa } from './composables/useQa.js'
 import { useAuth } from './composables/useAuth.js'
 
 const { init: initAuth } = useAuth()
@@ -51,7 +52,6 @@ const summarizeUrl = computed(() => {
   if (p <= 1) return `https://www.bilibili.com/video/${bvMatch[1]}`
   return `https://www.bilibili.com/video/${bvMatch[1]}?p=${p}`
 })
-const showDownloadSection = ref(false)
 const showSubtitles = ref(false)
 const showFullDescription = ref(false)
 const currentView = ref('home') // 'home' | 'history'
@@ -116,6 +116,7 @@ const {
   notesMarkdown,
   notesSections,
   flashcards,
+  qaPairs: summaryQaPairs,
   generationStage,
   regeneratingMode,
   subtitleSource,
@@ -133,6 +134,20 @@ const {
   sendQuestion,
   resetChat,
 } = useChat()
+
+const {
+  qaPairs,
+  isQaGenerating,
+  qaError,
+  generateQa,
+  toggleExpand: toggleQaExpand,
+  resetQa,
+} = useQa()
+
+const displayQaPairs = computed(() => {
+  if (qaPairs.value.length > 0) return qaPairs.value
+  return summaryQaPairs.value || []
+})
 
 async function handleSummarize(force = false) {
   if (!videoInfo.value) return
@@ -191,6 +206,7 @@ async function switchSummarizePart(partIndex) {
   activeTab.value = 'summary'
   // 清除旧分P的字幕文本，避免显示上一分P的内容
   subtitleText.value = ''
+  resetQa()
   await handleSummarize(false)
   // 总结完成后自动获取当前分P的字幕
   fetchSubtitleText(summarizeUrl.value).catch(() => {})
@@ -198,6 +214,14 @@ async function switchSummarizePart(partIndex) {
 
 function handleSendQuestion(question) {
   sendQuestion(subtitleText.value, question)
+}
+
+function handleGenerateQa() {
+  generateQa(subtitleText.value, videoInfo.value?.title || '', summarizeUrl.value, false)
+}
+
+function handleRegenerateQa() {
+  generateQa(subtitleText.value, videoInfo.value?.title || '', summarizeUrl.value, true)
 }
 
 // 选中分P的总时长（秒）
@@ -351,6 +375,7 @@ function handleLogout() {
   reset()
   resetSummary()
   resetChat()
+  resetQa()
   activeTab.value = 'summary'
   showSubtitles.value = false
   showFullDescription.value = false
@@ -366,9 +391,9 @@ async function handleParse() {
   selectedPartIndices.value = []
   activeTab.value = 'summary'
   currentSummarizePart.value = 1
-  showDownloadSection.value = false
   resetSummary()
   resetChat()
+  resetQa()
   reset()
   showSubtitles.value = false
   showFullDescription.value = false
@@ -551,28 +576,14 @@ function formatTime(timestamp) {
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="tab-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" /></svg>
               AI 总结
             </button>
-            <button class="tab-button" :class="{ active: activeTab === 'download' }" @click="activeTab = 'download'; showDownloadSection = true">
+            <button class="tab-button" :class="{ active: activeTab === 'download' }" @click="activeTab = 'download'">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="tab-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 11l5 5m0 0l5-5m-5 5V3" /></svg>
               视频下载
             </button>
           </div>
 
-          <!-- Tab: 下载区（折叠式） -->
+          <!-- Tab: 下载区 -->
           <div v-show="activeTab === 'download'">
-          <!-- 下载选项折叠栏 -->
-          <button
-            v-if="displayFormats.length"
-            class="download-collapse-toggle"
-            :aria-expanded="showDownloadSection"
-            @click="showDownloadSection = !showDownloadSection"
-          >
-            <svg class="subtitle-toggle-chevron" :class="{ rotated: showDownloadSection }" viewBox="0 0 20 20" fill="currentColor">
-              <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
-            </svg>
-            <span>下载选项</span>
-            <span class="download-collapse-desc">{{ selectedFormatDetail ? stripSizeFromLabel(selectedFormatDetail.label) || (selectedFormatDetail.height ? selectedFormatDetail.height + 'p' : '') : '选择格式下载视频' }}</span>
-          </button>
-          <div v-show="showDownloadSection || !displayFormats.length">
           <!-- 分P选择器 -->
           <div v-if="videoInfo.parts && videoInfo.parts.length" class="parts-section">
             <div class="parts-header">
@@ -755,7 +766,6 @@ function formatTime(timestamp) {
             </div>
             <div v-if="progress.error" class="progress-error">{{ progress.error }}</div>
           </div>
-          </div><!-- end v-show showDownloadSection -->
           </div><!-- end v-show activeTab === 'download' -->
 
           <!-- Tab: AI 总结 -->
@@ -790,6 +800,12 @@ function formatTime(timestamp) {
               :onRegenerateSubtitle="handleRegenerateSubtitle"
               :onFetchSubtitle="handleFetchSubtitle"
               :onSendQuestion="handleSendQuestion"
+              :onGenerateQa="handleGenerateQa"
+              :onRegenerateQa="handleRegenerateQa"
+              :qaPairs="displayQaPairs"
+              :isQaGenerating="isQaGenerating"
+              :qaError="qaError"
+              :onToggleQaExpand="toggleQaExpand"
               :onSwitchPart="switchSummarizePart"
               :onSeekVideo="handleSeekVideo"
               :currentVideoTime="videoCurrentTime"
@@ -1704,17 +1720,22 @@ function formatTime(timestamp) {
 .part-row {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  border-radius: 7px;
+  gap: 0.375rem;
+  border-radius: 8px;
   transition: background 0.15s;
+  min-height: 44px;
 }
 
 .part-row:hover {
-  background: var(--bg-card-hover);
+  background: rgba(255,255,255,0.05);
+}
+
+.part-row.active {
+  background: rgba(59,130,246,0.1);
 }
 
 .part-row.selected {
-  background: rgba(59, 130, 246, 0.1);
+  background: rgba(59,130,246,0.1);
 }
 
 .part-checkbox {
@@ -1748,18 +1769,18 @@ function formatTime(timestamp) {
 .part-info {
   display: flex;
   align-items: center;
-  gap: 0.625rem;
+  gap: 0.5rem;
   flex: 1;
-  padding: 0.5rem 0.5rem 0.5rem 0;
+  padding: 0.5rem 0.375rem 0.5rem 0;
   min-width: 0;
 }
 
 .part-index {
   font-weight: 700;
   color: var(--accent-blue);
-  min-width: 2.5rem;
+  min-width: 2rem;
   flex-shrink: 0;
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
 }
 
 .part-title {
@@ -1767,7 +1788,7 @@ function formatTime(timestamp) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
   transition: color 0.15s;
   flex: 1;
   min-width: 0;
@@ -1845,34 +1866,4 @@ function formatTime(timestamp) {
   .description-text { font-size: 0.8125rem; }
 }
 
-/* 下载折叠栏 */
-.download-collapse-toggle {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.625rem 0.875rem;
-  margin-bottom: 0.75rem;
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  color: var(--text-secondary);
-  font-size: 0.8125rem;
-  cursor: pointer;
-  transition: all 0.2s;
-  text-align: left;
-}
-.download-collapse-toggle:hover {
-  background: rgba(255, 255, 255, 0.05);
-  border-color: var(--border-hover);
-  color: var(--text-primary);
-}
-.download-collapse-desc {
-  color: var(--text-muted);
-  font-size: 0.75rem;
-  margin-left: auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 </style>

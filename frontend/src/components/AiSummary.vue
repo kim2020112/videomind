@@ -7,6 +7,14 @@ import { Markmap } from 'markmap-view'
 
 marked.setOptions({ gfm: true, breaks: true })
 
+function formatDuration(seconds) {
+  if (!seconds) return ''
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  if (h > 0) return `${h}h ${m}m`
+  return `${m} 分钟`
+}
+
 function renderMarkdown(text) {
   if (!text) return ''
   return DOMPurify.sanitize(marked.parse(text))
@@ -63,6 +71,12 @@ const props = defineProps({
   chatMessages: Array,
   isChatStreaming: Boolean,
   chatError: String,
+  qaPairs: Array,
+  isQaGenerating: Boolean,
+  qaError: String,
+  onGenerateQa: Function,
+  onRegenerateQa: Function,
+  onToggleQaExpand: Function,
   subtitleInfo: Object,
   isPartialSummary: Boolean,
   videoTitle: String,
@@ -89,6 +103,7 @@ const isLimitError = computed(() => props.error && props.error.includes('免费�
 
 const activeSubTab = ref('summary')
 const chatInput = ref('')
+const qaMode = ref('generated')
 const partsListRef = ref(null)
 
 // 滚动到当前激活分P（居中显示），带重试机制
@@ -229,6 +244,10 @@ function handleRegenerateNotes() {
 
 function handleRegenerateSubtitle() {
   props.onRegenerateSubtitle()
+}
+
+function handleRegenerateQa() {
+  props.onRegenerateQa?.()
 }
 
 function handleTabSubtitle() {
@@ -783,6 +802,7 @@ function downloadNotes() {
             <span class="part-index">P{{ part.index }}</span>
             <span class="part-title">{{ part.title }}</span>
             <span v-if="loading && currentSummarizePart === part.index" class="parts-spinner"></span>
+            <span v-if="part.duration" class="part-duration">{{ formatDuration(part.duration) }}</span>
           </div>
         </div>
       </div>
@@ -876,7 +896,7 @@ function downloadNotes() {
               v-if="subtitleSource === 'whisper'"
               @click="handleRegenerateSubtitle"
               :disabled="loading"
-              class="subtitle-download-btn"
+              class="regenerate-btn"
               title="重新语音识别"
             >
               <svg viewBox="0 0 20 20" fill="currentColor" class="download-icon"><path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/></svg>
@@ -932,7 +952,7 @@ function downloadNotes() {
               <svg v-else viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path d="M6 18L18 6M6 6l12 12" stroke="currentColor" stroke-width="2"/></svg>
               {{ isFullscreen ? '退出' : '全屏' }}
             </button>
-            <button @click="handleRegenerateMindmap" :disabled="loading" class="zoom-btn" title="重新生成思维导图">
+            <button @click="handleRegenerateMindmap" :disabled="loading" class="regenerate-btn" title="重新生成思维导图">
               <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/></svg>
             </button>
           </div>
@@ -946,8 +966,17 @@ function downloadNotes() {
           <p class="loading-text">正在生成思维导图...</p>
         </div>
         <div v-else class="mindmap-empty">
-          <p>思维导图将在总结完成后自动生成</p>
-          <p class="mindmap-empty-hint">请先在"摘要"标签页生成 AI 总结</p>
+          <template v-if="result">
+            <p>尚未生成思维导图</p>
+            <button @click="handleRegenerateMindmap" :disabled="loading" class="regenerate-btn regenerate-btn--primary">
+              <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/></svg>
+              生成思维导图
+            </button>
+          </template>
+          <template v-else>
+            <p>思维导图将在总结完成后自动生成</p>
+            <p class="mindmap-empty-hint">请先在"摘要"标签页生成 AI 总结</p>
+          </template>
         </div>
       </div>
 
@@ -969,48 +998,127 @@ function downloadNotes() {
               <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path d="M10.75 2.75a.75.75 0 00-1.5 0v8.614L6.295 8.235a.75.75 0 10-1.09 1.03l4.25 4.5a.75.75 0 001.09 0l4.25-4.5a.75.75 0 00-1.09-1.03l-2.955 3.129V2.75z"/><path d="M3.5 12.75a.75.75 0 00-1.5 0v2.5A2.75 2.75 0 004.75 18h10.5A2.75 2.75 0 0018 15.25v-2.5a.75.75 0 00-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5z"/></svg>
               下载 .md
             </button>
-            <button @click="handleRegenerateNotes" :disabled="loading" class="notes-action-btn" title="重新生成笔记">
+            <button @click="handleRegenerateNotes" :disabled="loading" class="regenerate-btn" title="重新生成笔记">
               <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/></svg>
             </button>
           </div>
           <div class="notes-content prose prose-invert prose-sm max-w-none" v-html="notesHtml" @click="onNotesClick"></div>
         </div>
-        <div v-else class="notes-empty">笔记将在总结完成后自动生成</div>
+        <div v-else class="notes-empty">
+          <template v-if="result">
+            <p>尚未生成学习笔记</p>
+            <button @click="handleRegenerateNotes" :disabled="loading" class="regenerate-btn regenerate-btn--primary">
+              <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/></svg>
+              生成学习笔记
+            </button>
+          </template>
+          <template v-else>
+            笔记将在总结完成后自动生成
+          </template>
+        </div>
       </div>
 
       <!-- Tab: 问答 -->
       <div v-show="activeSubTab === 'qa'" class="sub-tab-panel">
-        <div class="chat-container">
-          <div v-if="!subtitleText && !isFetchingSubtitle" class="chat-need-subtitle">
-            <p>请先加载字幕文本以使用问答功能</p>
-            <button @click="onFetchSubtitle" class="fetch-subtitle-btn">加载字幕</button>
+        <div class="qa-container">
+          <!-- 模式切换 -->
+          <div class="qa-mode-bar">
+            <button class="qa-mode-btn" :class="{ active: qaMode === 'generated' }" @click="qaMode = 'generated'">精选问答</button>
+            <button class="qa-mode-btn" :class="{ active: qaMode === 'chat' }" @click="qaMode = 'chat'">自由提问</button>
           </div>
-          <template v-else>
-            <div class="chat-messages" ref="chatMessagesEl">
-              <div v-if="chatMessages.length === 0" class="chat-empty">
-                基于视频字幕内容的 AI 问答，请输入你的问题
-              </div>
-              <div v-for="(msg, i) in chatMessages" :key="i" class="chat-message" :class="'chat-msg-' + msg.role">
-                <span class="chat-role">{{ msg.role === 'user' ? '你' : 'AI' }}</span>
-                <div class="chat-content prose prose-invert prose-sm max-w-none" v-html="cachedMarkdown(msg.content)"></div>
-              </div>
-              <div v-if="chatError" class="chat-error">{{ chatError }}</div>
+
+          <!-- 精选问答模式 -->
+          <div v-show="qaMode === 'generated'" class="qa-mode-panel">
+            <!-- 无字幕 -->
+            <div v-if="!subtitleText && !isFetchingSubtitle" class="chat-need-subtitle">
+              <p>请先加载字幕文本以使用问答功能</p>
+              <button @click="onFetchSubtitle" class="fetch-subtitle-btn">加载字幕</button>
             </div>
-            <div class="chat-input-row">
-              <textarea
-                v-model="chatInput"
-                class="chat-input"
-                placeholder="基于视频字幕提问..."
-                rows="2"
-                :disabled="isChatStreaming"
-                @keydown.enter.exact.prevent="sendChat"
-              ></textarea>
-              <button @click="sendChat" :disabled="isChatStreaming || !chatInput.trim()" class="chat-send-btn">
-                <svg v-if="!isChatStreaming" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="send-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
-                <svg v-else class="send-icon spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" /></svg>
-              </button>
+            <template v-else>
+              <!-- 生成中 -->
+              <div v-if="isQaGenerating" class="qa-loading">
+                <div class="skeleton-line skeleton-long"></div>
+                <div class="skeleton-line skeleton-medium"></div>
+                <p class="loading-text">正在生成关键问答对...</p>
+              </div>
+              <!-- 空状态 -->
+              <div v-else-if="!qaPairs.length && !qaError" class="qa-empty">
+                <template v-if="result">
+                  <p>尚未生成关键问答</p>
+                  <button @click="onGenerateQa" :disabled="!subtitleText" class="regenerate-btn regenerate-btn--primary">
+                    <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path fill-rule="evenodd" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" clip-rule="evenodd"/></svg>
+                    生成关键问答
+                  </button>
+                </template>
+                <template v-else>
+                  <p>问答对将在总结完成后自动生成</p>
+                </template>
+              </div>
+              <!-- 错误 -->
+              <div v-else-if="qaError && !qaPairs.length" class="qa-error-msg">{{ qaError }}</div>
+              <!-- 问答对列表 -->
+              <div v-if="qaPairs.length > 0" class="qa-pairs-list">
+                <div
+                  v-for="(pair, i) in qaPairs"
+                  :key="i"
+                  class="qa-pair-card"
+                  :class="{ expanded: pair.expanded }"
+                >
+                  <div class="qa-pair-header" @click="onToggleQaExpand(i)">
+                    <span class="qa-pair-index">Q{{ i + 1 }}</span>
+                    <span class="qa-pair-question">{{ pair.question }}</span>
+                    <svg class="qa-pair-chevron" :class="{ rotated: pair.expanded }" viewBox="0 0 20 20" fill="currentColor">
+                      <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/>
+                    </svg>
+                  </div>
+                  <div v-show="pair.expanded" class="qa-pair-answer">
+                    <span class="qa-pair-answer-label">A</span>
+                    <div class="qa-pair-answer-content prose prose-invert prose-sm max-w-none" v-html="cachedMarkdown(pair.answer)"></div>
+                  </div>
+                </div>
+                <button @click="handleRegenerateQa" :disabled="isQaGenerating" class="regenerate-btn">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="regenerate-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" /></svg>
+                  重新生成
+                </button>
+              </div>
+            </template>
+          </div>
+
+          <!-- 自由提问模式 -->
+          <div v-show="qaMode === 'chat'" class="qa-mode-panel">
+            <div class="chat-container">
+              <div v-if="!subtitleText && !isFetchingSubtitle" class="chat-need-subtitle">
+                <p>请先加载字幕文本以使用问答功能</p>
+                <button @click="onFetchSubtitle" class="fetch-subtitle-btn">加载字幕</button>
+              </div>
+              <template v-else>
+                <div class="chat-messages" ref="chatMessagesEl">
+                  <div v-if="chatMessages.length === 0" class="chat-empty">
+                    基于视频字幕内容的 AI 问答，请输入你的问题
+                  </div>
+                  <div v-for="(msg, i) in chatMessages" :key="i" class="chat-message" :class="'chat-msg-' + msg.role">
+                    <span class="chat-role">{{ msg.role === 'user' ? '你' : 'AI' }}</span>
+                    <div class="chat-content prose prose-invert prose-sm max-w-none" v-html="cachedMarkdown(msg.content)"></div>
+                  </div>
+                  <div v-if="chatError" class="chat-error">{{ chatError }}</div>
+                </div>
+                <div class="chat-input-row">
+                  <textarea
+                    v-model="chatInput"
+                    class="chat-input"
+                    placeholder="基于视频字幕提问..."
+                    rows="2"
+                    :disabled="isChatStreaming"
+                    @keydown.enter.exact.prevent="sendChat"
+                  ></textarea>
+                  <button @click="sendChat" :disabled="isChatStreaming || !chatInput.trim()" class="chat-send-btn">
+                    <svg v-if="!isChatStreaming" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="send-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
+                    <svg v-else class="send-icon spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" /></svg>
+                  </button>
+                </div>
+              </template>
             </div>
-          </template>
+          </div>
         </div>
       </div>
     </div>
@@ -1060,16 +1168,17 @@ function downloadNotes() {
 .streaming-text :deep(a) { color: var(--accent-blue); }
 
 /* 多P分P列表 */
-.parts-section { margin-bottom: 1rem; }
-.parts-section .parts-label { font-size: 0.8125rem; font-weight: 600; color: var(--text-secondary); margin: 0 0 0.5rem 0; }
-.parts-section .parts-list { display: flex; flex-direction: column; gap: 0.25rem; max-height: 200px; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; padding: 0.375rem; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.12) transparent; }
-.parts-section .part-row { display: flex; align-items: center; border-radius: 7px; transition: background 0.15s; cursor: pointer; }
-.parts-section .part-row:hover { background: rgba(255,255,255,0.06); }
+.parts-section { margin-bottom: 1.5rem; }
+.parts-section .parts-label { font-size: 0.9375rem; font-weight: 600; color: var(--text-primary); margin: 0 0 0.75rem 0; }
+.parts-section .parts-list { display: flex; flex-direction: column; gap: 0.125rem; max-height: 200px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.12) transparent; }
+.parts-section .part-row { display: flex; align-items: center; border-radius: 8px; transition: background 0.15s; cursor: pointer; min-height: 44px; }
+.parts-section .part-row:hover { background: rgba(255,255,255,0.05); }
 .parts-section .part-row.active { background: rgba(59,130,246,0.1); }
-.parts-section .part-info { display: flex; align-items: center; gap: 0.625rem; flex: 1; padding: 0.5rem 0.75rem; min-width: 0; }
-.parts-section .part-index { font-weight: 700; color: var(--accent-blue); min-width: 2.5rem; flex-shrink: 0; font-size: 0.875rem; }
-.parts-section .part-title { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.875rem; flex: 1; min-width: 0; }
+.parts-section .part-info { display: flex; align-items: center; gap: 0.625rem; flex: 1; padding: 0.5rem 0.625rem; min-width: 0; }
+.parts-section .part-index { font-weight: 700; color: var(--accent-blue); min-width: 2rem; flex-shrink: 0; font-size: 0.8125rem; }
+.parts-section .part-title { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.8125rem; flex: 1; min-width: 0; }
 .parts-section .part-row.active .part-title { color: var(--text-primary); }
+.parts-section .part-duration { font-size: 0.75rem; color: var(--text-muted); flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .parts-spinner { width: 12px; height: 12px; border: 2px solid rgba(99,102,241,0.3); border-top-color: var(--accent-blue); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
 
 /* 子 Tab 栏 */
@@ -1247,6 +1356,7 @@ function downloadNotes() {
 }
 .mindmap-svg { display: block; width: 100%; min-height: 500px; }
 .mindmap-empty { padding: 2rem; text-align: center; color: var(--text-muted); }
+.mindmap-empty p { margin: 0 0 0.75rem 0; }
 .mindmap-empty-hint { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem; }
 .mindmap-loading { display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 2rem; }
 .mindmap-loading .loading-text { font-size: 0.8125rem; color: var(--text-muted); margin: 0; }
@@ -1279,6 +1389,47 @@ function downloadNotes() {
 .mindmap-container:fullscreen .mindmap-svg { max-width: 100vw; max-height: 100vh; }
 
 /* 问答 */
+.qa-container { display: flex; flex-direction: column; height: 400px; }
+.qa-mode-bar { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 1rem; }
+.qa-mode-btn { padding: 0.5rem 0.875rem; background: transparent; border: none; border-bottom: 2px solid transparent; color: var(--text-muted); font-size: 0.8125rem; font-weight: 500; cursor: pointer; transition: all 0.15s; }
+.qa-mode-btn:hover { color: var(--text-secondary); }
+.qa-mode-btn.active { color: var(--accent-blue); border-bottom-color: var(--accent-blue); }
+.qa-mode-panel { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+
+.qa-loading { display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 2rem; }
+.qa-loading .loading-text { font-size: 0.8125rem; color: var(--text-muted); margin: 0; }
+.qa-empty { padding: 2rem; text-align: center; color: var(--text-muted); display: flex; flex-direction: column; align-items: center; gap: 0.75rem; }
+.qa-empty p { margin: 0; }
+.qa-error-msg { color: #FCA5A5; padding: 1rem; font-size: 0.875rem; text-align: center; }
+
+.qa-pairs-list { display: flex; flex-direction: column; gap: 0.5rem; overflow-y: auto; flex: 1; padding-right: 0.25rem; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.12) transparent; }
+.qa-pairs-list::-webkit-scrollbar { width: 6px; }
+.qa-pairs-list::-webkit-scrollbar-track { background: transparent; }
+.qa-pairs-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
+
+.qa-pair-card { border: 1px solid var(--border); border-radius: 10px; transition: border-color 0.2s; background: rgba(255,255,255,0.02); }
+.qa-pair-card.expanded { border-color: rgba(59,130,246,0.35); }
+
+.qa-pair-header { display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 0.875rem; cursor: pointer; transition: background 0.15s; border-radius: 9px; }
+.qa-pair-header:hover { background: rgba(255,255,255,0.04); }
+.qa-pair-card.expanded .qa-pair-header { border-radius: 9px 9px 0 0; }
+
+.qa-pair-index { font-weight: 700; font-size: 0.75rem; color: var(--accent-blue); flex-shrink: 0; min-width: 1.5rem; }
+.qa-pair-question { flex: 1; min-width: 0; font-size: 0.875rem; color: var(--text-primary); line-height: 1.5; overflow-wrap: break-word; }
+.qa-pair-chevron { width: 16px; height: 16px; flex-shrink: 0; color: var(--text-muted); transition: transform 0.2s; }
+.qa-pair-chevron.rotated { transform: rotate(180deg); }
+
+.qa-pair-answer { padding: 0.75rem 0.875rem; border-top: 1px solid rgba(255,255,255,0.06); background: rgba(59,130,246,0.04); display: flex; gap: 0.5rem; align-items: flex-start; border-radius: 0 0 9px 9px; }
+.qa-pair-answer-label { font-weight: 700; font-size: 0.75rem; color: var(--accent-cyan); flex-shrink: 0; min-width: 1.25rem; line-height: 1.65; padding-top: 2px; }
+.qa-pair-answer-content { flex: 1; min-width: 0; font-size: 0.875rem; color: var(--text-secondary); line-height: 1.7; overflow-wrap: break-word; }
+.qa-pair-answer-content :deep(p) { margin: 0 0 0.5rem 0; }
+.qa-pair-answer-content :deep(p:last-child) { margin-bottom: 0; }
+.qa-pair-answer-content :deep(ul), .qa-pair-answer-content :deep(ol) { margin: 0.5rem 0; padding-inline-start: 1.25rem; }
+.qa-pair-answer-content :deep(li) { margin: 0.25rem 0; }
+.qa-pair-answer-content :deep(pre) { background: rgba(0,0,0,0.3); padding: 0.5rem 0.75rem; border-radius: 4px; overflow-x: auto; font-size: 0.8125rem; margin: 0.5rem 0; }
+.qa-pair-answer-content :deep(code) { font-size: 0.8125rem; background: rgba(255,255,255,0.06); padding: 0.125rem 0.375rem; border-radius: 3px; }
+.qa-pair-answer-content :deep(a) { color: var(--accent-blue); }
+
 .chat-container { display: flex; flex-direction: column; height: 400px; }
 .chat-need-subtitle { padding: 2rem; text-align: center; color: var(--text-muted); }
 .chat-messages { flex: 1; overflow-y: auto; padding: 0.5rem 0; display: flex; flex-direction: column; gap: 0.75rem; }
@@ -1322,9 +1473,14 @@ function downloadNotes() {
 .flashcard-answer { padding: 0.625rem 0.875rem; font-size: 0.8125rem; color: var(--text-secondary); display: flex; gap: 0.5rem; align-items: flex-start; }
 .flashcard-label { font-weight: 700; font-size: 0.75rem; color: var(--accent-blue); flex-shrink: 0; min-width: 1.25rem; }
 
-.regenerate-btn { display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.5rem 1rem; background: transparent; border: 1px solid var(--border); border-radius: 8px; color: var(--text-muted); font-size: 0.8125rem; cursor: pointer; margin-top: 0.5rem; }
-.regenerate-btn:hover { background: var(--bg-card-hover); border-color: var(--border-hover); color: var(--text-primary); }
+.regenerate-btn { display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.5rem 1rem; background: transparent; border: 1px solid var(--border); border-radius: 8px; color: var(--text-muted); font-size: 0.8125rem; cursor: pointer; transition: all 0.15s; }
+.regenerate-btn:hover:not(:disabled) { background: var(--bg-card-hover); border-color: var(--border-hover); color: var(--text-primary); }
+.regenerate-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.regenerate-btn--primary { background: var(--accent-blue); border-color: var(--accent-blue); color: #fff; font-weight: 600; }
+.regenerate-btn--primary:hover:not(:disabled) { background: #3b82f6; border-color: #3b82f6; color: #fff; opacity: 0.9; }
 .regenerate-icon { width: 16px; height: 16px; }
+.mindmap-controls .regenerate-btn,
+.notes-toolbar .regenerate-btn { margin-top: 0; }
 
 /* 水平进度条 */
 .progress-bar-container {
@@ -1456,6 +1612,7 @@ function downloadNotes() {
 }
 .notes-loading { display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 2rem; }
 .notes-empty { padding: 2rem; text-align: center; color: var(--text-muted); }
+.notes-empty p { margin: 0 0 0.75rem 0; }
 
 @media (max-width: 768px) {
   /* 子 Tab 栏：缩小以放下 5 个 Tab */
@@ -1469,6 +1626,7 @@ function downloadNotes() {
   .summary-scroll { max-height: 60vh; }
   .mindmap-container { padding: 0.5rem; }
   .chat-container { height: 50vh; }
+  .qa-container { height: 50vh; }
   .notes-content { max-height: 50vh; padding: 0.875rem; }
 
   /* 笔记字体缩小 */
