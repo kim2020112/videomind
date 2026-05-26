@@ -142,7 +142,7 @@ URL → 查 ai_cache (命中→SSE重放)
         → 字幕>60000字符? 
           YES → 分片 → 首片优先（初步摘要流式~15s）→ 逐片进度 → 完整摘要流式覆盖
           NO  → AI摘要(流式)
-        → 思维导图 → 学习笔记(流式) → 持久化
+        → 思维导图 → 学习笔记(流式) → 关键问答对 → 持久化
     → 无字幕: 基于视频简介降级总结 / 返回400
 ```
 
@@ -193,6 +193,7 @@ URL → 查 ai_cache (命中→SSE重放)
 | POST | `/api/summarize` | AI 视频总结（同步） | `{"url": "..."}` | SummaryResult |
 | POST | `/api/summarize/stream` | AI 视频总结（SSE 流式） | `{"url": "...", "lang": "zh"}` | SSE 事件流 |
 | POST | `/api/chat/stream` | AI 问答（SSE 流式） | `{"subtitle_text": "...", "question": "...", "history": []}` | SSE 事件流 |
+| POST | `/api/qa/stream` | AI 关键问答对（SSE 流式） | `{"subtitle_text": "...", "video_title": "...", "url": "...", "force": false}` | SSE 事件流 |
 | POST | `/api/download` | 创建下载任务 | `{"url": "...", "format_id": "best"}` | `{"task_id": "...", "ws_url": "..."}` |
 | GET | `/api/files/{task_id}` | 下载文件 | - | 文件流 |
 | GET | `/api/downloads` | 已完成任务列表 | - | `{"downloads": [...]}` |
@@ -256,11 +257,13 @@ data: {"type": "done", "data": {}}
 
 | 事件 | 说明 |
 |------|------|
-| `progress` | 进度通知。stage: `subtitle_loaded` / `summary_initial` / `chunk_progress` / `summary_final` / `summary_generating` / `mindmap_generating` / `notes_generating` 等 |
+| `progress` | 进度通知。stage: `subtitle_loaded` / `summary_initial` / `chunk_progress` / `summary_final` / `summary_generating` / `mindmap_generating` / `notes_generating` / `qanda` 等 |
 | `cache_hit` | 命中 AI 缓存，直接重放 |
 | `thinking_start` / `thinking` / `thinking_end` | 思考模型推理过程 |
 | `text_start` / `text` | AI 摘要流式文本生成 |
 | `notes_text` | 学习笔记流式文本生成（逐 token） |
+| `qa_text` | 问答对流式文本生成（逐 token） |
+| `qa_pairs` | 结构化问答对结果 |
 | `flashcard_text` | 学习卡片流式文本生成（逐 token） |
 | `mindmap` | 思维导图 Markdown（一次性） |
 | `result` | 最终结构化结果。长视频首次为初步摘要（`is_partial: true`），第二次为完整摘要（`is_partial: false`） |
@@ -435,6 +438,8 @@ App.vue（~1900 行，视图路由：home / history）
 | 笔记时间戳注入 | 后端确定性注入（LCS+bigram 匹配） | 不依赖 LLM 生成时间点（LLM 不准）；双策略匹配：标题 LCS（1.5x 权重）+ 正文 bigram |
 | 用户认证 | Session Cookie + 游客 device_id 签名 | 1-5 人小规模，无需 JWT/OAuth；HttpOnly Cookie 防 XSS；游客无需注册即可体验 |
 | 用户隔离 | user_history 表 + user_id/guest_id | ai_cache 全局共享（同视频不重复处理），历史记录按用户隔离；管理员可查看全局 |
+| 问答对生成 | 总结流水线完成后独立阶段，流式输出 JSON 数组 | 字幕内容中提取重要问答对，增强学习效果；复用总结流水线的字幕文本，不额外获取 |
+| 缓存去重 | video_fingerprint 去除 `_pN` 后缀 + 唯一视频计数 | 多P视频所有分P共享一个指纹，缓存清理按唯一视频（50 个）而非按行数（避免 185P 视频挤占所有额度） |
 | 数据库连接 | database.get_db() 上下文管理器 | 统一 WAL 模式、事务管理、自动 rollback；auth.py 等模块不再手动管理连接 |
 | 用量查询 | 独立 /api/auth/usage 端点 | AI 调用后只需刷新用量数字，无需拉取完整用户信息；减少网络开销 |
 
@@ -548,12 +553,14 @@ videomind/
 │   │       ├── notes.py               # 笔记生成流水线阶段
 │   │       ├── mindmap.py             # 思维导图生成流水线阶段
 │   │       ├── tags.py                # 标签提取流水线阶段
+│   │       ├── qanda.py               # 关键问答对生成流水线阶段
 │   │       └── subtitle_postprocess.py # 时间戳注入、笔记联动后处理
 │   ├── prompts/                # AI Prompt 模板（版本化）
 │   │   ├── summary/v1.txt
 │   │   ├── notes/v1.txt
 │   │   ├── mindmap/v1.txt
 │   │   ├── flashcard/v1.txt
+│   │   ├── qanda/v1.txt
 │   │   └── subtitle_correction/v1.txt
 │   ├── api/
 │   │   ├── routes.py                # REST + WebSocket 路由（含 bilibili.com URL 规范化）

@@ -9,6 +9,7 @@
 - **结构化笔记**：自动生成标题层级分明的 Markdown 笔记，支持代码块与重点高亮
 - **思维导图**：提炼关键概念生成可视化导图，支持 SVG/PNG 导出
 - **AI 问答**：基于视频字幕内容自由提问，AI 帮你找到答案
+- **关键问答对**：自动从视频中提取关键知识点问答对，强化学习效果
 - **字幕提取**：支持 SRT/VTT/TXT 格式下载，多语言翻译
 - **学习历史**：自动保存每次分析结果，支持搜索、标签过滤、平台筛选、收藏、语义搜索，随时回顾已学内容
 - **智能标签**：基于规则自动提取视频标签（编程语言、AI/ML、框架等），支持按标签筛选历史
@@ -82,7 +83,7 @@ cd ../backend && python main.py  # FastAPI 托管前端静态文件
 ```
 用户输入 URL → 字幕获取 → AI 处理流水线 → 知识存储
                  │              │               │
-          B站CC(按cid)   摘要/笔记/导图     SQLite + ChromaDB
+          B站CC(按cid)   摘要/笔记/导图/问答对     SQLite + ChromaDB
           yt-dlp/Whisper     │              │
           多P按P独立获取  core/pipeline/    用户认证/隔离
           无字幕不降级P1   流式 SSE 推送（渐进式生成）
@@ -99,6 +100,7 @@ cd ../backend && python main.py  # FastAPI 托管前端静态文件
 | `POST /api/summarize` | AI 视频总结（同步） |
 | `POST /api/summarize/stream` | AI 总结（SSE 流式） |
 | `POST /api/chat/stream` | AI 问答（SSE 流式） |
+| `POST /api/qa/stream` | AI 关键问答对生成（SSE 流式） |
 | `GET /api/subtitle` | 下载字幕文件 |
 | `GET /api/subtitle/text` | 获取字幕纯文本 |
 | `GET /api/subtitle/translate` | 翻译字幕 |

@@ -1,5 +1,47 @@
 # 变更记录
 
+## [3.1.1] - 2026-05-26
+
+### 新增
+
+- **AI 关键问答对生成**（`backend/core/pipeline/qanda.py` + `backend/prompts/qanda/v1.txt` + `frontend/src/composables/useQa.js`）：
+  - 新增 `POST /api/qa/stream` SSE 流式端点，基于视频字幕自动生成关键问答对
+  - AI 总结流水线新增第五阶段：摘要 → 导图 → 笔记 → **问答对** → 标签
+  - 问答对结果持久化到 `ai_cache.result_json.qa_pairs`，支持缓存重放
+  - 前端 `useSummary.js` 新增 `qaPairs` 响应式状态
+  - 配置 `QANDA_PROMPT_VERSION` 控制 prompt 版本
+
+- **JSON 解析支持数组格式**（`backend/core/ai_client.py`）：
+  - `_parse_json_response()` 扩展支持 `[...]` 数组格式解析（问答对输出为 JSON 数组）
+
+- **分P详情批量查询**（`backend/core/cache.py`）：
+  - 新增 `_get_part_details_map()`，从 `video_info_cache` 批量查询分P的标题和时长
+  - `list_history_enhanced()` 的分P列表现在包含 `part_title` 和 `part_duration` 字段
+
+### 修复
+
+- **历史记录分P显示错误**：
+  - `_extract_part_index()` 默认返回值从 `0` 改为 `1`，基础 URL（无 `?p=N`）正确映射为 P1
+  - `_build_part_info()` 对无 `?p=N` 的基础 URL 查找 P1 的实际标题（不再返回空字符串）
+
+- **缓存清理去重策略**（`backend/core/cache.py`）：
+  - `_cleanup_old_cache()` 从保留最新 50 条记录改为保留最新 **50 个唯一视频**（按 fingerprint 去重）
+  - 一个 185P 视频记作 1 个视频，所有分P的缓存均保留，不再挤占其他视频的缓存额度
+  - `video_fingerprint()` 去除 Bilibili 视频 ID 中的 `_pN` 后缀，确保同一视频所有分P共享同一指纹
+
+- **多P视频文件大小估算**（`backend/core/pipeline/subtitle.py`）：
+  - `_build_part_info()` 修复 `canonical_url` 中 `?p=N` 参数丢失导致分P信息错误的问题
+
+### 变更
+
+- **移除"下载选项"折叠按钮**（`frontend/src/App.vue`）：
+  - 删除 `showDownloadSection` 状态和折叠按钮，下载区域直接可见
+  - 简化交互：用户切换到"视频下载"Tab 后立即看到完整下载界面
+
+- **统一分P列表样式**（`frontend/src/components/AiSummary.vue`）：
+  - AI 总结 Tab 的分P标题字号和颜色与视频下载 Tab 保持一致（`0.9375rem`，`var(--text-primary)`）
+  - 去除分P列表的独立边框容器，改为简洁列表样式
+
 ## [3.1.0] - 2026-05-19
 
 ### 变更
