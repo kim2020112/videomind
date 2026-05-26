@@ -89,69 +89,36 @@ const isLimitError = computed(() => props.error && props.error.includes('免费�
 
 const activeSubTab = ref('summary')
 const chatInput = ref('')
-const partsNavScroll = ref(null)
-const canScrollLeft = ref(false)
-const canScrollRight = ref(false)
+const partsListRef = ref(null)
 
-function updateScrollState() {
-  const el = partsNavScroll.value
-  if (!el) return
-  canScrollLeft.value = el.scrollLeft > 2
-  canScrollRight.value = el.scrollLeft < el.scrollWidth - el.clientWidth - 2
-}
-
-function scrollParts(dir) {
-  const el = partsNavScroll.value
-  if (!el) return
-  el.scrollBy({ left: dir * 200, behavior: 'smooth' })
-}
-
-function scrollToActivePart() {
-  const el = partsNavScroll.value
-  if (!el) return
-  const activeBtn = el.querySelector('.parts-nav-btn.active')
-  if (activeBtn) {
-    activeBtn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' })
-  }
-}
-
-// 切换分P时自动滚动到当前激活的按钮
-watch(() => props.currentSummarizePart, () => {
-  nextTick(scrollToActivePart)
-})
-
-// 多P列表首次加载时（如从历史记录进入），也滚动到激活按钮
-watch(() => props.multiParts.length, (len) => {
-  if (len > 1 && props.currentSummarizePart > 1) {
-    nextTick(scrollToActivePart)
-  }
-})
-
-// 分P标题 tooltip
-const tooltip = ref({ visible: false, text: '', x: 0, y: 0 })
-let tooltipTimer = null
-
-function showTooltip(e, text) {
-  clearTimeout(tooltipTimer)
-  tooltipTimer = setTimeout(() => {
-    const rect = e.target.closest('.parts-nav-btn').getBoundingClientRect()
-    tooltip.value = {
-      visible: true,
-      text,
-      x: rect.left + rect.width / 2,
-      y: rect.top - 8,
+// 滚动到当前激活分P（居中显示），带重试机制
+function scrollToActivePartRow(retries = 10) {
+  nextTick(() => {
+    const list = partsListRef.value
+    if (!list) return
+    const activeRow = list.querySelector('.part-row.active')
+    if (!activeRow) {
+      if (retries > 0) {
+        setTimeout(() => scrollToActivePartRow(retries - 1), 50)
+      }
+      return
     }
-  }, 400)
+    const listRect = list.getBoundingClientRect()
+    const rowRect = activeRow.getBoundingClientRect()
+    const offset = rowRect.top - listRect.top + list.scrollTop - listRect.height / 2 + rowRect.height / 2
+    list.scrollTo({ top: Math.max(0, offset), behavior: 'instant' })
+  })
 }
 
-function hideTooltip() {
-  clearTimeout(tooltipTimer)
-  tooltip.value.visible = false
-}
+// 切换分P时滚动
+watch(() => props.currentSummarizePart, () => {
+  scrollToActivePartRow()
+})
 
-watch(() => props.multiParts, () => {
-  nextTick(() => updateScrollState())
-}, { immediate: true })
+// 多P列表首次加载时（如从历史记录进入某P），滚动到激活行
+watch(() => props.multiParts, (parts) => {
+  if (parts?.length > 1) scrollToActivePartRow()
+}, { deep: false })
 
 const hasMindmap = computed(() => !!props.mindmapMarkdown)
 const hasNotes = computed(() => !!props.notesMarkdown)
@@ -801,41 +768,28 @@ function downloadNotes() {
       </template>
     </div>
 
+    <!-- 多P分P列表 -->
+    <div v-if="multiParts.length > 1" class="parts-section">
+      <p class="parts-label">分P列表（共 {{ multiParts.length }} P）</p>
+      <div class="parts-list" ref="partsListRef">
+        <div
+          v-for="part in multiParts"
+          :key="part.index"
+          class="part-row"
+          :class="{ active: currentSummarizePart === part.index }"
+          @click="onSwitchPart && onSwitchPart(part.index)"
+        >
+          <div class="part-info">
+            <span class="part-index">P{{ part.index }}</span>
+            <span class="part-title">{{ part.title }}</span>
+            <span v-if="loading && currentSummarizePart === part.index" class="parts-spinner"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 结果展示区（含 4 个子 Tab） -->
     <div v-if="result || loading" class="summary-content">
-      <!-- 多P分P选择器 -->
-      <div v-if="multiParts.length > 1" class="parts-nav">
-        <button v-show="canScrollLeft" class="parts-nav-arrow left" @click="scrollParts(-1)">
-          <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
-        </button>
-        <div class="parts-nav-scroll" ref="partsNavScroll" @scroll="updateScrollState">
-          <button
-            v-for="part in multiParts"
-            :key="part.index"
-            class="parts-nav-btn"
-            :class="{
-              active: currentSummarizePart === part.index,
-              loading: loading && currentSummarizePart === part.index
-            }"
-            @click="onSwitchPart && onSwitchPart(part.index)"
-            @mouseenter="showTooltip($event, part.title)"
-            @mouseleave="hideTooltip"
-          >
-            <span class="parts-nav-index">P{{ part.index }}</span>
-            <span class="parts-nav-title">{{ part.title }}</span>
-            <span v-if="loading && currentSummarizePart === part.index" class="parts-nav-spinner"></span>
-          </button>
-        </div>
-        <button v-show="canScrollRight" class="parts-nav-arrow right" @click="scrollParts(1)">
-          <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/></svg>
-        </button>
-      </div>
-      <!-- 分P标题 tooltip -->
-      <Teleport to="body">
-        <div v-if="tooltip.visible" class="parts-tooltip" :style="{ left: tooltip.x + 'px', top: tooltip.y + 'px' }">
-          {{ tooltip.text }}
-        </div>
-      </Teleport>
 
       <!-- 子 Tab 栏 -->
       <div class="sub-tab-bar">
@@ -1105,27 +1059,20 @@ function downloadNotes() {
 .streaming-text :deep(blockquote) { border-left-color: var(--accent-blue); }
 .streaming-text :deep(a) { color: var(--accent-blue); }
 
+/* 多P分P列表 */
+.parts-section { margin-bottom: 1rem; }
+.parts-section .parts-label { font-size: 0.8125rem; font-weight: 600; color: var(--text-secondary); margin: 0 0 0.5rem 0; }
+.parts-section .parts-list { display: flex; flex-direction: column; gap: 0.25rem; max-height: 200px; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; padding: 0.375rem; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.12) transparent; }
+.parts-section .part-row { display: flex; align-items: center; border-radius: 7px; transition: background 0.15s; cursor: pointer; }
+.parts-section .part-row:hover { background: rgba(255,255,255,0.06); }
+.parts-section .part-row.active { background: rgba(59,130,246,0.1); }
+.parts-section .part-info { display: flex; align-items: center; gap: 0.625rem; flex: 1; padding: 0.5rem 0.75rem; min-width: 0; }
+.parts-section .part-index { font-weight: 700; color: var(--accent-blue); min-width: 2.5rem; flex-shrink: 0; font-size: 0.875rem; }
+.parts-section .part-title { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.875rem; flex: 1; min-width: 0; }
+.parts-section .part-row.active .part-title { color: var(--text-primary); }
+.parts-spinner { width: 12px; height: 12px; border: 2px solid rgba(99,102,241,0.3); border-top-color: var(--accent-blue); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
+
 /* 子 Tab 栏 */
-/* 多P分P选择器 */
-.parts-nav { margin-bottom: 1rem; position: relative; display: flex; align-items: center; }
-.parts-nav-scroll { display: flex; gap: 0.5rem; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.1) transparent; padding: 0.25rem 0; flex: 1; min-width: 0; }
-.parts-nav-scroll::-webkit-scrollbar { height: 4px; }
-.parts-nav-scroll::-webkit-scrollbar-track { background: transparent; }
-.parts-nav-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
-.parts-nav-arrow { flex-shrink: 0; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.06); border: 1px solid var(--border); border-radius: 6px; color: var(--text-muted); cursor: pointer; transition: all 0.15s; padding: 0; }
-.parts-nav-arrow:hover { background: rgba(255,255,255,0.12); color: var(--text-secondary); }
-.parts-nav-arrow svg { width: 14px; height: 14px; }
-.parts-nav-arrow.left { margin-right: 0.25rem; }
-.parts-nav-arrow.right { margin-left: 0.25rem; }
-.parts-nav-btn { display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.4rem 0.75rem; background: rgba(255,255,255,0.04); border: 1px solid var(--border); border-radius: 8px; color: var(--text-muted); font-size: 0.8125rem; cursor: pointer; transition: all 0.2s; white-space: nowrap; flex-shrink: 0; }
-.parts-nav-btn:hover { background: rgba(255,255,255,0.08); color: var(--text-secondary); border-color: rgba(255,255,255,0.12); }
-.parts-nav-btn.active { background: rgba(99,102,241,0.12); border-color: rgba(99,102,241,0.4); color: var(--accent-blue, #818CF8); }
-.parts-nav-btn.loading { pointer-events: none; opacity: 0.8; }
-.parts-nav-index { font-weight: 600; font-size: 0.75rem; color: var(--accent-blue, #818CF8); opacity: 0.8; }
-.parts-nav-btn.active .parts-nav-index { opacity: 1; }
-.parts-nav-title { }
-.parts-nav-spinner { width: 12px; height: 12px; border: 2px solid rgba(99,102,241,0.3); border-top-color: var(--accent-blue, #818CF8); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
-.parts-tooltip { position: fixed; transform: translateX(-50%) translateY(-100%); padding: 0.375rem 0.75rem; background: rgba(15,23,42,0.95); color: #e2e8f0; font-size: 0.75rem; border-radius: 6px; pointer-events: none; z-index: 9999; max-width: 400px; white-space: normal; word-break: break-all; line-height: 1.4; box-shadow: 0 4px 12px rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); }
 
 .sub-tab-bar { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 1.25rem; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
 .sub-tab-bar::-webkit-scrollbar { display: none; }
