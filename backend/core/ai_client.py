@@ -7,7 +7,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import anthropic
 from config import (AI_API_KEY, AI_BASE_URL, AI_MODEL, AI_PROVIDER, PROMPT_VERSION, BASE_DIR,
-                    SUMMARY_PROMPT_VERSION, NOTES_PROMPT_VERSION, MINDMAP_PROMPT_VERSION)
+                    SUMMARY_PROMPT_VERSION, NOTES_PROMPT_VERSION, MINDMAP_PROMPT_VERSION,
+                    QANDA_PROMPT_VERSION)
 from core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -56,6 +57,7 @@ def _load_prompt(name: str) -> str:
         "summary": SUMMARY_PROMPT_VERSION,
         "notes": NOTES_PROMPT_VERSION,
         "mindmap": MINDMAP_PROMPT_VERSION,
+        "qanda": QANDA_PROMPT_VERSION,
     }
     version = version_map.get(name, PROMPT_VERSION)
     path = BASE_DIR / "prompts" / name / f"v{version}.txt"
@@ -112,11 +114,17 @@ def _parse_json_response(content: str) -> dict:
     m = JSON_BLOCK_RE.search(content)
     if m:
         content = m.group(1).strip()
-    # 尝试找到第一个 { 到最后一个 }
-    start = content.find('{')
-    end = content.rfind('}')
-    if start != -1 and end != -1 and end > start:
-        content = content[start:end + 1]
+    # 尝试找到第一个 [ 到最后一个 ]（数组格式）
+    arr_start = content.find('[')
+    arr_end = content.rfind(']')
+    if arr_start != -1 and arr_end != -1 and arr_end > arr_start:
+        content = content[arr_start:arr_end + 1]
+    else:
+        # 尝试找到第一个 { 到最后一个 }（对象格式）
+        start = content.find('{')
+        end = content.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            content = content[start:end + 1]
     try:
         return json.loads(content)
     except json.JSONDecodeError:
@@ -515,6 +523,34 @@ def stream_flashcards(content_summary: str, video_title: str = ""):
             yield ("flashcards", parsed["flashcards"])
         else:
             yield ("flashcards", [])
+    except Exception as e:
+        yield ("error", {"message": str(e)})
+
+
+def stream_qanda(subtitle_text: str, video_title: str = ""):
+    """流式生成关键问答对。"""
+    client = _get_client()
+    prompt = _load_prompt("qanda").format(
+        video_title=video_title,
+        subtitle_text=subtitle_text[:60000],
+    )
+    full_text = ""
+
+    try:
+        with client.messages.stream(
+            model=AI_MODEL, max_tokens=3000,
+            messages=[{"role": "user", "content": prompt}],
+        ) as stream:
+            for event in stream:
+                if event.type == "content_block_delta":
+                    delta = event.delta
+                    if hasattr(delta, "text") and delta.text:
+                        full_text += delta.text
+                        yield ("qa_text", {"text": delta.text})
+
+        parsed = _parse_json_or_fallback(full_text.strip())
+        pairs = parsed if isinstance(parsed, list) else []
+        yield ("qa_pairs", pairs)
     except Exception as e:
         yield ("error", {"message": str(e)})
 

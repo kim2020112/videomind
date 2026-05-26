@@ -37,3 +37,10 @@ class ChatRequest(BaseModel):
     subtitle_text: str
     question: str
     history: list[ChatMessage] = []
+
+
+class QaGenerationRequest(BaseModel):
+    subtitle_text: str
+    video_title: str = ""
+    url: str = ""
+    force: bool = False

@@ -17,18 +17,20 @@ from core.pipeline.subtitle_postprocess import correct_subtitle_text
 from core.pipeline.summary import run_summary
 from core.pipeline.mindmap import run_mindmap
 from core.pipeline.notes import run_notes
+from core.pipeline.qanda import run_qanda
 from core.pipeline.tags import run_tags
 from core.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-from core.summary_models import SummarizeRequest, ChatRequest
+from core.summary_models import SummarizeRequest, ChatRequest, QaGenerationRequest
 from core.summarizer import summarize_from_description
 from core.ai_client import stream_chat
 from config import WHISPER_MAX_DURATION
 from core.cache import (
     get_cached, save_cache, delete_cache, delete_whisper_cache,
     get_video_info_cache, save_video_info_cache, video_fingerprint,
+    _get_cached_raw,
 )
 from core.whisper import is_model_available, transcribe_video_async
 from core.tag_extractor import detect_platform
@@ -239,12 +241,20 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
                 if event.type == "notes_text":
                     notes_text += event.data.get("text", "")
 
+            # 4. 关键问答对
+            qa_pairs_result = []
+            for event in run_qanda(subtitle_for_rest, info.title, trace_id):
+                yield event
+                if event.type == "qa_pairs":
+                    qa_pairs_result = event.data
+
             # ── 持久化 ──
             from core.cache import _max_prompt_version
             save_cache_json = json.dumps({
                 "result": result_data,
                 "mindmap_markdown": mindmap_md,
                 "notes": notes_text,
+                "qa_pairs": qa_pairs_result,
             }, ensure_ascii=False)
             platform_name = detect_platform(canonical_url, info.extractor or "")
             save_cache(
@@ -495,3 +505,92 @@ async def chat_stream(req: ChatRequest, request: Request):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"问答失败: {str(e)}")
+
+
+# ──── AI 关键问答对生成 ────
+
+def _merge_and_save_qanda(url: str, subtitle_text: str, video_title: str, qa_pairs: list):
+    """将问答对合并写入已有缓存（保留 summary/mindmap/notes）。"""
+    existing_raw = _get_cached_raw(url)
+    result_json = {}
+    fingerprint = None
+    platform = ""
+    source = "cache"
+
+    if existing_raw:
+        if existing_raw.get("result_json"):
+            try:
+                result_json = json.loads(existing_raw["result_json"])
+            except json.JSONDecodeError:
+                result_json = {}
+        fingerprint = existing_raw.get("fingerprint")
+        platform = existing_raw.get("platform", "")
+        source = existing_raw.get("source", "cache")
+
+    result_json["qa_pairs"] = qa_pairs
+
+    from core.cache import _max_prompt_version
+    save_cache(
+        url,
+        video_title or (existing_raw.get("video_title", "") if existing_raw else ""),
+        subtitle_text or (existing_raw.get("subtitle_text", "") if existing_raw else ""),
+        source,
+        json.dumps(result_json, ensure_ascii=False),
+        fingerprint=fingerprint,
+        part_info=existing_raw.get("part_info", "") if existing_raw else "",
+        platform=platform,
+        prompt_version=_max_prompt_version(),
+    )
+
+
+@router.post("/api/qa/stream")
+async def qa_stream(req: QaGenerationRequest, request: Request):
+    """SSE 流式 AI 关键问答对生成（支持缓存）。"""
+    if not req.subtitle_text or len(req.subtitle_text.strip()) < 10:
+        raise HTTPException(status_code=400, detail="字幕内容为空，无法生成问答")
+
+    identity = get_identity(request)
+
+    # ── 缓存检查 ──
+    if req.url and not req.force:
+        cached = get_cached(req.url)
+        if cached and cached.get("result_json"):
+            try:
+                result_data = json.loads(cached["result_json"])
+                if result_data.get("qa_pairs"):
+                    def _replay():
+                        yield PipelineEvent("progress", {"stage": "cache_hit", "message": "已有问答缓存，直接加载"})
+                        yield PipelineEvent("qa_pairs", result_data["qa_pairs"])
+                        yield PipelineEvent("done", {})
+                    return StreamingResponse(_sse_generator(_replay()), media_type="text/event-stream", headers=_sse_headers())
+            except json.JSONDecodeError:
+                pass
+
+    # ── AI 使用次数检查 ──
+    allowed, used, limit = check_usage_limit(
+        identity.get("user_id"), identity.get("guest_id"), identity.get("guest_sig")
+    )
+    if not allowed:
+        raise HTTPException(status_code=429, detail=f"今日 AI 次数已用完（{used}/{limit}）")
+
+    trace_id = uuid.uuid4().hex[:8]
+
+    try:
+        def _gen():
+            qa_pairs_result = []
+            for event in run_qanda(req.subtitle_text, req.video_title, trace_id):
+                yield event
+                if event.type == "qa_pairs":
+                    qa_pairs_result = event.data
+
+            if req.url and qa_pairs_result:
+                _merge_and_save_qanda(req.url, req.subtitle_text, req.video_title, qa_pairs_result)
+
+            log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                      action="qanda", status="SUCCESS")
+            yield PipelineEvent("done", {})
+
+        return StreamingResponse(_sse_generator(_gen()), media_type="text/event-stream", headers=_sse_headers())
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"问答对生成失败: {str(e)}")
