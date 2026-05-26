@@ -17,6 +17,7 @@ export function useSummary() {
   const notesMarkdown = ref('')
   const notesSections = ref(null)
   const flashcards = ref(null)
+  const qaPairs = ref(null)
   const generationStage = ref('')
   const chapters = ref(null)
   const regeneratingMode = ref('')  // '' | 'summary' | 'mindmap' | 'notes' | 'subtitle'
@@ -138,6 +139,10 @@ export function useSummary() {
               case 'flashcards':
                 flashcards.value = event.data
                 break
+              case 'qa_pairs':
+                qaPairs.value = event.data
+                generationStage.value = 'qanda'
+                break
               case 'subtitle_text':
                 subtitleText.value = event.data.text
                 break
@@ -181,6 +186,7 @@ export function useSummary() {
     notesMarkdown.value = ''
     notesSections.value = null
     flashcards.value = null
+    qaPairs.value = null
     chapters.value = null
     generationStage.value = ''
     regeneratingMode.value = ''
@@ -203,6 +209,7 @@ export function useSummary() {
     notesMarkdown,
     notesSections,
     flashcards,
+    qaPairs,
     chapters,
     generationStage,
     regeneratingMode,
