@@ -2,14 +2,16 @@
 import { ref } from 'vue'
 import { useAuth } from '../composables/useAuth.js'
 import LoginModal from './LoginModal.vue'
+import AdminSettings from './AdminSettings.vue'
 
 defineProps({
   currentView: { type: String, default: 'home' }
 })
 const emit = defineEmits(['toggle-history', 'go-home'])
 
-const { user, usage, isLoggedIn, displayName, logout } = useAuth()
+const { user, usage, isLoggedIn, isAdmin, displayName, logout } = useAuth()
 const showLogin = ref(false)
+const showSettings = ref(false)
 
 async function handleLogout() {
   await logout()
@@ -44,6 +46,14 @@ async function handleLogout() {
           AI {{ usage.used }}/{{ usage.limit }}
         </span>
 
+        <button v-if="isLoggedIn && isAdmin" class="btn-settings" @click="showSettings = true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-settings-icon">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+          </svg>
+          模型配置
+        </button>
+
         <button v-if="isLoggedIn" class="btn-history" :class="{ active: currentView === 'history' }" @click="$emit('toggle-history')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-history-icon">
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
@@ -68,6 +78,7 @@ async function handleLogout() {
   </nav>
 
   <LoginModal :visible="showLogin" @close="showLogin = false" />
+  <AdminSettings :visible="showSettings" @close="showSettings = false" />
 </template>
 
 <style scoped>
@@ -183,6 +194,32 @@ async function handleLogout() {
 }
 
 .btn-history-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.btn-settings {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.5rem 1rem;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-settings:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+
+.btn-settings-icon {
   width: 16px;
   height: 16px;
 }

@@ -56,7 +56,6 @@ async def ingest_video(url: str, task: Task = None):
     # 3. AI 处理
     loop = asyncio.get_event_loop()
     from core import ai_client
-    from config import AI_MODEL
 
     await _update_progress(25, "正在生成 AI 总结...")
     summary = await loop.run_in_executor(
@@ -92,7 +91,7 @@ async def ingest_video(url: str, task: Task = None):
 
 
 def _save_output(video_id: int, output_type: str, content):
-    from config import AI_MODEL
+    from core.ai_config import get_effective_model
     with get_db() as conn:
         conn.execute(
             "DELETE FROM ai_outputs WHERE video_id = ? AND output_type = ?",
@@ -100,7 +99,7 @@ def _save_output(video_id: int, output_type: str, content):
         )
         conn.execute(
             "INSERT INTO ai_outputs (video_id, output_type, content, model_used) VALUES (?, ?, ?, ?)",
-            (video_id, output_type, str(content), AI_MODEL),
+            (video_id, output_type, str(content), get_effective_model()),
         )
 
 

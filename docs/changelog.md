@@ -1,5 +1,41 @@
 # 变更记录
 
+## [3.2.0] - 2026-05-28
+
+### 新增
+
+- **管理员 AI 模型配置**（`backend/core/ai_config.py` + `backend/api/admin_routes.py` + `frontend/src/composables/useAdminConfig.js` + `frontend/src/components/AdminSettings.vue`）：
+  - 管理员可在前端配置多个 AI 服务商（DeepSeek、MIMO、OpenAI 等），每个服务商下可添加多个模型
+  - 服务商分组结构：API Key 和 Base URL 按服务商配置一次，下设多个模型名（如 DeepSeek 的 flash 和 pro 共享同一 key）
+  - 点击模型即可切换激活，切换后立即生效（热切换，无需重启）
+  - 测试连接功能：编辑模式使用存储的真实 API Key 测试，不会用错其他服务商的 key
+  - JSON 文件持久化（`backend/data/ai_config.json`），兼容旧格式自动迁移
+  - 前端 UI：服务商分组展示，可折叠展开，组头显示服务商信息和操作按钮，组内列出模型
+
+### 变更
+
+- **AI 配置从环境变量扩展为运行时管理**（`backend/core/ai_config.py`）：
+  - 新增 `get_effective_api_key()` / `get_effective_base_url()` / `get_effective_model()` 函数，从运行时配置读取，fallback 到 `.env` 默认值
+  - `ai_client.py` 和 `ingest_service.py` 改用这些函数获取 AI 配置，支持运行时热切换
+  - 数据结构：`{providers: [{id, name, provider, api_key, base_url, models: [{id, name, model}]}], active: {provider_id, model_id}}`
+
+### API 端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/admin/ai-config` | 获取所有服务商和模型列表 |
+| POST | `/api/admin/ai-config/providers` | 新增服务商 |
+| PUT | `/api/admin/ai-config/providers/{pid}` | 更新服务商 |
+| DELETE | `/api/admin/ai-config/providers/{pid}` | 删除服务商 |
+| POST | `/api/admin/ai-config/providers/{pid}/test` | 测试服务商连通性 |
+| POST | `/api/admin/ai-config/providers/{pid}/models` | 在服务商下新增模型 |
+| PUT | `/api/admin/ai-config/providers/{pid}/models/{mid}` | 更新模型 |
+| DELETE | `/api/admin/ai-config/providers/{pid}/models/{mid}` | 删除模型 |
+| POST | `/api/admin/ai-config/switch` | 切换激活模型 |
+| POST | `/api/admin/ai-config/test` | 测试连通性（用传入参数） |
+
+---
+
 ## [3.1.1] - 2026-05-26
 
 ### 新增

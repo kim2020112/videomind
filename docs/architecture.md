@@ -209,6 +209,16 @@ URL → 查 ai_cache (命中→SSE重放)
 | GET | `/api/auth/me` | 当前用户信息 | - | `{"logged_in": true/false, "user": {...}, "usage": {...}}` |
 | GET | `/api/auth/usage` | 轻量用量查询 | - | `{"used": N, "limit": N, "allowed": true/false}` |
 | POST | `/api/auth/guest-sign` | 游客设备签名 | `{"device_id": "..."}` | `{"signature": "..."}` |
+| GET | `/api/admin/ai-config` | AI 配置查询（管理员） | - | `{providers: [...], active: {...}}` |
+| POST | `/api/admin/ai-config/providers` | 新增服务商（管理员） | `{name, provider, api_key, base_url}` | Provider 对象 |
+| PUT | `/api/admin/ai-config/providers/{pid}` | 更新服务商（管理员） | `{name, provider, api_key, base_url}` | Provider 对象 |
+| DELETE | `/api/admin/ai-config/providers/{pid}` | 删除服务商（管理员） | - | `{"status": "ok"}` |
+| POST | `/api/admin/ai-config/providers/{pid}/test` | 测试服务商连通性（管理员） | - | `{success, message, model}` |
+| POST | `/api/admin/ai-config/providers/{pid}/models` | 新增模型（管理员） | `{name, model}` | Model 对象 |
+| PUT | `/api/admin/ai-config/providers/{pid}/models/{mid}` | 更新模型（管理员） | `{name, model}` | Model 对象 |
+| DELETE | `/api/admin/ai-config/providers/{pid}/models/{mid}` | 删除模型（管理员） | - | `{"status": "ok"}` |
+| POST | `/api/admin/ai-config/switch` | 切换激活模型（管理员） | `{provider_id, model_id}` | `{"status": "ok"}` |
+| POST | `/api/admin/ai-config/test` | 测试连通性（管理员） | `{api_key, base_url, model}` | `{success, message, model}` |
 
 ### 4.2 实时通信
 
@@ -367,8 +377,9 @@ data: {"type": "done", "data": {}}
 
 ```
 App.vue（~1900 行，视图路由：home / history）
-├── NavBar.vue                 # 顶部导航（毛玻璃效果，Logo + 学习历史按钮 + 用户菜单 + 登录按钮）
-│   └── LoginModal.vue         # 登录注册弹窗（深色主题，登录/注册切换，用户名+密码表单）
+├── NavBar.vue                 # 顶部导航（毛玻璃效果，Logo + 学习历史按钮 + 模型配置按钮 + 用户菜单 + 登录按钮）
+│   ├── LoginModal.vue         # 登录注册弹窗（深色主题，登录/注册切换，用户名+密码表单）
+│   └── AdminSettings.vue      # AI 模型配置弹窗（管理员专用，服务商分组管理，模型 CRUD，热切换，测试连接）
 ├── HistoryPage.vue            # 学习历史页（独立组件，自行管理状态，emit('select-item') 通知 App 跳转）
 │   ├── 统计仪表盘             # 学习视频数、笔记字数、平均时长、覆盖平台
 │   ├── 搜索栏                 # 文本搜索 + AI 语义搜索切换 + 排序/平台筛选
@@ -442,6 +453,7 @@ App.vue（~1900 行，视图路由：home / history）
 | 缓存去重 | video_fingerprint 去除 `_pN` 后缀 + 唯一视频计数 | 多P视频所有分P共享一个指纹，缓存清理按唯一视频（50 个）而非按行数（避免 185P 视频挤占所有额度） |
 | 数据库连接 | database.get_db() 上下文管理器 | 统一 WAL 模式、事务管理、自动 rollback；auth.py 等模块不再手动管理连接 |
 | 用量查询 | 独立 /api/auth/usage 端点 | AI 调用后只需刷新用量数字，无需拉取完整用户信息；减少网络开销 |
+| AI 模型运行时配置 | 服务商分组 + JSON 持久化 | 一个服务商下多个模型共享 API Key；热切换无需重启；管理员专用前端 UI；fallback 到 .env 默认值 |
 
 ## 7. 平台兼容层
 
@@ -542,6 +554,7 @@ videomind/
 │   ├── core/
 │   │   ├── downloader.py       # yt-dlp 封装
 │   │   ├── ai_client.py        # 统一 AI API 客户端（流式/非流式，prompt 加载，字幕校正）
+│   │   ├── ai_config.py        # 运行时 AI 配置管理（服务商分组、多模型预设、JSON 持久化、热切换）
 │   │   ├── summarizer.py       # 字幕清洗 + B 站 CC 字幕提取 + 降级方案
 │   │   ├── whisper.py          # Faster-Whisper 转录模块（本地模型，CPU/int8）
 │   │   ├── cache.py            # SQLite 持久化缓存（AI 结果 + Whisper 转录 + 视频信息）
@@ -569,6 +582,7 @@ videomind/
 │   │   ├── subtitle_text_routes.py  # 字幕文本提取端点（/api/subtitle/text，含Whisper兜底）
 │   │   ├── knowledge_routes.py      # 知识管理端点（/api/history、/api/search、/api/tags，含收藏/删除/统计）
 │   │   ├── auth_routes.py           # 认证路由（/api/auth/*，注册/登录/退出/me/usage/guest-sign）
+│   │   ├── admin_routes.py          # 管理员路由（/api/admin/*，AI 服务商/模型配置 CRUD、切换、测试）
 │   │   └── task_routes.py           # 异步任务路由
 │   ├── database.py                  # 数据库初始化 + get_db() 上下文管理器（WAL/事务/rollback）
 │   ├── config.py                    # 配置管理（环境变量加载）
@@ -577,6 +591,7 @@ videomind/
 │   │   ├── auth.py                  # 用户认证核心（Session/密码/游客签名/使用次数统计/历史记录）
 │   │   └── tag_extractor.py         # 智能标签提取器（100+ 关键词映射 + 平台识别）
 │   ├── data/
+│   │   ├── ai_config.json       # AI 服务商/模型配置（运行时持久化，不提交到 git）
 │   │   ├── chroma/              # ChromaDB 向量数据库
 │   │   └── whisper_models/      # Whisper 本地模型文件
 │   └── downloads/              # 下载文件输出

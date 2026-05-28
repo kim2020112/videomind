@@ -15,6 +15,7 @@
 - **智能标签**：基于规则自动提取视频标签（编程语言、AI/ML、框架等），支持按标签筛选历史
 - **视频下载**：保留原下载功能，支持多清晰度选择
 - **用户认证**：注册登录 + 游客模式，三级权限（Guest/User/Admin），按用户隔离学习历史和标签
+- **管理员 AI 模型配置**：管理员可在前端配置多个 AI 服务商和模型预设，支持热切换无需重启，同一服务商下多个模型共享 API Key
 - **移动端适配**：响应式布局，手机浏览器可正常使用 URL 输入、AI 总结、分P选择等全部功能
 
 ## 支持平台
@@ -114,6 +115,16 @@ cd ../backend && python main.py  # FastAPI 托管前端静态文件
 | `POST /api/auth/login` | 用户登录 |
 | `GET /api/auth/me` | 当前用户信息 |
 | `GET /api/auth/usage` | 轻量用量查询 |
+| `GET /api/admin/ai-config` | 获取 AI 服务商/模型配置（管理员） |
+| `POST /api/admin/ai-config/providers` | 新增服务商（管理员） |
+| `PUT /api/admin/ai-config/providers/{pid}` | 更新服务商（管理员） |
+| `DELETE /api/admin/ai-config/providers/{pid}` | 删除服务商（管理员） |
+| `POST /api/admin/ai-config/providers/{pid}/test` | 测试服务商连通性（管理员） |
+| `POST /api/admin/ai-config/providers/{pid}/models` | 新增模型（管理员） |
+| `PUT /api/admin/ai-config/providers/{pid}/models/{mid}` | 更新模型（管理员） |
+| `DELETE /api/admin/ai-config/providers/{pid}/models/{mid}` | 删除模型（管理员） |
+| `POST /api/admin/ai-config/switch` | 切换激活模型（管理员） |
+| `POST /api/admin/ai-config/test` | 测试连通性（管理员） |
 
 ## 注意事项
 

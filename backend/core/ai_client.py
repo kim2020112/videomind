@@ -6,9 +6,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import anthropic
-from config import (AI_API_KEY, AI_BASE_URL, AI_MODEL, AI_PROVIDER, PROMPT_VERSION, BASE_DIR,
+from config import (PROMPT_VERSION, BASE_DIR,
                     SUMMARY_PROMPT_VERSION, NOTES_PROMPT_VERSION, MINDMAP_PROMPT_VERSION,
                     QANDA_PROMPT_VERSION)
+from core.ai_config import get_effective_api_key, get_effective_base_url, get_effective_model
 from core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -69,9 +70,10 @@ def _load_prompt(name: str) -> str:
 # ──── AI Client ────
 
 def _get_client() -> anthropic.Anthropic:
-    if not AI_API_KEY:
+    api_key = get_effective_api_key()
+    if not api_key:
         raise ValueError("未配置 AI_API_KEY，请在 backend/.env 中设置")
-    return anthropic.Anthropic(api_key=AI_API_KEY, base_url=AI_BASE_URL)
+    return anthropic.Anthropic(api_key=api_key, base_url=get_effective_base_url())
 
 
 def _extract_text(response) -> str:
@@ -188,7 +190,7 @@ def _chunk_summarize(subtitle_text: str, video_title: str) -> str:
     def _summarize_one(idx_chunk):
         i, chunk = idx_chunk
         return i, _retry(client.messages.create,
-            model=AI_MODEL, max_tokens=1000,
+            model=get_effective_model(), max_tokens=1000,
             messages=[{"role": "user", "content": f"请对以下视频字幕片段（第 {i+1}/{len(chunks)} 部分）生成简要摘要，100-200字：\n\n---\n{chunk}\n---"}],
         )
 
@@ -232,7 +234,7 @@ def stream_chunk_summaries(subtitle_text: str, video_title: str = ""):
             max_tok = 600
 
         resp = client.messages.create(
-            model=AI_MODEL, max_tokens=max_tok,
+            model=get_effective_model(), max_tokens=max_tok,
             messages=[{"role": "user", "content": prompt}],
         )
         partials[i] = _extract_text(resp)
@@ -254,7 +256,7 @@ def summarize(subtitle_text: str, video_title: str = "") -> dict:
         subtitle_text=_chunk_summarize(subtitle_text, video_title),
     )
     resp = _retry(client.messages.create,
-        model=AI_MODEL, max_tokens=4000,
+        model=get_effective_model(), max_tokens=4000,
         messages=[{"role": "user", "content": prompt}],
     )
     text = _extract_text(resp)
@@ -269,7 +271,7 @@ def generate_notes(subtitle_text: str, video_title: str = "") -> dict:
         subtitle_text=_chunk_summarize(subtitle_text, video_title),
     )
     resp = _retry(client.messages.create,
-        model=AI_MODEL, max_tokens=6000,
+        model=get_effective_model(), max_tokens=6000,
         messages=[{"role": "user", "content": prompt}],
     )
     text = _extract_text(resp)
@@ -287,7 +289,7 @@ def generate_mindmap(subtitle_text: str, video_title: str = "") -> str:
         subtitle_text=_chunk_summarize(subtitle_text, video_title),
     )
     resp = _retry(client.messages.create,
-        model=AI_MODEL, max_tokens=2000, temperature=0.5,
+        model=get_effective_model(), max_tokens=2000, temperature=0.5,
         messages=[{"role": "user", "content": prompt}],
     )
     return _extract_text(resp)
@@ -319,7 +321,7 @@ def rag_answer(question: str, context_chunks: list[str], history: list = None) -
 - 使用 Markdown 格式"""
 
     resp = _retry(client.messages.create,
-        model=AI_MODEL, max_tokens=2000,
+        model=get_effective_model(), max_tokens=2000,
         messages=[{"role": "user", "content": prompt}],
     )
     return _extract_text(resp)
@@ -347,7 +349,7 @@ def correct_subtitle(subtitle_text: str, video_title: str = "", video_descriptio
 
     try:
         resp = _retry(client.messages.create,
-            model=AI_MODEL, max_tokens=min(len(truncated) * 2, 16000),
+            model=get_effective_model(), max_tokens=min(len(truncated) * 2, 16000),
             temperature=0.1,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -378,7 +380,7 @@ def stream_summarize(subtitle_text: str, video_title: str = ""):
 
     try:
         with client.messages.stream(
-            model=AI_MODEL, max_tokens=4000,
+            model=get_effective_model(), max_tokens=4000,
             messages=[{"role": "user", "content": prompt}],
         ) as stream:
             for event in stream:
@@ -406,7 +408,7 @@ def stream_generate_notes(subtitle_text: str, video_title: str = ""):
 
     try:
         with client.messages.stream(
-            model=AI_MODEL, max_tokens=6000,
+            model=get_effective_model(), max_tokens=6000,
             messages=[{"role": "user", "content": prompt}],
         ) as stream:
             for event in stream:
@@ -454,7 +456,7 @@ def stream_chat(subtitle_text: str, question: str, history: list = None):
 
     try:
         with client.messages.stream(
-            model=AI_MODEL, max_tokens=2000,
+            model=get_effective_model(), max_tokens=2000,
             messages=[{"role": "user", "content": prompt}],
         ) as stream:
             for event in stream:
@@ -483,7 +485,7 @@ def stream_rag_answer(question: str, context_chunks: list[str], history: list = 
 
     try:
         with client.messages.stream(
-            model=AI_MODEL, max_tokens=2000,
+            model=get_effective_model(), max_tokens=2000,
             messages=[{"role": "user", "content": prompt}],
         ) as stream:
             for event in stream:
@@ -506,7 +508,7 @@ def stream_flashcards(content_summary: str, video_title: str = ""):
 
     try:
         with client.messages.stream(
-            model=AI_MODEL, max_tokens=2000,
+            model=get_effective_model(), max_tokens=2000,
             messages=[{"role": "user", "content": prompt}],
         ) as stream:
             for event in stream:
@@ -538,7 +540,7 @@ def stream_qanda(subtitle_text: str, video_title: str = ""):
 
     try:
         with client.messages.stream(
-            model=AI_MODEL, max_tokens=3000,
+            model=get_effective_model(), max_tokens=3000,
             messages=[{"role": "user", "content": prompt}],
         ) as stream:
             for event in stream:

@@ -22,6 +22,7 @@ from api.task_routes import router as task_router
 from api.knowledge_routes import router as knowledge_router
 from api.ai_routes import router as ai_router
 from api.auth_routes import router as auth_router
+from api.admin_routes import router as admin_router
 
 
 @asynccontextmanager
@@ -60,6 +61,7 @@ app.include_router(task_router)
 app.include_router(knowledge_router)
 app.include_router(ai_router)
 app.include_router(auth_router)
+app.include_router(admin_router)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIST = os.path.join(os.path.dirname(BASE_DIR), "frontend", "dist")
