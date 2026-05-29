@@ -128,6 +128,8 @@ def get_cached(url: str, fingerprint: str = None) -> dict | None:
                 old_url = row[0]
                 old_h = _url_hash(old_url)
                 if old_h != h:
+                    # 先删除与目标 url_hash 冲突的行
+                    conn.execute("DELETE FROM ai_cache WHERE url_hash = ? AND fingerprint != ?", (h, fingerprint))
                     conn.execute(
                         "UPDATE ai_cache SET url = ?, url_hash = ?, updated_at = ? WHERE fingerprint = ?",
                         (url, h, datetime.now(tz).isoformat(), fingerprint),
@@ -257,28 +259,21 @@ def save_cache(url: str, video_title: str = "", subtitle_text: str = "", source:
     now = datetime.now(tz).isoformat()
     nc = _compute_notes_chars(result_json)
     with _conn() as conn:
-        # 有指纹：先查是否已有同指纹记录
+        # 有指纹：先查是否已有同指纹且同 url_hash 的记录
         if fingerprint:
-            existing = conn.execute("SELECT url_hash FROM ai_cache WHERE fingerprint = ?", (fingerprint,)).fetchone()
+            existing = conn.execute("SELECT url_hash FROM ai_cache WHERE url_hash = ?", (h,)).fetchone()
             if existing:
                 conn.execute(
-                    "UPDATE ai_cache SET url=?, url_hash=?, video_title=?, subtitle_text=?, source=?, result_json=?, updated_at=?, part_info=?, platform=?, notes_chars=?, prompt_version=? WHERE fingerprint=?",
-                    (url, h, video_title, subtitle_text, source, result_json, now, part_info, platform, nc, prompt_version, fingerprint),
+                    "UPDATE ai_cache SET url=?, video_title=?, subtitle_text=?, source=?, result_json=?, updated_at=?, part_info=?, platform=?, notes_chars=?, prompt_version=?, fingerprint=COALESCE(NULLIF(?, ''), fingerprint) WHERE url_hash=?",
+                    (url, video_title, subtitle_text, source, result_json, now, part_info, platform, nc, prompt_version, fingerprint or '', h),
                 )
                 _cleanup_old_cache(conn)
                 return
-        # 无指纹或指纹未命中：按 url_hash 更新/插入
-        existing = conn.execute("SELECT url_hash FROM ai_cache WHERE url_hash = ?", (h,)).fetchone()
-        if existing:
-            conn.execute(
-                "UPDATE ai_cache SET video_title=?, subtitle_text=?, source=?, result_json=?, updated_at=?, fingerprint=COALESCE(NULLIF(?, ''), fingerprint), part_info=?, platform=?, notes_chars=?, prompt_version=? WHERE url_hash=?",
-                (video_title, subtitle_text, source, result_json, now, fingerprint or '', part_info, platform, nc, prompt_version, h),
-            )
-        else:
-            conn.execute(
-                "INSERT INTO ai_cache (url_hash, url, fingerprint, video_title, subtitle_text, source, result_json, part_info, platform, notes_chars, prompt_version, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (h, url, fingerprint or '', video_title, subtitle_text, source, result_json, part_info, platform, nc, prompt_version, now, now),
-            )
+        # 无指纹或指纹未命中：按 url_hash 更新或插入（INSERT OR REPLACE 防止并发 UNIQUE 冲突）
+        conn.execute(
+            "INSERT OR REPLACE INTO ai_cache (url_hash, url, fingerprint, video_title, subtitle_text, source, result_json, part_info, platform, notes_chars, prompt_version, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (h, url, fingerprint or '', video_title, subtitle_text, source, result_json, part_info, platform, nc, prompt_version, now, now),
+        )
         _cleanup_old_cache(conn)
 
 

@@ -24,6 +24,8 @@ export function useSummary() {
   const subtitleSource = ref('')
   const isPartialSummary = ref(false)
 
+  let abortController = null
+
   async function fetchSubtitleText(url, lang) {
     isFetchingSubtitle.value = true
     subtitleError.value = ''
@@ -50,6 +52,12 @@ export function useSummary() {
   }
 
   async function summarizeVideoStream(url, lang, force = false, mode = 'full') {
+    // 取消上一次未完成的请求
+    if (abortController) {
+      abortController.abort()
+    }
+    abortController = new AbortController()
+
     isSummarizing.value = true
     regeneratingMode.value = mode === 'full' ? '' : mode
     summarizeError.value = ''
@@ -60,6 +68,7 @@ export function useSummary() {
       mindmapMarkdown.value = ''
       notesSections.value = null
       flashcards.value = null
+      qaPairs.value = null
       chapters.value = null
       isPartialSummary.value = false
     } else if (mode === 'summary') {
@@ -80,6 +89,7 @@ export function useSummary() {
         method: 'POST',
         headers: getAuthHeaders(),
         body: JSON.stringify(body),
+        signal: abortController.signal,
       })
 
       if (!response.ok) {
@@ -140,7 +150,7 @@ export function useSummary() {
                 flashcards.value = event.data
                 break
               case 'qa_pairs':
-                qaPairs.value = event.data
+                qaPairs.value = (event.data || []).map(p => ({ ...p, expanded: false }))
                 generationStage.value = 'qanda'
                 break
               case 'subtitle_text':
@@ -163,7 +173,9 @@ export function useSummary() {
         }
       }
     } catch (e) {
-      summarizeError.value = e.message || 'AI 总结失败'
+      if (e.name !== 'AbortError') {
+        summarizeError.value = e.message || 'AI 总结失败'
+      }
     } finally {
       isSummarizing.value = false
       regeneratingMode.value = ''

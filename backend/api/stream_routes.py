@@ -151,7 +151,11 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
                     delete_cache(url)
                     cached = None
             elif req.mode != "full":
-                raise HTTPException(status_code=400, detail="尚无缓存，请先生成完整 AI 总结")
+                # prompt_version 不匹配导致 get_cached 返回 None，用 _get_cached_raw 兜底
+                from core.cache import _get_cached_raw
+                cached = _get_cached_raw(url)
+                if not cached:
+                    raise HTTPException(status_code=400, detail="尚无缓存，请先生成完整 AI 总结")
 
         # 缓存命中 + 全量模式 → 重放
         if cached and cached.get("result_json") and req.mode == "full" and not req.force:

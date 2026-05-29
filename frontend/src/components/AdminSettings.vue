@@ -219,12 +219,12 @@ async function handleTestNewProvider() {
               <div class="provider-info">
                 <div class="provider-row">
                   <span class="provider-name">{{ p.name }}</span>
-                  <span class="provider-tag">{{ p.provider }}</span>
+                  <span class="provider-tag" v-if="p.provider !== p.name.toLowerCase()">{{ p.provider }}</span>
+                  <span class="provider-active-model" v-if="active.provider_id === p.id">
+                    <span class="active-dot"></span>
+                    {{ p.models.find(m => m.id === active.model_id)?.model || '未选择' }}
+                  </span>
                   <span class="provider-count">{{ p.models.length }} 个模型</span>
-                </div>
-                <div class="provider-detail">
-                  <span class="provider-key">{{ p.api_key }}</span>
-                  <span class="provider-url">{{ p.base_url }}</span>
                 </div>
               </div>
               <div class="provider-actions" @click.stop>
@@ -242,6 +242,16 @@ async function handleTestNewProvider() {
 
             <!-- 模型列表（展开时显示） -->
             <div v-if="expanded[p.id]" class="model-list">
+              <div class="provider-detail">
+                <div class="detail-item">
+                  <span class="detail-label">Key</span>
+                  <span class="detail-value">{{ p.api_key }}</span>
+                </div>
+                <div class="detail-item">
+                  <span class="detail-label">URL</span>
+                  <span class="detail-value detail-url">{{ p.base_url }}</span>
+                </div>
+              </div>
               <div
                 v-for="m in p.models"
                 :key="m.id"
@@ -249,13 +259,11 @@ async function handleTestNewProvider() {
                 :class="{ active: isActiveModel(p.id, m.id) }"
                 @click="handleSwitch(p.id, m.id)"
               >
-                <div class="model-check" v-if="isActiveModel(p.id, m.id)">
-                  <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
-                </div>
                 <div class="model-info">
                   <span class="model-name">{{ m.name }}</span>
                   <span class="model-id">{{ m.model }}</span>
                 </div>
+                <span class="model-active-badge" v-if="isActiveModel(p.id, m.id)">当前</span>
                 <div class="model-actions" @click.stop>
                   <button class="btn-icon" title="编辑" @click="openEditModel(p.id, m)">
                     <svg viewBox="0 0 20 20" fill="currentColor"><path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z"/></svg>
@@ -516,23 +524,25 @@ async function handleTestNewProvider() {
   color: #475569;
 }
 
-.provider-detail {
-  display: flex;
+.provider-active-model {
+  display: inline-flex;
   align-items: center;
-  gap: 0.75rem;
-  font-size: 0.75rem;
-  color: #64748b;
-}
-
-.provider-key {
+  gap: 0.375rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: #93c5fd;
+  padding: 0.0625rem 0.5rem;
+  background: rgba(59, 130, 246, 0.12);
+  border-radius: 10px;
   font-family: monospace;
-  flex-shrink: 0;
 }
 
-.provider-url {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.active-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #3b82f6;
+  box-shadow: 0 0 6px rgba(59, 130, 246, 0.5);
 }
 
 .provider-actions {
@@ -550,14 +560,58 @@ async function handleTestNewProvider() {
 /* ── 模型列表 ── */
 .model-list {
   border-top: 1px solid rgba(255, 255, 255, 0.06);
-  padding: 0.5rem 0.75rem 0.75rem 2.5rem;
+  padding: 0.625rem 1rem 0.75rem 1rem;
+}
+
+.provider-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.6875rem;
+  color: #475569;
+  padding: 0.5rem 0.625rem;
+  margin-bottom: 0.5rem;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 6px;
+}
+
+.detail-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.detail-label {
+  flex-shrink: 0;
+  font-size: 0.5625rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #334155;
+  width: 2rem;
+  text-align: right;
+}
+
+.detail-value {
+  font-family: monospace;
+  font-size: 0.6875rem;
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.detail-url {
+  color: #475569;
 }
 
 .model-item {
   display: flex;
   align-items: center;
   gap: 0.625rem;
-  padding: 0.5rem 0.75rem;
+  padding: 0.5rem 0.625rem;
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.15s;
@@ -570,14 +624,6 @@ async function handleTestNewProvider() {
 .model-item.active {
   background: rgba(59, 130, 246, 0.1);
 }
-
-.model-check {
-  flex-shrink: 0;
-  width: 18px;
-  height: 18px;
-  color: #3b82f6;
-}
-.model-check svg { width: 18px; height: 18px; }
 
 .model-info {
   flex: 1;
@@ -596,6 +642,7 @@ async function handleTestNewProvider() {
 
 .model-item.active .model-name {
   color: #93c5fd;
+  font-weight: 700;
 }
 
 .model-id {
@@ -606,6 +653,17 @@ async function handleTestNewProvider() {
   white-space: nowrap;
   min-width: 0;
   flex: 1;
+}
+
+.model-active-badge {
+  flex-shrink: 0;
+  font-size: 0.5625rem;
+  font-weight: 700;
+  color: #60a5fa;
+  padding: 0.125rem 0.4rem;
+  background: rgba(59, 130, 246, 0.12);
+  border-radius: 4px;
+  letter-spacing: 0.06em;
 }
 
 .model-actions {

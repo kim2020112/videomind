@@ -1,5 +1,41 @@
 # 变更记录
 
+## [3.2.1] - 2026-05-29
+
+### 修复
+
+- **缓存 fingerprint 迁移冲突**（`backend/core/cache.py`）：
+  - `get_cached()` 在迁移 URL hash 时，先删除与目标 `url_hash` 冲突的行，避免 UNIQUE 约束冲突导致迁移失败
+  - `save_cache()` 简化为 `INSERT OR REPLACE`，按 `url_hash` 匹配更新，消除复杂的多分支 upsert 逻辑
+
+- **prompt_version 不匹配时流式端点报错**（`backend/api/stream_routes.py`）：
+  - 非 full 模式下 `get_cached()` 因 prompt_version 不匹配返回 None 时，先用 `_get_cached_raw()` 兜底读取原始缓存
+  - 只有两者均无缓存时才返回 400，避免已有缓存但版本标记不一致时无法使用部分总结
+
+- **SQLite 并发写入超时**（`backend/database.py`）：
+  - 新增 `PRAGMA busy_timeout=5000`，写入冲突时等待 5 秒而非立即报错，减少并发场景下的 `database is locked` 异常
+
+- **局部重新生成时 loading 状态污染**（`frontend/src/components/AiSummary.vue`）：
+  - 思维导图、学习笔记的骨架屏和"生成中..."标记现在只在对应 tab 正在重新生成时显示
+  - 修复了重新生成摘要时思维导图/笔记 tab 也显示 loading 的问题
+
+- **请求未取消导致竞态**（`frontend/src/composables/useSummary.js`）：
+  - 新增 `AbortController`，每次发起新的总结请求时自动取消上一次未完成的请求
+  - 避免快速切换分P或重复点击时多个 SSE 流同时写入状态
+
+### 变更
+
+- **管理员 AI 模型配置 UI 优化**（`frontend/src/components/AdminSettings.vue`）：
+  - 服务商卡片默认折叠时隐藏 API Key 和 Base URL，展开后以 Key/URL 标签形式展示，提升安全性
+  - 新增当前激活模型指示：服务商卡片头部显示蓝色胶囊标签（如 `deepseek-v4-flash`），模型列表中用"当前"badge 替代勾选图标
+  - provider tag 在 name 与 provider 相同时隐藏，减少冗余信息
+
+- **问答对初始化优化**（`frontend/src/composables/useSummary.js`）：
+  - QA pairs 事件数据统一添加 `expanded: false` 初始状态，避免展开/收起状态异常
+  - 全量模式重置时清空 `qaPairs`
+
+---
+
 ## [3.2.0] - 2026-05-28
 
 ### 新增

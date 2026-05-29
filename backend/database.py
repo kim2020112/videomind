@@ -128,6 +128,7 @@ def get_db():
     conn.execute("PRAGMA temp_store=MEMORY")
     conn.execute("PRAGMA cache_size=10000")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
     try:
         yield conn
         conn.commit()

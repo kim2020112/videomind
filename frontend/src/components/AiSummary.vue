@@ -960,7 +960,7 @@ function downloadNotes() {
             <svg ref="mindmapSvg" class="mindmap-svg" :style="isFullscreen ? 'height: 100%' : 'min-height: 500px'"></svg>
           </div>
         </div>
-        <div v-else-if="loading" class="mindmap-loading">
+        <div v-else-if="loading && (!regeneratingMode || regeneratingMode === 'mindmap')" class="mindmap-loading">
           <div class="skeleton-line skeleton-long"></div>
           <div class="skeleton-line skeleton-medium"></div>
           <p class="loading-text">正在生成思维导图...</p>
@@ -982,14 +982,14 @@ function downloadNotes() {
 
       <!-- Tab: 学习笔记 -->
       <div v-show="activeSubTab === 'notes'" class="sub-tab-panel">
-        <div v-if="!notesMarkdown && loading" class="notes-loading">
+        <div v-if="!notesMarkdown && loading && (!regeneratingMode || regeneratingMode === 'notes')" class="notes-loading">
           <div class="skeleton-line skeleton-long"></div>
           <div class="skeleton-line skeleton-medium"></div>
           <p class="loading-text">正在生成学习笔记...</p>
         </div>
         <div v-else-if="notesMarkdown" class="notes-section">
           <div class="notes-toolbar">
-            <span v-if="loading" class="notes-streaming-badge">生成中...</span>
+            <span v-if="loading && (!regeneratingMode || regeneratingMode === 'notes')" class="notes-streaming-badge">生成中...</span>
             <button @click="copyNotes" class="notes-action-btn">
               <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z"/><path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 3H9a3 3 0 01-3-3z"/></svg>
               复制
