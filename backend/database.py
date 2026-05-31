@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS user_history (
     video_title TEXT DEFAULT '',
     platform TEXT DEFAULT '',
     is_favorite INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'done',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_history_user ON user_history(user_id, created_at DESC);
@@ -128,7 +129,7 @@ def get_db():
     conn.execute("PRAGMA temp_store=MEMORY")
     conn.execute("PRAGMA cache_size=10000")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=15000")
     try:
         yield conn
         conn.commit()
@@ -145,6 +146,11 @@ def init_db():
         # 迁移：添加 part_info 列
         try:
             conn.execute("ALTER TABLE videos ADD COLUMN part_info TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+        # 迁移：添加 user_history.status 列
+        try:
+            conn.execute("ALTER TABLE user_history ADD COLUMN status TEXT DEFAULT 'done'")
         except sqlite3.OperationalError:
             pass
     logger.info(f"初始化完成: {DB_PATH}")

@@ -251,7 +251,7 @@ async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = No
 
     # ── Pipeline 3: Whisper 转录（兜底，不含 AI 校正） ──
     if is_model_available():
-        if info.duration and info.duration > WHISPER_MAX_DURATION:
+        if WHISPER_MAX_DURATION > 0 and info.duration and info.duration > WHISPER_MAX_DURATION:
             logger.info(f"视频时长 {info.duration}s 超过限制 {WHISPER_MAX_DURATION}s，跳过 Whisper")
             return None, "", ""
 
@@ -261,10 +261,11 @@ async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = No
             return cached_whisper, "whisper", lang or "auto"
 
         try:
-            logger.info(f"开始 Whisper 转录...")
+            timeout = max(600, (info.duration or 0) * 3 + 120)
+            logger.info(f"开始 Whisper 转录（预计超时 {timeout}s）...")
             whisper_text = await asyncio.wait_for(
                 transcribe_video_async(url, lang),
-                timeout=600,
+                timeout=timeout,
             )
             if whisper_text and len(whisper_text.strip()) >= 20:
                 save_whisper_cache(url, whisper_text, lang or "auto", whisper_text, fingerprint=fingerprint)

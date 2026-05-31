@@ -1,9 +1,67 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, watch, onUnmounted } from 'vue'
 import { useAuth } from '../composables/useAuth.js'
 
 const { getAuthHeaders } = useAuth()
+const props = defineProps({
+  activeTasks: { type: Array, default: () => [] }
+})
 const emit = defineEmits(['select-item'])
+
+// 后台任务完成时自动刷新历史记录（带防抖，避免连续触发）
+const _prevTaskHashes = ref(new Set())
+let _refreshTimer = null
+watch(() => props.activeTasks.length, () => {
+  const newTasks = props.activeTasks
+  const newHashes = new Set(newTasks.map(t => t.url_hash))
+  const disappeared = [..._prevTaskHashes.value].filter(h => !newHashes.has(h))
+  _prevTaskHashes.value = newHashes
+
+  if (disappeared.length > 0) {
+    // 立即更新前端内存中的状态，避免显示"转录中断"
+    for (const urlHash of disappeared) {
+      const item = historyItems.value.find(h => h.url_hash === urlHash)
+      if (item && (item.status === 'transcribing' || item.status === 'generating')) {
+        item.status = 'done'
+      }
+    }
+    // 后台刷新确认数据
+    clearTimeout(_refreshTimer)
+    _refreshTimer = setTimeout(() => fetchHistoryPage(), 1500)
+  }
+})
+
+onUnmounted(() => {
+  clearTimeout(_refreshTimer)
+})
+
+function getTaskForUrl(urlHash) {
+  return props.activeTasks.find(t => t.url_hash === urlHash)
+}
+
+function getElapsedSeconds(task) {
+  return Math.floor((Date.now() / 1000) - task.started_at)
+}
+
+function getRemainingEstimate(task) {
+  const elapsed = getElapsedSeconds(task)
+  return Math.max(0, task.estimated_seconds - elapsed)
+}
+
+function formatRemaining(task) {
+  if (!task) return ''
+  const elapsed = getElapsedSeconds(task)
+  const remaining = Math.max(0, task.estimated_seconds - elapsed)
+  if (remaining > 0) {
+    const m = Math.floor(remaining / 60)
+    const s = remaining % 60
+    return m > 0 ? `预计还需 ${m} 分 ${s} 秒` : `预计还需 ${s} 秒`
+  }
+  // 超出预估，显示已用时
+  const em = Math.floor(elapsed / 60)
+  const es = elapsed % 60
+  return `已转录 ${em} 分 ${es} 秒，即将完成`
+}
 
 const historySearchQuery = ref('')
 const historyTags = ref([])
@@ -17,6 +75,9 @@ const historyLoading = ref(false)
 const historyLoadingMore = ref(false)
 const historyHasMore = ref(false)
 const deletingHistoryId = ref(null)
+const selectionMode = ref(false)
+const selectedIds = ref(new Set())
+const batchDeleting = ref(false)
 const errorMessage = ref('')
 let errorTimer = null
 function showError(msg) {
@@ -27,6 +88,46 @@ function showError(msg) {
 const searchMode = ref('text') // 'text' | 'semantic'
 const semanticResults = ref([])
 const expandedGroups = ref({}) // { groupKey: true/false }
+const expandedTaskItem = ref(null) // url_hash of expanded transcribing item
+const cancelingTaskId = ref(null)
+
+function toggleTaskDetail(item) {
+  if (item.status === 'transcribing' || item.status === 'generating') {
+    expandedTaskItem.value = expandedTaskItem.value === item.url_hash ? null : item.url_hash
+  }
+}
+
+async function cancelTask(taskId) {
+  if (!confirm('确定要取消此转录任务？')) return
+  cancelingTaskId.value = taskId
+  try {
+    const res = await fetch(`/api/tasks/${taskId}/cancel`, { method: 'POST', headers: getAuthHeaders() })
+    if (res.ok) {
+      // 刷新历史记录
+      fetchHistoryPage()
+    } else {
+      showError('取消失败')
+    }
+  } catch { showError('取消失败') } finally {
+    cancelingTaskId.value = null
+    expandedTaskItem.value = null
+  }
+}
+
+async function deleteTranscribingItem(item) {
+  if (!confirm(`确定删除「${item.video_title || '未标题'}」？`)) return
+  // 先取消关联的后台任务
+  const task = getTaskForUrl(item.url_hash)
+  if (task) {
+    try { await fetch(`/api/tasks/${task.task_id}/cancel`, { method: 'POST', headers: getAuthHeaders() }) } catch {}
+  }
+  // 删除历史记录
+  try {
+    await fetch(`/api/history/${item.url_hash}`, { method: 'DELETE', headers: getAuthHeaders() })
+    historyItems.value = historyItems.value.filter(h => h.url_hash !== item.url_hash)
+    historyTotal.value = Math.max(0, historyTotal.value - 1)
+  } catch { showError('删除失败') }
+}
 
 async function fetchHistoryPage() {
   historyLoading.value = true
@@ -51,10 +152,15 @@ async function fetchHistoryPage() {
       historyItems.value = data.items || []
       historyTotal.value = data.total || 0
       historyHasMore.value = historyItems.value.length < historyTotal.value
+    } else {
+      console.error('History API error:', historyRes.status, await historyRes.text())
     }
     if (tagsRes.ok) historyTags.value = await tagsRes.json()
     if (statsRes.ok) historyStats.value = await statsRes.json()
-  } catch { showError('加载历史记录失败，请稍后重试') } finally {
+  } catch (e) {
+    console.error('fetchHistoryPage error:', e)
+    showError('加载历史记录失败，请稍后重试')
+  } finally {
     historyLoading.value = false
   }
 }
@@ -132,6 +238,10 @@ async function toggleFavorite(item) {
 }
 
 async function deleteHistoryItem(item) {
+  // 转录中的记录需要同时取消后台任务
+  if (item.status === 'transcribing' || item.status === 'generating') {
+    return deleteTranscribingItem(item)
+  }
   if (item.is_multipart) {
     if (!confirm(`确定删除「${item.video_title}」的全部 ${item.parts_count} 个分P？`)) return
     try {
@@ -155,7 +265,92 @@ async function deleteHistoryItem(item) {
 }
 
 function selectHistory(item) {
+  if (item.status === 'transcribing' || item.status === 'generating') {
+    toggleTaskDetail(item)
+    return
+  }
   emit('select-item', item)
+}
+
+// ── 批量选择 ──
+
+function getItemHashes(item) {
+  if (item.is_multipart) {
+    return (item.parts || []).map(p => p.id)
+  }
+  return [item.id]
+}
+
+function toggleSelectionMode() {
+  selectionMode.value = !selectionMode.value
+  if (!selectionMode.value) {
+    selectedIds.value = new Set()
+  }
+}
+
+function toggleSelectItem(item) {
+  const ids = getItemHashes(item)
+  const newSet = new Set(selectedIds.value)
+  const allSelected = ids.every(id => newSet.has(id))
+  if (allSelected) {
+    ids.forEach(id => newSet.delete(id))
+  } else {
+    ids.forEach(id => newSet.add(id))
+  }
+  selectedIds.value = newSet
+}
+
+function isItemSelected(item) {
+  const ids = getItemHashes(item)
+  return ids.length > 0 && ids.every(id => selectedIds.value.has(id))
+}
+
+function toggleSelectAll() {
+  const allHashes = historyItems.value.flatMap(item => getItemHashes(item))
+  const allSelected = allHashes.length > 0 && allHashes.every(id => selectedIds.value.has(id))
+  if (allSelected) {
+    selectedIds.value = new Set()
+  } else {
+    selectedIds.value = new Set(allHashes)
+  }
+}
+
+async function batchDeleteSelected() {
+  const count = selectedIds.value.size
+  if (count === 0) return
+  if (!confirm(`确定删除选中的 ${count} 条记录？`)) return
+
+  batchDeleting.value = true
+  try {
+    const res = await fetch('/api/history/batch-delete', {
+      method: 'POST',
+      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url_hashes: [...selectedIds.value] }),
+    })
+    if (res.ok) {
+      const before = historyItems.value.length
+      historyItems.value = historyItems.value.filter(item => {
+        const hashes = getItemHashes(item)
+        return !hashes.some(id => selectedIds.value.has(id))
+      })
+      historyTotal.value -= before - historyItems.value.length
+      selectedIds.value = new Set()
+      selectionMode.value = false
+      // 刷新标签和统计
+      const [tagsRes, statsRes] = await Promise.all([
+        fetch('/api/history/tags', { headers: getAuthHeaders() }),
+        fetch('/api/history/stats', { headers: getAuthHeaders() }),
+      ])
+      if (tagsRes.ok) historyTags.value = await tagsRes.json()
+      if (statsRes.ok) historyStats.value = await statsRes.json()
+    } else {
+      showError('批量删除失败，请稍后重试')
+    }
+  } catch {
+    showError('批量删除失败，请稍后重试')
+  } finally {
+    batchDeleting.value = false
+  }
 }
 
 function formatDuration(seconds) {
@@ -242,6 +437,15 @@ fetchHistoryPage()
             <option value="tiktok">TikTok</option>
             <option value="xiaohongshu">小红书</option>
           </select>
+          <button
+            class="search-mode-btn"
+            :class="{ active: selectionMode }"
+            @click="toggleSelectionMode"
+            title="选择模式"
+          >
+            <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16"><path d="M10 2a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V3a1 1 0 011-1z"/></svg>
+            选择
+          </button>
         </div>
       </div>
 
@@ -273,7 +477,29 @@ fetchHistoryPage()
       <!-- 历史卡片列表 -->
       <div v-if="searchMode === 'text' || !semanticResults.length" class="history-card-list">
         <div class="history-list-header">
-          <span class="history-count">共 {{ historyTotal }} 条记录</span>
+          <div class="history-list-left">
+            <label v-if="selectionMode" class="select-all-label">
+              <input
+                type="checkbox"
+                :checked="historyItems.length > 0 && historyItems.every(item => isItemSelected(item))"
+                @change="toggleSelectAll"
+              />
+              全选
+            </label>
+            <span class="history-count">共 {{ historyTotal }} 条记录</span>
+            <span v-if="selectionMode && selectedIds.size > 0" class="selected-count">
+              已选 {{ selectedIds.size }} 条
+            </span>
+          </div>
+          <button
+            v-if="selectionMode && selectedIds.size > 0"
+            class="btn-batch-delete"
+            @click="batchDeleteSelected"
+            :disabled="batchDeleting"
+          >
+            <svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14"><path fill-rule="evenodd" d="M8.75 2.5A1.75 1.75 0 006 4.25H3.75a.75.75 0 000 1.5h.372l.94 10.838A2 2 0 007.045 18.5h5.91a2 2 0 001.984-1.912l.94-10.838h.371a.75.75 0 000-1.5H14A1.75 1.75 0 0011.25 2.5h-2.5zm3.098 3.5H8.152l.912 10.5h1.872l.912-10.5z" clip-rule="evenodd"/></svg>
+            {{ batchDeleting ? '删除中...' : `删除选中 (${selectedIds.size})` }}
+          </button>
         </div>
         <div v-if="historyLoading" class="history-loading">
           <div class="loading-spinner"></div>
@@ -285,10 +511,46 @@ fetchHistoryPage()
           <span class="empty-hint">使用 AI 总结视频后，记录会自动保存到这里</span>
         </div>
         <div v-else class="history-cards">
-          <div v-for="item in historyItems" :key="item.id" class="history-page-card">
+          <div v-for="item in historyItems" :key="item.id" class="history-page-card" :class="{ 'hp-card-selected': selectionMode && isItemSelected(item), 'hp-card-transcribing': item.status === 'transcribing' || item.status === 'generating' }">
+            <div v-if="selectionMode" class="hp-card-checkbox" @click.stop="toggleSelectItem(item)">
+              <input type="checkbox" :checked="isItemSelected(item)" />
+            </div>
             <div class="hp-card-header">
               <h3 class="hp-card-title" @click="selectHistory(item)">{{ item.video_title || '未知标题' }}</h3>
               <span v-if="item.platform" class="hp-platform-tag">{{ item.platform }}</span>
+            </div>
+            <!-- 转录状态 -->
+            <div v-if="item.status === 'transcribing' || item.status === 'generating'"
+                 class="hp-transcribing-badge" @click.stop="toggleTaskDetail(item)">
+              <template v-if="getTaskForUrl(item.url_hash)">
+                <span class="hp-pulse-dot"></span>
+                <span>{{ item.status === 'transcribing' ? 'Whisper 转录中' : 'AI 生成中' }}</span>
+                <span class="hp-time-remaining">
+                  · {{ formatRemaining(getTaskForUrl(item.url_hash)) }}
+                </span>
+                <span class="hp-expand-hint">{{ expandedTaskItem === item.url_hash ? '▲' : '▼' }}</span>
+              </template>
+              <template v-else>
+                <span>{{ item.status === 'transcribing' ? '转录中断' : '生成中断' }}</span>
+              </template>
+            </div>
+            <!-- 转录任务详情面板 -->
+            <div v-if="(item.status === 'transcribing' || item.status === 'generating') && expandedTaskItem === item.url_hash" class="hp-task-detail">
+              <div class="hp-task-info">
+                <span>视频时长：{{ formatDuration(getTaskForUrl(item.url_hash)?.duration || 0) }}</span>
+                <span v-if="getTaskForUrl(item.url_hash)">· 已转录 {{ getElapsedSeconds(getTaskForUrl(item.url_hash)) }} 秒</span>
+              </div>
+              <div class="hp-task-actions">
+                <button class="hp-btn-cancel" @click.stop="cancelTask(getTaskForUrl(item.url_hash)?.task_id)" :disabled="cancelingTaskId === getTaskForUrl(item.url_hash)?.task_id">
+                  {{ cancelingTaskId === getTaskForUrl(item.url_hash)?.task_id ? '取消中...' : '停止转录' }}
+                </button>
+                <button class="hp-btn-delete-task" @click.stop="deleteTranscribingItem(item)">
+                  删除记录
+                </button>
+              </div>
+            </div>
+            <div v-if="item.status === 'failed'" class="hp-failed-badge">
+              <span>转录失败</span>
             </div>
             <!-- 多P标识 -->
             <div v-if="item.is_multipart" class="hp-multipart-badge" @click="toggleGroup(item.id)" @keydown.enter="toggleGroup(item.id)" tabindex="0" role="button">
@@ -551,6 +813,63 @@ fetchHistoryPage()
   font-size: 0.8125rem;
   color: var(--text-muted);
 }
+
+/* 批量选择 */
+.history-list-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.select-all-label {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.select-all-label input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent-blue);
+}
+.selected-count {
+  font-size: 0.8125rem;
+  color: var(--accent-blue);
+  font-weight: 500;
+}
+.btn-batch-delete {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.5rem 1rem;
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  color: #FCA5A5;
+  font-size: 0.8125rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-batch-delete:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.25);
+  border-color: rgba(239, 68, 68, 0.5);
+}
+.btn-batch-delete:disabled { opacity: 0.5; cursor: not-allowed; }
+.hp-card-checkbox {
+  margin-bottom: 0.5rem;
+  cursor: pointer;
+}
+.hp-card-checkbox input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent-blue);
+  cursor: pointer;
+}
+.hp-card-selected {
+  border-color: rgba(59, 130, 246, 0.4) !important;
+  background: rgba(59, 130, 246, 0.08) !important;
+}
 .history-loading {
   display: flex;
   align-items: center;
@@ -653,6 +972,108 @@ fetchHistoryPage()
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+.hp-card-transcribing {
+  border-color: rgba(245, 158, 11, 0.3);
+  background: rgba(245, 158, 11, 0.04);
+}
+.hp-card-transcribing .hp-card-title {
+  opacity: 0.7;
+}
+.hp-transcribing-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.75rem;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #f59e0b;
+  margin: 0.5rem 0;
+  cursor: pointer;
+}
+.hp-pulse-dot {
+  width: 6px;
+  height: 6px;
+  background: #f59e0b;
+  border-radius: 50%;
+  animation: hp-pulse 2s ease-in-out infinite;
+}
+@keyframes hp-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.hp-time-remaining {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.hp-expand-hint {
+  margin-left: auto;
+  font-size: 0.625rem;
+  opacity: 0.6;
+}
+.hp-task-detail {
+  padding: 0.75rem;
+  margin: 0.25rem 0 0.5rem;
+  background: rgba(245, 158, 11, 0.06);
+  border: 1px solid rgba(245, 158, 11, 0.15);
+  border-radius: 8px;
+}
+.hp-task-info {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-bottom: 0.625rem;
+}
+.hp-task-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+.hp-btn-cancel {
+  padding: 0.375rem 0.875rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 6px;
+  background: rgba(239, 68, 68, 0.08);
+  color: #ef4444;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.hp-btn-cancel:hover {
+  background: rgba(239, 68, 68, 0.15);
+}
+.hp-btn-cancel:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.hp-btn-delete-task {
+  padding: 0.375rem 0.875rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border: 1px solid var(--border-color, rgba(255,255,255,0.1));
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.hp-btn-delete-task:hover {
+  background: rgba(239, 68, 68, 0.08);
+  color: #ef4444;
+}
+.hp-failed-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.625rem;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #ef4444;
+  margin: 0.5rem 0;
 }
 .hp-card-footer {
   display: flex;

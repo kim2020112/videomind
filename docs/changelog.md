@@ -1,6 +1,68 @@
 # 变更记录
 
+## [3.3.0] - 2026-05-31
+
+### 新增
+
+- **后台转录队列**（`backend/core/task_manager.py` + `frontend/src/composables/useTaskPoller.js`）：
+  - 视频时长 >60s 且需要 Whisper 时，自动加入后台队列，不阻塞用户操作
+  - 前端每 10 秒轮询活跃任务，NavBar 历史图标显示脉冲红点
+  - 历史页转录中卡片显示进度（"Whisper 转录中 · 预计还需 X 分钟"）
+  - 点击转录中卡片展开详情面板：视频时长、已转录时间、停止转录、删除记录
+  - 任务完成时前端内存即时更新状态，避免"转录中断"假象
+
+- **取消转录任务**（`backend/api/task_routes.py`）：
+  - 新增 `POST /api/tasks/{task_id}/cancel` 端点，真正取消正在运行的 asyncio Task
+  - 同步更新 `user_history.status` 为 `failed`
+
+- **快速后台路径**（`backend/api/stream_routes.py`）：
+  - `parse_info()` 移到后台任务判断之后，仅在需要完整 info 时才调用
+  - 新增 `_quick_db_subtitle_check()`：纯 DB 检查，无网络调用
+  - 首次访问的视频（无缓存时长）仍走原路径；已有缓存时长的视频立即返回后台响应
+
+### 修复
+
+- **转录时服务器阻塞**（`backend/core/task_manager.py` + `backend/core/whisper.py`）：
+  - `parse_info()` 改用 `loop.run_in_executor()` 避免阻塞事件循环
+  - `beam_size` 5→3、`cpu_threads=核心数/2`、`os.nice(10)` 降低 CPU 占用
+  - systemd `CPUQuota=80%` 硬上限
+  - SQLite `busy_timeout` 5s→15s
+
+- **历史记录加载优化**（`backend/core/cache.py`）：
+  - `list_history_enhanced` 不再加载 `result_json`，改为仅对当前页 12 条记录批量加载摘要预览
+  - 从 `user_history` 出发 LEFT JOIN `ai_cache`，转录中记录可见
+  - admin 和普通用户统一查询路径
+  - 用 `CASE WHEN` 兼顾空字符串 platform
+  - 修复 `get_learning_stats` 平台分布统计错误
+
+- **url_hash 不一致**（`backend/core/task_manager.py`）：
+  - `_update_db_status` 使用 canonical url_hash，与 `add_user_history` 一致
+  - 任务完成后更新内存中的 `url_hash` 为 canonical 版本
+
+- **platform 为空**（`backend/api/stream_routes.py`）：
+  - 快速路径用 `detect_platform(url, "")` 从 URL 推断平台
+
+### 变更
+
+- **预估转录时间**（`backend/core/whisper.py`）：
+  - 倍率 2.5x→3.5x（含下载、校正开销），更贴近实际耗时
+  - 前端超时后显示"已转录 X 分钟，即将完成"而非"即将完成"
+
+- **前端 HistoryPage 优化**（`frontend/src/components/HistoryPage.vue`）：
+  - 任务完成 watch 移除 `deep: true`，添加 `onUnmounted` 清理定时器
+  - 前端 watch 加 1.5 秒防抖
+
+---
+
 ## [3.2.1] - 2026-05-29
+
+### 新增
+
+- **学习历史批量删除**（`backend/api/knowledge_routes.py` + `frontend/src/components/HistoryPage.vue`）：
+  - 新增 `POST /api/history/batch-delete` 端点，接收 url_hashes 列表批量删除
+  - 前端历史页新增「选择模式」：toolbar 选择按钮、卡片 checkbox、全选/取消全选
+  - 多P视频组整体选中/取消，与现有单条删除逻辑一致
+  - 批量删除后自动刷新统计仪表盘和标签计数
 
 ### 修复
 

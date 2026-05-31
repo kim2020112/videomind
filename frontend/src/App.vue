@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, nextTick, onMounted } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useDownloader } from './composables/useDownloader.js'
 import NavBar from './components/NavBar.vue'
 import HeroSection from './components/HeroSection.vue'
@@ -12,9 +12,16 @@ import { useSummary } from './composables/useSummary.js'
 import { useChat } from './composables/useChat.js'
 import { useQa } from './composables/useQa.js'
 import { useAuth } from './composables/useAuth.js'
+import { useTaskPoller } from './composables/useTaskPoller.js'
 
-const { init: initAuth } = useAuth()
-onMounted(() => initAuth())
+const { init: initAuth, isLoggedIn } = useAuth()
+const { activeTasks, activeTaskCount, startPolling, stopPolling } = useTaskPoller()
+
+onMounted(() => {
+  initAuth()
+  startPolling()
+})
+onUnmounted(() => stopPolling())
 
 const {
   videoInfo,
@@ -121,6 +128,8 @@ const {
   regeneratingMode,
   subtitleSource,
   isPartialSummary,
+  whisperEstimate,
+  backgroundTask,
   fetchSubtitleText,
   summarizeVideoStream,
   summarizeVideo,
@@ -505,10 +514,10 @@ function formatTime(timestamp) {
 
 <template>
   <div class="app-container">
-    <NavBar :currentView="currentView" @toggle-history="toggleHistory" @logout="handleLogout" @go-home="currentView = 'home'; $nextTick(() => window.scrollTo(0, 0))" />
+    <NavBar :currentView="currentView" :activeTaskCount="activeTaskCount" @toggle-history="toggleHistory" @logout="handleLogout" @go-home="currentView = 'home'; $nextTick(() => window.scrollTo(0, 0))" />
 
     <!-- 学习历史页 -->
-    <HistoryPage v-if="currentView === 'history'" @select-item="handleSelectHistory" />
+    <HistoryPage v-if="currentView === 'history'" :activeTasks="activeTasks" @select-item="handleSelectHistory" />
 
     <!-- 首页内容 -->
     <template v-if="currentView === 'home'">
@@ -785,6 +794,8 @@ function formatTime(timestamp) {
               :chatError="chatError"
               :subtitleInfo="subtitleInfo"
               :isPartialSummary="isPartialSummary"
+              :whisperEstimate="whisperEstimate"
+              :backgroundTask="backgroundTask"
               :videoTitle="videoInfo?.title || ''"
               :mindmapMarkdown="mindmapMarkdown"
               :notesMarkdown="notesMarkdown"

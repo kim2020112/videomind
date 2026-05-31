@@ -39,8 +39,8 @@ WHISPER_MODELS_DIR = BASE_DIR / "data" / "whisper_models"
 SUBTITLE_CORRECTION_ENABLED = os.getenv("SUBTITLE_CORRECTION_ENABLED", "true").lower() == "true"
 SUBTITLE_CORRECTION_MAX_CHARS = int(os.getenv("SUBTITLE_CORRECTION_MAX_CHARS", "15000"))
 
-# Whisper 转录最大视频时长（秒），超过则跳过，避免 CPU 转录过久
-WHISPER_MAX_DURATION = int(os.getenv("WHISPER_MAX_DURATION", "120"))
+# Whisper 转录最大视频时长（秒），0 表示不限制
+WHISPER_MAX_DURATION = int(os.getenv("WHISPER_MAX_DURATION", "0"))
 
 # HuggingFace 镜像（国内加速，首次下载 Whisper 模型用）
 _HF_ENDPOINT = os.getenv("HF_ENDPOINT", "https://hf-mirror.com")

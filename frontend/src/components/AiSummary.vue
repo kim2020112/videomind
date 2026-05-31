@@ -79,6 +79,8 @@ const props = defineProps({
   onToggleQaExpand: Function,
   subtitleInfo: Object,
   isPartialSummary: Boolean,
+  whisperEstimate: Object,
+  backgroundTask: Object,
   videoTitle: String,
   mindmapMarkdown: String,
   notesMarkdown: String,
@@ -787,6 +789,28 @@ function downloadNotes() {
       </template>
     </div>
 
+    <!-- Whisper 转录进度 -->
+    <div v-if="loading && whisperEstimate" class="whisper-progress">
+      <div class="whisper-header">
+        <svg class="whisper-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" /></svg>
+        <span class="whisper-title">Whisper 语音识别完成</span>
+      </div>
+      <p class="whisper-detail">视频时长 {{ Math.floor(whisperEstimate.duration / 60) }} 分 {{ whisperEstimate.duration % 60 }} 秒，转录耗时约 {{ Math.floor(whisperEstimate.estimated_seconds / 60) }} 分 {{ whisperEstimate.estimated_seconds % 60 }} 秒</p>
+    </div>
+
+    <!-- 后台转录任务 -->
+    <div v-if="backgroundTask" class="background-task-card">
+      <div class="task-header">
+        <svg class="task-icon task-pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 00-3.7-3.7 48.678 48.678 0 00-7.324 0 4.006 4.006 0 00-3.7 3.7c-.017.22-.032.441-.046.662M19.5 12l3-3m-3 3l-3-3m-12 3c0 1.232.046 2.453.138 3.662a4.006 4.006 0 003.7 3.7 48.656 48.656 0 007.324 0 4.006 4.006 0 003.7-3.7c.017-.22.032-.441.046-.662M4.5 12l3 3m-3-3l-3 3" /></svg>
+        <span class="task-title">转录已加入后台队列</span>
+      </div>
+      <p class="task-detail">
+        视频时长 {{ Math.floor(backgroundTask.duration / 60) }} 分 {{ backgroundTask.duration % 60 }} 秒，
+        预计转录需要 {{ Math.floor(backgroundTask.estimated_seconds / 60) }} 分 {{ backgroundTask.estimated_seconds % 60 }} 秒
+      </p>
+      <p class="task-hint">您可以继续浏览其他视频，转录完成后会在学习历史中显示</p>
+    </div>
+
     <!-- 多P分P列表 -->
     <div v-if="multiParts.length > 1" class="parts-section">
       <p class="parts-label">分P列表（共 {{ multiParts.length }} P）</p>
@@ -809,7 +833,7 @@ function downloadNotes() {
     </div>
 
     <!-- 结果展示区（含 4 个子 Tab） -->
-    <div v-if="result || loading" class="summary-content">
+    <div v-if="(result || loading) && !backgroundTask" class="summary-content">
 
       <!-- 子 Tab 栏 -->
       <div class="sub-tab-bar">
@@ -1463,6 +1487,21 @@ function downloadNotes() {
 .limit-title { font-size: 0.9375rem; font-weight: 600; color: var(--text-primary); }
 .limit-desc { font-size: 0.8125rem; color: var(--text-muted); margin: 0; }
 .pro-btn { display: inline-flex; align-items: center; justify-content: center; gap: 0.375rem; padding: 0.5rem 1.25rem; background: linear-gradient(135deg, #8B5CF6 0%, #3B82F6 100%); border: none; border-radius: 8px; color: white; font-size: 0.875rem; font-weight: 600; cursor: pointer; align-self: flex-start; }
+
+/* Whisper 转录进度 */
+.whisper-progress { display: flex; flex-direction: column; gap: 0.5rem; padding: 1rem 1.25rem; background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.2); border-radius: var(--radius); }
+.whisper-header { display: flex; align-items: center; gap: 0.5rem; }
+.whisper-icon { width: 18px; height: 18px; color: var(--accent-blue); animation: pulse 2s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+.whisper-title { font-size: 0.875rem; font-weight: 600; color: var(--text-primary); }
+.whisper-detail { font-size: 0.8125rem; color: var(--text-muted); margin: 0; }
+.background-task-card { display: flex; flex-direction: column; gap: 0.5rem; padding: 1rem 1.25rem; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: var(--radius); }
+.task-header { display: flex; align-items: center; gap: 0.5rem; }
+.task-icon { width: 18px; height: 18px; color: #f59e0b; }
+.task-pulse { animation: pulse 2s ease-in-out infinite; }
+.task-title { font-size: 0.875rem; font-weight: 600; color: var(--text-primary); }
+.task-detail { font-size: 0.8125rem; color: var(--text-secondary); margin: 0; }
+.task-hint { font-size: 0.75rem; color: var(--text-muted); margin: 0; }
 .pro-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3); }
 
 .flashcards-section { margin-top: 1.25rem; padding-top: 1.25rem; border-top: 1px solid var(--border); }

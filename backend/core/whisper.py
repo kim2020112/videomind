@@ -21,6 +21,11 @@ logger = get_logger(__name__)
 _whisper_semaphore = asyncio.Semaphore(1)
 _model_instance = None
 
+
+def estimate_transcribe_time(duration_seconds: int) -> int:
+    """预估 Whisper 转录耗时（秒）。CPU int8 small 模型约 2-3 倍实时速度，加上下载和校正开销。"""
+    return max(60, int(duration_seconds * 3.5))
+
 _MODEL_DIR = os.path.join(str(WHISPER_MODELS_DIR), f"faster-whisper-{WHISPER_MODEL}")
 _REQUIRED_FILES = ["config.json", "model.bin", "tokenizer.json", "vocabulary.txt"]
 
@@ -87,6 +92,7 @@ def _get_model():
         _model_instance = WhisperModel(
             _MODEL_DIR, device="cpu", compute_type="int8",
             local_files_only=True,
+            cpu_threads=max(1, os.cpu_count() // 2),
         )
     return _model_instance
 
@@ -100,7 +106,7 @@ def transcribe(audio_path: str, language: str = None) -> str:
 
     model = _get_model()
 
-    transcribe_opts = {"beam_size": 5, "vad_filter": True}
+    transcribe_opts = {"beam_size": 3, "vad_filter": True}
     if language:
         transcribe_opts["language"] = language
 
@@ -120,6 +126,7 @@ def transcribe(audio_path: str, language: str = None) -> str:
 
 def transcribe_video(url: str, language: str = None) -> str:
     """下载视频音频 + Whisper 转录，返回字幕文本。用完自动清理临时文件。"""
+    os.nice(10)  # 降低进程优先级，让 web 服务优先获得 CPU
     if not is_model_available():
         raise RuntimeError(
             f"Whisper 模型未就绪，请将模型文件放入 {_MODEL_DIR}"

@@ -30,9 +30,9 @@ from config import WHISPER_MAX_DURATION
 from core.cache import (
     get_cached, save_cache, delete_cache, delete_whisper_cache,
     get_video_info_cache, save_video_info_cache, video_fingerprint,
-    _get_cached_raw,
+    _get_cached_raw, get_whisper_cache,
 )
-from core.whisper import is_model_available, transcribe_video_async
+from core.whisper import is_model_available, transcribe_video_async, estimate_transcribe_time
 from core.tag_extractor import detect_platform
 
 from api.routes import extract_url, downloader
@@ -174,12 +174,66 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
 
         # ── 视频信息缓存预检（超长视频快速路径） ──
         cached_info = get_video_info_cache(url)
-        if cached_info and cached_info.get("duration", 0) > WHISPER_MAX_DURATION:
+        if WHISPER_MAX_DURATION > 0 and cached_info and cached_info.get("duration", 0) > WHISPER_MAX_DURATION:
             fast_resp = _try_long_video_fast_path(url, cached_info, identity)
             if fast_resp:
                 return fast_resp
 
-        # ── 解析视频信息 ──
+        # ── 快速后台转录判断（不调用 parse_info，立即返回） ──
+        # 在 parse_info 之前判断，避免 10-30 秒的 yt-dlp 解析延迟
+        from core.task_manager import create_task, has_active_task, run_background_task
+
+        # 用 URL 生成临时 url_hash（后续 parse_info 后会用 canonical_url 更新）
+        fast_url_hash = _url_hash(url)
+
+        # 检查是否已有活跃任务
+        existing_task = has_active_task(fast_url_hash)
+        if existing_task:
+            dur = cached_info.get("duration", 0) if cached_info else 0
+            def _already_running():
+                yield PipelineEvent("background_started", {
+                    "task_id": existing_task, "url_hash": fast_url_hash,
+                    "estimated_seconds": 0, "duration": dur,
+                    "message": "该视频已有转录任务在后台执行",
+                })
+                yield PipelineEvent("done", {})
+            return StreamingResponse(_sse_generator(_already_running()), media_type="text/event-stream", headers=_sse_headers())
+
+        # 快速判断是否应走后台：检查缓存中有无字幕 + 有无 Whisper 模型 + 时长
+        fast_cached_sub = _quick_db_subtitle_check(url)
+        cached_fp = cached_info.get("fingerprint") if cached_info else None
+        if cached_fp:
+            cached_whisper = get_whisper_cache(url, fingerprint=cached_fp)
+            if cached_whisper and len(cached_whisper.strip()) >= 20:
+                fast_cached_sub = True
+
+        duration_from_cache = cached_info.get("duration", 0) if cached_info else 0
+        need_whisper = not fast_cached_sub and is_model_available()
+
+        if need_whisper and duration_from_cache > 60:
+            # 有缓存时长信息，立即走后台
+            est = estimate_transcribe_time(duration_from_cache)
+            fast_platform = detect_platform(url, "")
+            task_id = create_task(fast_url_hash, url, identity, req.lang, est,
+                                  info=None, fingerprint=cached_fp)
+            add_user_history(
+                user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                url_hash=fast_url_hash, url=url,
+                title=cached_info.get("title", "") if cached_info else "",
+                platform=fast_platform, status="transcribing",
+            )
+            asyncio.create_task(run_background_task(task_id))
+
+            def _bg_start():
+                yield PipelineEvent("background_started", {
+                    "task_id": task_id, "url_hash": fast_url_hash,
+                    "estimated_seconds": est, "duration": duration_from_cache,
+                    "message": f"视频时长 {duration_from_cache // 60} 分 {duration_from_cache % 60} 秒，转录已加入后台队列",
+                })
+                yield PipelineEvent("done", {})
+            return StreamingResponse(_sse_generator(_bg_start()), media_type="text/event-stream", headers=_sse_headers())
+
+        # ── 解析视频信息（需要完整 info 的路径才走到这里） ──
         info = downloader.parse_info(url)
         fp = video_fingerprint(info.extractor, info.id) if info.extractor and info.id else None
         canonical_url = info.webpage_url or url
@@ -195,7 +249,48 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
             if cached and cached.get("result_json") and req.mode == "full" and not req.force:
                 return _replay_cached(cached, identity, canonical_url, trace_id)
 
+        url_hash = _url_hash(canonical_url)
+
+        # 检查是否已有活跃任务（用 canonical_url 重新检查）
+        if url_hash != fast_url_hash:
+            existing_task = has_active_task(url_hash)
+            if existing_task:
+                def _already_running2():
+                    yield PipelineEvent("background_started", {
+                        "task_id": existing_task, "url_hash": url_hash,
+                        "estimated_seconds": 0, "duration": info.duration or 0,
+                        "message": "该视频已有转录任务在后台执行",
+                    })
+                    yield PipelineEvent("done", {})
+                return StreamingResponse(_sse_generator(_already_running2()), media_type="text/event-stream", headers=_sse_headers())
+
+        # 快速检查是否有非 Whisper 字幕源（需要完整 info 的网络检查）
+        has_quick_sub = _quick_subtitle_check(canonical_url, info, req.lang, fp)
+        if not has_quick_sub and is_model_available() and info.duration and info.duration > 60:
+            est = estimate_transcribe_time(info.duration)
+            task_id = create_task(url_hash, canonical_url, identity, req.lang, est, info=info, fingerprint=fp)
+            add_user_history(
+                user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                url_hash=url_hash, url=canonical_url,
+                title=info.title, platform=detect_platform(canonical_url, info.extractor or ""),
+                status="transcribing",
+            )
+            asyncio.create_task(run_background_task(task_id))
+
+            def _bg_start():
+                yield PipelineEvent("background_started", {
+                    "task_id": task_id, "url_hash": url_hash,
+                    "estimated_seconds": est, "duration": info.duration,
+                    "message": f"视频时长 {info.duration // 60} 分 {info.duration % 60} 秒，转录已加入后台队列",
+                })
+                yield PipelineEvent("done", {})
+            return StreamingResponse(_sse_generator(_bg_start()), media_type="text/event-stream", headers=_sse_headers())
+
         # ── 字幕获取 ──
+        whisper_est = None
+        if info.duration and info.duration > 120:
+            whisper_est = estimate_transcribe_time(info.duration)
+
         subtitle_text, sub_source, sub_lang = await fetch_subtitle(
             canonical_url, info, req.lang, fingerprint=fp, trace_id=trace_id
         )
@@ -219,6 +314,13 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
                 "bilibili_cc": "B站CC字幕", "youtube_auto": "YouTube自动字幕",
                 "ytdlp_native": "平台原生字幕", "whisper": "Whisper语音识别",
             }.get(sub_source, sub_source)
+
+            # Whisper 转录完成，告知预估耗时（实际转录已在上方完成）
+            if sub_source == "whisper" and whisper_est:
+                yield PipelineEvent("whisper_estimate", {
+                    "duration": info.duration, "estimated_seconds": whisper_est,
+                    "message": f"Whisper 语音识别完成（视频 {info.duration // 60} 分 {info.duration % 60} 秒）",
+                })
 
             yield PipelineEvent("progress", {
                 "stage": "subtitle_loaded", "source": sub_source, "lang": sub_lang,
@@ -294,6 +396,65 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
 
 # ──── 辅助函数 ────
 
+
+def _quick_db_subtitle_check(url: str) -> bool:
+    """纯 DB 检查：是否有已缓存的字幕（不含网络调用，立即返回）。"""
+    from core.pipeline.subtitle import get_subtitle_from_db
+    cached_sub = get_subtitle_from_db(url)
+    if cached_sub and len(cached_sub["full_text"].strip()) >= 50:
+        return True
+    return False
+
+
+def _quick_subtitle_check(url: str, info, lang: str = None, fingerprint: str = None) -> bool:
+    """完整快速检查：DB 缓存 + B站 CC + yt-dlp 原生字幕（需要完整 info，含网络调用）。
+
+    返回 True 表示有快速字幕源，False 表示需要 Whisper。
+    """
+    from core.pipeline.subtitle import get_subtitle_from_db, extract_bvid
+    from core.summarizer import extract_bilibili_subtitle_by_cid
+    from core.cache import get_whisper_cache
+
+    # 1. DB 缓存
+    cached_sub = get_subtitle_from_db(url)
+    if cached_sub and len(cached_sub["full_text"].strip()) >= 50:
+        return True
+
+    # 2. B站 CC 字幕（快速 API 调用，不下载音频）
+    if 'bilibili' in (info.extractor or '').lower():
+        p_match = re.search(r'[?&]p=(\d+)', url)
+        parts = getattr(info, 'parts', []) or []
+        if p_match and len(parts) > 1:
+            p_index = int(p_match.group(1))
+            part = next((p for p in parts if p.index == p_index), None)
+            if part and part.cid:
+                bvid = extract_bvid(url)
+                if bvid:
+                    try:
+                        bilibili_sub = extract_bilibili_subtitle_by_cid(bvid, part.cid)
+                        if bilibili_sub and bilibili_sub.get('has_subtitle') and len(bilibili_sub.get('text', '').strip()) >= 100:
+                            return True
+                    except Exception:
+                        pass
+        else:
+            from core.pipeline.subtitle import try_get_bilibili_cc_subtitle as _try_cc
+            try:
+                bilibili_sub = _try_cc(url)
+                if bilibili_sub and bilibili_sub.get('has_subtitle') and len(bilibili_sub.get('text', '').strip()) >= 50:
+                    return True
+            except Exception:
+                pass
+
+    # 3. yt-dlp 原生字幕（只检查列表，不下载）
+    if info.subtitles:
+        from core.pipeline.subtitle import _select_subtitle_lang
+        selected = _select_subtitle_lang(info.subtitles, lang)
+        if selected and selected.lang != 'danmaku':
+            return True
+
+    return False
+
+
 def _try_long_video_fast_path(url: str, cached_info: dict, identity: dict):
     """超长视频快速路径：尝试 B站 CC 字幕，无则基于简介生成。"""
     from core.pipeline.subtitle import try_get_bilibili_cc_subtitle as _try_cc
@@ -330,15 +491,10 @@ def _handle_no_subtitle(info, identity: dict):
     _no_cc_msg = "该B站视频没有CC字幕，" if _is_bili else ""
 
     if not info.description or len(info.description.strip()) < 20:
-        if info.duration and info.duration > WHISPER_MAX_DURATION:
-            raise HTTPException(status_code=400, detail=f"{_no_cc_msg}视频时长 {int(info.duration)} 秒，超过 {WHISPER_MAX_DURATION} 秒限制，不支持语音识别。请尝试有字幕的视频")
-        raise HTTPException(status_code=400, detail="该视频没有字幕也没有简介，无法生成 AI 总结")
+        raise HTTPException(status_code=400, detail=f"{_no_cc_msg}该视频没有字幕也没有简介，无法生成 AI 总结")
 
     def _gen():
-        if info.duration and info.duration > WHISPER_MAX_DURATION:
-            yield PipelineEvent("warn", {"message": f"{_no_cc_msg}视频时长 {int(info.duration)} 秒超过 {WHISPER_MAX_DURATION} 秒限制，跳过语音识别"})
-        else:
-            yield PipelineEvent("warn", {"message": "该视频无字幕，将基于视频简介生成总结"})
+        yield PipelineEvent("warn", {"message": f"{_no_cc_msg}该视频无字幕，将基于视频简介生成总结"})
         yield PipelineEvent("progress", {"stage": "summary_generating", "message": "正在基于视频简介生成总结..."})
         result = summarize_from_description(info.title, info.description)
         log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
@@ -450,7 +606,9 @@ async def _partial_subtitle(req, cached: dict, identity: dict, url: str, trace_i
     whisper_text = ""
     whisper_error = ""
     try:
-        whisper_text = await asyncio.wait_for(transcribe_video_async(url, req.lang), timeout=600)
+        duration = cached_info.get("duration", 0) if cached_info else 0
+        timeout = max(600, duration * 3 + 120)
+        whisper_text = await asyncio.wait_for(transcribe_video_async(url, req.lang), timeout=timeout)
     except Exception as e:
         whisper_error = str(e)
 

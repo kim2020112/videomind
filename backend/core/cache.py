@@ -655,6 +655,34 @@ def _get_part_details_map(urls: list[str]) -> dict[str, dict[int, dict]]:
     return result
 
 
+def _get_summary_previews(url_hashes: list[str]) -> dict[str, str]:
+    """批量获取摘要预览（仅提取 result_json 中的 summary 前 200 字符），避免加载完整 result_json。"""
+    if not url_hashes:
+        return {}
+    result = {}
+    with _get_db() as conn:
+        # 分批查询，每批 50 个
+        for i in range(0, len(url_hashes), 50):
+            batch = url_hashes[i:i + 50]
+            placeholders = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                f"SELECT url_hash, result_json FROM ai_cache WHERE url_hash IN ({placeholders})",
+                batch,
+            ).fetchall()
+            for row in rows:
+                if not row["result_json"]:
+                    result[row["url_hash"]] = ""
+                    continue
+                try:
+                    data = json.loads(row["result_json"])
+                    inner = data.get("result", {}) if isinstance(data.get("result"), dict) else {}
+                    summary = inner.get("summary") or data.get("summary") or ""
+                    result[row["url_hash"]] = summary[:200]
+                except (json.JSONDecodeError, TypeError):
+                    result[row["url_hash"]] = ""
+    return result
+
+
 def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
                           sort: str = "newest", limit: int = 50, offset: int = 0,
                           user_id: int = None, guest_id: str = None,
@@ -665,24 +693,15 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
 
     is_admin = (role == "admin")
 
-    if is_admin:
-        # Admin：直接查 ai_cache 全局数据
-        base = """
-            FROM ai_cache ac
-            LEFT JOIN videos v ON ac.url = v.url
-            LEFT JOIN video_tags vt ON v.id = vt.video_id
-            LEFT JOIN tags t ON vt.tag_id = t.id
-        """
-    else:
-        # 普通用户/游客：从 user_history 出发 JOIN ai_cache
-        base = """
-            FROM user_history uh
-            JOIN ai_cache ac ON uh.url_hash = ac.url_hash
-            LEFT JOIN videos v ON ac.url = v.url
-            LEFT JOIN video_tags vt ON v.id = vt.video_id
-            LEFT JOIN tags t ON vt.tag_id = t.id
-        """
-        # 用户过滤
+    # 统一从 user_history 出发，LEFT JOIN ai_cache（admin 和普通用户都走这条路径）
+    base = """
+        FROM user_history uh
+        LEFT JOIN ai_cache ac ON uh.url_hash = ac.url_hash
+        LEFT JOIN videos v ON COALESCE(ac.url, uh.url) = v.url
+        LEFT JOIN video_tags vt ON v.id = vt.video_id
+        LEFT JOIN tags t ON vt.tag_id = t.id
+    """
+    if not is_admin:
         if user_id:
             conditions.append("uh.user_id = ?")
             params.append(user_id)
@@ -690,7 +709,6 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
             conditions.append("uh.guest_id = ?")
             params.append(guest_id)
         else:
-            # 无身份信息，返回空
             return {"total": 0, "items": []}
 
     if q:
@@ -709,37 +727,30 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     order = "DESC" if sort == "newest" else "ASC"
 
+    # 统一查询：从 user_history 出发，LEFT JOIN ai_cache
+    # 用 CASE WHEN 处理空字符串（COALESCE 对 '' 不回退）
     with _get_db() as conn:
-        if is_admin:
-            rows = conn.execute(f"""
-                SELECT DISTINCT ac.url_hash, ac.url, ac.video_title, ac.result_json,
-                       ac.created_at, ac.is_favorite, ac.platform, ac.part_info,
-                       v.platform as v_platform
-                {base} {where}
-                ORDER BY ac.created_at {order}
-            """, params).fetchall()
-        else:
-            rows = conn.execute(f"""
-                SELECT DISTINCT ac.url_hash, ac.url, ac.video_title, ac.result_json,
-                       uh.created_at, uh.is_favorite, ac.platform, ac.part_info,
-                       v.platform as v_platform
-                {base} {where}
-                ORDER BY uh.created_at {order}
-            """, params).fetchall()
+        rows = conn.execute(f"""
+            SELECT DISTINCT uh.url_hash,
+                   CASE WHEN ac.url IS NOT NULL AND ac.url != '' THEN ac.url ELSE uh.url END as url,
+                   CASE WHEN ac.video_title IS NOT NULL AND ac.video_title != '' THEN ac.video_title ELSE uh.video_title END as video_title,
+                   uh.created_at, uh.is_favorite, uh.status,
+                   CASE WHEN ac.platform IS NOT NULL AND ac.platform != '' THEN ac.platform ELSE uh.platform END as platform,
+                   ac.part_info,
+                   v.platform as v_platform
+            {base} {where}
+            ORDER BY uh.created_at {order}
+        """, params).fetchall()
 
-    # 批量查询所有 URL 的标签（避免 N+1 查询）
+    # 批量查询标签、分P信息
     all_urls = list(set(row["url"] for row in rows))
     tags_map = get_tags_for_urls(all_urls)
-
-    # 批量查询多P视频的总分P数（从 video_info_cache 的 parts 字段）
     total_parts_map = _get_total_parts_map(all_urls)
-
-    # 批量查询多P视频的分P详情（标题、时长）
     part_details_map = _get_part_details_map(all_urls)
 
     # 按 video_key 分组
     groups = {}
-    group_order = []  # 保持排序顺序
+    group_order = []
     for row in rows:
         key = _extract_video_key(row["url"])
         if key not in groups:
@@ -747,33 +758,24 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
             group_order.append(key)
         groups[key].append(row)
 
-    # 构建合并后的列表
+    # 构建合并后的列表（不含 summary_preview，稍后批量加载）
     merged = []
     for key in group_order:
         parts_raw = groups[key]
-        # 按分P序号排序
         parts_raw.sort(key=lambda r: _extract_part_index(r["url"]))
 
         if len(parts_raw) == 1:
-            # 单条记录，直接返回
             row = parts_raw[0]
             item = _build_history_item(row, tags_map)
             item["is_multipart"] = False
             merged.append(item)
         else:
-            # 多P合并
             first = parts_raw[0]
             parts_list = []
             latest_time = first["created_at"]
             any_favorite = False
             for row in parts_raw:
-                try:
-                    result = json.loads(row["result_json"]) if row["result_json"] else {}
-                except json.JSONDecodeError:
-                    result = {}
-                inner = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
                 part_index = _extract_part_index(row["url"])
-                # 从 video_info_cache 获取分P详情
                 p_details = (part_details_map.get(row["url"], {})).get(part_index, {})
                 parts_list.append({
                     "id": row["url_hash"],
@@ -782,7 +784,7 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
                     "part_info": row["part_info"] if "part_info" in row.keys() else "",
                     "part_title": p_details.get("title") or row["part_info"] or "",
                     "part_duration": p_details.get("duration") or 0,
-                    "summary_preview": (inner.get("summary") or "")[:100],
+                    "summary_preview": "",  # 稍后批量填充
                     "created_at": row["created_at"],
                 })
                 if row["created_at"] > latest_time:
@@ -793,6 +795,10 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
             tags = tags_map.get(first["url"], [])
             platform_name = first["platform"] or ""
             total_parts = total_parts_map.get(first["url"], 0)
+            # 取最高优先级状态: transcribing > generating > failed > done
+            _status_order = {"transcribing": 0, "generating": 1, "failed": 2, "done": 3}
+            part_statuses = [row["status"] if "status" in row.keys() and row["status"] else "done" for row in parts_raw]
+            best_status = min(part_statuses, key=lambda s: _status_order.get(s, 99))
 
             merged.append({
                 "id": key,
@@ -802,6 +808,7 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
                 "tags": tags,
                 "created_at": latest_time,
                 "is_favorite": any_favorite,
+                "status": best_status,
                 "is_multipart": True,
                 "parts_count": len(parts_list),
                 "total_parts": total_parts,
@@ -810,29 +817,42 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
 
     # 分页（基于合并后的列表）
     total = len(merged)
-    items = merged[offset:offset + limit]
+    page_items = merged[offset:offset + limit]
 
-    return {"total": total, "items": items}
+    # 第二步：仅为当前页的 item 批量加载摘要预览
+    page_hashes = []
+    for item in page_items:
+        if item.get("is_multipart"):
+            for p in item.get("parts", []):
+                page_hashes.append(p["id"])
+        else:
+            page_hashes.append(item["id"])
+    summaries = _get_summary_previews(page_hashes)
+
+    for item in page_items:
+        if item.get("is_multipart"):
+            for p in item.get("parts", []):
+                p["summary_preview"] = summaries.get(p["id"], "")[:100]
+        else:
+            item["summary_preview"] = summaries.get(item["id"], "")
+
+    return {"total": total, "items": page_items}
 
 
 def _build_history_item(row, tags_map: dict = None) -> dict:
-    """从单行数据构建历史记录字典。tags_map 可传入预查询的标签映射避免 N+1 查询。"""
-    try:
-        result = json.loads(row["result_json"]) if row["result_json"] else {}
-    except json.JSONDecodeError:
-        result = {}
+    """从单行数据构建历史记录字典。不加载 result_json，summary_preview 由调用方批量填充。"""
     tags = tags_map.get(row["url"], []) if tags_map else get_tags_for_url(row["url"])
-    inner_result = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
-    summary_text = inner_result.get("summary") or result.get("summary") or ""
     return {
         "id": row["url_hash"],
         "url": row["url"],
-        "video_title": row["video_title"] or inner_result.get("title", ""),
+        "url_hash": row["url_hash"],
+        "video_title": row["video_title"] or "",
         "platform": row["platform"] or "",
-        "summary_preview": summary_text[:200],
+        "summary_preview": "",  # 由 list_history_enhanced 批量填充
         "tags": tags,
         "created_at": row["created_at"],
         "is_favorite": bool(row["is_favorite"]),
+        "status": row["status"] if "status" in row.keys() else "done",
     }
 
 
@@ -882,71 +902,44 @@ def get_learning_stats(user_id: int = None, guest_id: str = None, role: str = "g
             "recent_trend": [],
         }
 
-    with _conn() as conn:
-        if is_admin:
-            total_videos = conn.execute("SELECT COUNT(*) FROM ai_cache").fetchone()[0]
-        elif user_id:
-            total_videos = conn.execute(
-                "SELECT COUNT(*) FROM user_history uh JOIN ai_cache ac ON uh.url_hash = ac.url_hash WHERE uh.user_id = ?", (user_id,)
-            ).fetchone()[0]
-        else:
-            total_videos = conn.execute(
-                "SELECT COUNT(*) FROM user_history uh JOIN ai_cache ac ON uh.url_hash = ac.url_hash WHERE uh.guest_id = ?", (guest_id,)
-            ).fetchone()[0]
+    # 统一从 user_history 出发，LEFT JOIN ai_cache（和 list_history_enhanced 一致）
+    user_filter = ""
+    user_params = []
+    if not is_admin:
+        if user_id:
+            user_filter = "WHERE uh.user_id = ?"
+            user_params = [user_id]
+        elif guest_id:
+            user_filter = "WHERE uh.guest_id = ?"
+            user_params = [guest_id]
 
-        # 笔记总字数
-        if is_admin:
-            total_notes_chars = conn.execute("SELECT COALESCE(SUM(notes_chars), 0) FROM ai_cache").fetchone()[0]
-        elif user_id:
-            total_notes_chars = conn.execute("""
-                SELECT COALESCE(SUM(ac.notes_chars), 0)
-                FROM user_history uh JOIN ai_cache ac ON uh.url_hash = ac.url_hash
-                WHERE uh.user_id = ?
-            """, (user_id,)).fetchone()[0]
-        else:
-            total_notes_chars = conn.execute("""
-                SELECT COALESCE(SUM(ac.notes_chars), 0)
-                FROM user_history uh JOIN ai_cache ac ON uh.url_hash = ac.url_hash
-                WHERE uh.guest_id = ?
-            """, (guest_id,)).fetchone()[0]
+    with _conn() as conn:
+        total_videos = conn.execute(
+            f"SELECT COUNT(*) FROM user_history uh {user_filter}", user_params
+        ).fetchone()[0]
+
+        total_notes_chars = conn.execute(f"""
+            SELECT COALESCE(SUM(ac.notes_chars), 0)
+            FROM user_history uh LEFT JOIN ai_cache ac ON uh.url_hash = ac.url_hash
+            {user_filter}
+        """, user_params).fetchone()[0]
 
         # 平均视频时长（去重：同一多P视频只算一次）
-        # 用 BV 号去重 bilibili，其他用 URL 去 query string + 去尾斜杠
         def _video_key(url):
             bv = re.search(r'(BV\w+)', url)
             if bv:
                 return bv.group(1)
-            q = url.split('?')[0].rstrip('/')
-            return q
+            return url.split('?')[0].rstrip('/')
 
-        if is_admin:
-            urls_with_dur = conn.execute("""
-                SELECT ac.url, MIN(vic.duration) as duration
-                FROM ai_cache ac
-                JOIN video_info_cache vic ON ac.url = vic.url
-                WHERE vic.duration > 0
-                GROUP BY ac.url
-            """).fetchall()
-        elif user_id:
-            urls_with_dur = conn.execute("""
-                SELECT ac.url, MIN(vic.duration) as duration
-                FROM user_history uh
-                JOIN ai_cache ac ON uh.url_hash = ac.url_hash
-                JOIN video_info_cache vic ON ac.url = vic.url
-                WHERE uh.user_id = ? AND vic.duration > 0
-                GROUP BY ac.url
-            """, (user_id,)).fetchall()
-        else:
-            urls_with_dur = conn.execute("""
-                SELECT ac.url, MIN(vic.duration) as duration
-                FROM user_history uh
-                JOIN ai_cache ac ON uh.url_hash = ac.url_hash
-                JOIN video_info_cache vic ON ac.url = vic.url
-                WHERE uh.guest_id = ? AND vic.duration > 0
-                GROUP BY ac.url
-            """, (guest_id,)).fetchall()
+        urls_with_dur = conn.execute(f"""
+            SELECT COALESCE(ac.url, uh.url) as url, MIN(vic.duration) as duration
+            FROM user_history uh
+            LEFT JOIN ai_cache ac ON uh.url_hash = ac.url_hash
+            JOIN video_info_cache vic ON COALESCE(ac.url, uh.url) = vic.url
+            {user_filter + (' AND' if user_filter else 'WHERE')} vic.duration > 0
+            GROUP BY COALESCE(ac.url, uh.url)
+        """, user_params).fetchall()
 
-        # 按 video_key 去重，取每个视频的最小时长（避免重复计数）
         seen = {}
         for row in urls_with_dur:
             key = _video_key(row[0])
@@ -954,72 +947,31 @@ def get_learning_stats(user_id: int = None, guest_id: str = None, role: str = "g
                 seen[key] = row[1]
         avg_duration = sum(seen.values()) / len(seen) if seen else 0
 
-        # 平台分布
-        if is_admin:
-            platform_rows = conn.execute("""
-                SELECT CASE WHEN ac.platform != '' THEN ac.platform
-                            WHEN v.platform IS NOT NULL THEN v.platform
-                            ELSE 'unknown' END as p,
-                       COUNT(*) as cnt
-                FROM ai_cache ac
-                LEFT JOIN videos v ON ac.url = v.url
-                GROUP BY p
-                ORDER BY cnt DESC
-            """).fetchall()
-        elif user_id:
-            platform_rows = conn.execute("""
-                SELECT CASE WHEN ac.platform != '' THEN ac.platform
-                            WHEN v.platform IS NOT NULL THEN v.platform
-                            ELSE 'unknown' END as p,
-                       COUNT(*) as cnt
-                FROM user_history uh
-                JOIN ai_cache ac ON uh.url_hash = ac.url_hash
-                LEFT JOIN videos v ON ac.url = v.url
-                WHERE uh.user_id = ?
-                GROUP BY p
-                ORDER BY cnt DESC
-            """, (user_id,)).fetchall()
-        else:
-            platform_rows = conn.execute("""
-                SELECT CASE WHEN ac.platform != '' THEN ac.platform
-                            WHEN v.platform IS NOT NULL THEN v.platform
-                            ELSE 'unknown' END as p,
-                       COUNT(*) as cnt
-                FROM user_history uh
-                JOIN ai_cache ac ON uh.url_hash = ac.url_hash
-                LEFT JOIN videos v ON ac.url = v.url
-                WHERE uh.guest_id = ?
-                GROUP BY p
-                ORDER BY cnt DESC
-            """, (guest_id,)).fetchall()
+        # 平台分布（从 uh.platform 取，ai_cache 为空时也能正确显示）
+        platform_rows = conn.execute(f"""
+            SELECT CASE WHEN COALESCE(ac.platform, '') != '' THEN ac.platform
+                        WHEN uh.platform != '' THEN uh.platform
+                        WHEN v.platform IS NOT NULL THEN v.platform
+                        ELSE 'unknown' END as p,
+                   COUNT(DISTINCT uh.url_hash) as cnt
+            FROM user_history uh
+            LEFT JOIN ai_cache ac ON uh.url_hash = ac.url_hash
+            LEFT JOIN videos v ON COALESCE(ac.url, uh.url) = v.url
+            {user_filter}
+            GROUP BY p
+            ORDER BY cnt DESC
+        """, user_params).fetchall()
         platform_distribution = {r[0]: r[1] for r in platform_rows}
 
         # 最近 7 天趋势
         seven_days_ago = (datetime.now(tz) - timedelta(days=7)).isoformat()
-        if is_admin:
-            trend_rows = conn.execute("""
-                SELECT DATE(created_at) as date, COUNT(*) as count
-                FROM ai_cache
-                WHERE created_at >= ?
-                GROUP BY DATE(created_at)
-                ORDER BY date
-            """, (seven_days_ago,)).fetchall()
-        elif user_id:
-            trend_rows = conn.execute("""
-                SELECT DATE(uh.created_at) as date, COUNT(*) as count
-                FROM user_history uh
-                WHERE uh.user_id = ? AND uh.created_at >= ?
-                GROUP BY DATE(uh.created_at)
-                ORDER BY date
-            """, (user_id, seven_days_ago)).fetchall()
-        else:
-            trend_rows = conn.execute("""
-                SELECT DATE(uh.created_at) as date, COUNT(*) as count
-                FROM user_history uh
-                WHERE uh.guest_id = ? AND uh.created_at >= ?
-                GROUP BY DATE(uh.created_at)
-                ORDER BY date
-            """, (guest_id, seven_days_ago)).fetchall()
+        trend_rows = conn.execute(f"""
+            SELECT DATE(uh.created_at) as date, COUNT(*) as count
+            FROM user_history uh
+            {user_filter + (' AND' if user_filter else 'WHERE')} uh.created_at >= ?
+            GROUP BY DATE(uh.created_at)
+            ORDER BY date
+        """, user_params + [seven_days_ago]).fetchall()
         recent_trend = [{"date": r[0], "count": r[1]} for r in trend_rows]
 
     return {

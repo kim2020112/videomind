@@ -5,7 +5,8 @@ import LoginModal from './LoginModal.vue'
 import AdminSettings from './AdminSettings.vue'
 
 defineProps({
-  currentView: { type: String, default: 'home' }
+  currentView: { type: String, default: 'home' },
+  activeTaskCount: { type: Number, default: 0 }
 })
 const emit = defineEmits(['toggle-history', 'go-home'])
 
@@ -59,6 +60,7 @@ async function handleLogout() {
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
           </svg>
           学习历史
+          <span v-if="activeTaskCount > 0" class="task-badge">{{ activeTaskCount }}</span>
         </button>
 
         <!-- 用户状态 -->
@@ -196,6 +198,27 @@ async function handleLogout() {
 .btn-history-icon {
   width: 16px;
   height: 16px;
+}
+
+.task-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  background: #ef4444;
+  color: white;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  border-radius: 9px;
+  line-height: 1;
+  animation: task-pulse 2s ease-in-out infinite;
+}
+
+@keyframes task-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
 }
 
 .btn-settings {

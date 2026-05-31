@@ -171,15 +171,16 @@ def get_today_usage(user_id: int = None, guest_id: str = None) -> int:
 
 def add_user_history(user_id: int = None, guest_id: str = None,
                      url_hash: str = "", url: str = "",
-                     title: str = "", platform: str = ""):
+                     title: str = "", platform: str = "",
+                     status: str = "done"):
     with get_db() as conn:
         if user_id:
             conn.execute(
-                "INSERT OR IGNORE INTO user_history (user_id, url_hash, url, video_title, platform) VALUES (?, ?, ?, ?, ?)",
-                (user_id, url_hash, url, title, platform),
+                "INSERT OR IGNORE INTO user_history (user_id, url_hash, url, video_title, platform, status) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, url_hash, url, title, platform, status),
             )
         elif guest_id:
             conn.execute(
-                "INSERT OR IGNORE INTO user_history (guest_id, url_hash, url, video_title, platform) VALUES (?, ?, ?, ?, ?)",
-                (guest_id, url_hash, url, title, platform),
+                "INSERT OR IGNORE INTO user_history (guest_id, url_hash, url, video_title, platform, status) VALUES (?, ?, ?, ?, ?, ?)",
+                (guest_id, url_hash, url, title, platform, status),
             )

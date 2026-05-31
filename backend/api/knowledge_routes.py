@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Query, HTTPException, Request
+from pydantic import BaseModel
 from typing import Optional
 from database import get_db
 from core.cache import list_history_enhanced, toggle_favorite, get_learning_stats, get_all_tags, delete_cache
@@ -114,6 +115,44 @@ async def toggle_favorite_endpoint(url_hash: str, request: Request):
     identity = get_identity(request)
     new_state = toggle_favorite(url_hash, user_id=identity.get("user_id"), guest_id=identity.get("guest_id"))
     return {"is_favorite": new_state}
+
+
+class BatchDeleteRequest(BaseModel):
+    url_hashes: list[str]
+
+
+@router.post("/history/batch-delete")
+async def batch_delete_history(req: BatchDeleteRequest, request: Request):
+    """批量删除学习历史记录。Admin 全局删除，普通用户按用户隔离。"""
+    if not req.url_hashes:
+        return {"ok": True, "deleted": 0}
+    identity = get_identity(request)
+    role = identity.get("role", "guest")
+    deleted = 0
+    for url_hash in req.url_hashes:
+        if role == "admin":
+            with get_db() as conn:
+                row = conn.execute(
+                    "SELECT url, fingerprint FROM ai_cache WHERE url_hash = ?",
+                    (url_hash,),
+                ).fetchone()
+                conn.execute("DELETE FROM user_history WHERE url_hash = ?", (url_hash,))
+            if row:
+                delete_cache(row["url"], fingerprint=row["fingerprint"])
+        else:
+            with get_db() as conn:
+                if identity.get("user_id"):
+                    conn.execute(
+                        "DELETE FROM user_history WHERE url_hash = ? AND user_id = ?",
+                        (url_hash, identity["user_id"]),
+                    )
+                elif identity.get("guest_id"):
+                    conn.execute(
+                        "DELETE FROM user_history WHERE url_hash = ? AND guest_id = ?",
+                        (url_hash, identity["guest_id"]),
+                    )
+        deleted += 1
+    return {"ok": True, "deleted": deleted}
 
 
 @router.delete("/history/{url_hash}")

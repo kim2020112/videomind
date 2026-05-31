@@ -23,6 +23,8 @@ export function useSummary() {
   const regeneratingMode = ref('')  // '' | 'summary' | 'mindmap' | 'notes' | 'subtitle'
   const subtitleSource = ref('')
   const isPartialSummary = ref(false)
+  const whisperEstimate = ref(null)
+  const backgroundTask = ref(null)
 
   let abortController = null
 
@@ -71,6 +73,8 @@ export function useSummary() {
       qaPairs.value = null
       chapters.value = null
       isPartialSummary.value = false
+      whisperEstimate.value = null
+      backgroundTask.value = null
     } else if (mode === 'summary') {
       streamingText.value = ''
       flashcards.value = null
@@ -160,6 +164,12 @@ export function useSummary() {
                 chapters.value = event.data.chapters
                 generationStage.value = 'chapters'
                 break
+              case 'whisper_estimate':
+                whisperEstimate.value = event.data
+                break
+              case 'background_started':
+                backgroundTask.value = event.data
+                break
               case 'warn':
                 summarizeError.value = event.data.message
                 break
@@ -205,6 +215,8 @@ export function useSummary() {
     subtitleSource.value = ''
     isPartialSummary.value = false
     isFetchingSubtitle.value = false
+    whisperEstimate.value = null
+    backgroundTask.value = null
     subtitleError.value = ''
   }
 
@@ -227,6 +239,8 @@ export function useSummary() {
     regeneratingMode,
     subtitleSource,
     isPartialSummary,
+    whisperEstimate,
+    backgroundTask,
     fetchSubtitleText,
     summarizeVideoStream,
     summarizeVideo,
