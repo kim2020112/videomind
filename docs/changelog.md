@@ -1,5 +1,33 @@
 # 变更记录
 
+## [3.3.1] - 2026-06-01
+
+### 修复
+
+- **B站视频误触发 Whisper 转录**（`backend/api/stream_routes.py` + `backend/core/task_manager.py`）：
+  - 快速路径仅检查本地 DB，未尝试 B站 CC 字幕 API，导致首次处理的 B站视频（>60s）直接走 Whisper
+  - 修复：快速路径新增 `try_get_bilibili_cc_subtitle(url)` 检查（只需 BV ID，无需 parse_info），有 CC 字幕时不走后台
+  - 后台任务从直接调用 `transcribe_video_async` 改为调用 `fetch_subtitle()` 四级降级（DB → B站CC → yt-dlp → Whisper）
+
+- **历史页面转录中卡死刷新**（`frontend/src/composables/useTaskPoller.js`）：
+  - 轮询每 10 秒替换 `activeTasks` 数组引用，即使数据相同也触发 HistoryPage 重渲染
+  - 修复：轮询时对比 `task_id:status:stage` 组合，内容相同则跳过赋值
+
+- **Markdown 行内代码反引号可见**（`frontend/src/components/AiSummary.vue`）：
+  - Tailwind Typography 的 `prose` 类会给 `<code>` 标签添加 `::before` / `::after` CSS 伪元素（内容为反引号字符 `` ` ``），导致 `marked` 正确解析的 `<code>` 标签前后仍显示可见反引号
+  - 在 `.summary-text`、`.streaming-text`、`.notes-content`、`.chat-content`、`.qa-pair-answer-content` 五个区域添加 `code::before, code::after { content: none; }` 覆盖
+  - 同时补充了 `.summary-text`、`.streaming-text`、`.chat-content` 区域缺失的 `code` 行内代码样式（半透明背景 + 等宽字体 + 圆角）
+
+### 变更
+
+- **首页 UI 精简**（`NavBar.vue` + `HeroSection.vue` + `FeaturesSection.vue` + `FooterSection.vue`）：
+  - NavBar：删除"功能特性"和"使用教程"锚点链接（目标元素不存在，点击无反应）及对应 CSS
+  - HeroSection：删除 trust-badges（AI 智能总结·结构化笔记·思维导图）和 platform-tags（B站·YouTube 等标签），与 FeaturesSection 和输入框 placeholder 重复；移除未使用的 `platforms` 数据
+  - FeaturesSection：删除两张卡片的 "Pro" 徽章及 `pro-card` / `pro-badge` CSS（功能实际对所有登录用户开放，标 Pro 造成误解）
+  - FooterSection：删除"支持"组（使用教程/常见问题/联系我们）和"法律"组（服务条款/隐私政策）死链接；删除与 HeroSection 重复的"支持平台"列表；版权文案从英文改为 "© 2026 VideoMind"
+
+---
+
 ## [3.3.0] - 2026-05-31
 
 ### 新增

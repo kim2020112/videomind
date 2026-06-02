@@ -6,14 +6,6 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['update:url'])
-
-const platforms = [
-  { name: 'B站', color: '#00a1d6' },
-  { name: 'YouTube', color: '#ff0000' },
-  { name: '抖音', color: '#fe2c55' },
-  { name: '小红书', color: '#ff2442' },
-  { name: 'TikTok', color: '#00f2ea' },
-]
 </script>
 
 <template>
@@ -54,26 +46,6 @@ const platforms = [
         </button>
       </div>
 
-      <!-- Trust badges -->
-      <div class="trust-badges">
-        <span class="trust-badge">AI 智能总结</span>
-        <span class="trust-dot"></span>
-        <span class="trust-badge">结构化笔记</span>
-        <span class="trust-dot"></span>
-        <span class="trust-badge">思维导图</span>
-      </div>
-
-      <!-- Platform Tags -->
-      <div class="platform-tags">
-        <span
-          v-for="p in platforms"
-          :key="p.name"
-          class="platform-tag"
-          :style="{ '--tag-color': p.color }"
-        >
-          {{ p.name }}
-        </span>
-      </div>
     </div>
   </section>
 </template>
@@ -195,54 +167,6 @@ const platforms = [
   cursor: not-allowed;
 }
 
-.trust-badges {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.75rem;
-  margin-bottom: 2.5rem;
-}
-
-.trust-badge {
-  font-size: 0.8125rem;
-  color: var(--text-muted);
-  font-weight: 500;
-}
-
-.trust-dot {
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  background: var(--text-muted);
-}
-
-.platform-tags {
-  display: flex;
-  justify-content: center;
-  flex-wrap: wrap;
-  gap: 0.625rem;
-  max-width: 700px;
-  margin: 0 auto;
-}
-
-.platform-tag {
-  padding: 0.375rem 1rem;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 0.8125rem;
-  color: var(--text-secondary);
-  font-weight: 500;
-  transition: all 0.2s;
-  cursor: default;
-}
-
-.platform-tag:hover {
-  border-color: var(--tag-color);
-  color: var(--tag-color);
-  background: rgba(255, 255, 255, 0.03);
-}
-
 @media (max-width: 768px) {
   .hero-section {
     padding: 2rem 1rem 1.5rem;
@@ -283,23 +207,5 @@ const platforms = [
     font-size: 0.9375rem;
   }
 
-  .trust-badges {
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    margin-bottom: 1.25rem;
-  }
-
-  .trust-badge {
-    font-size: 0.75rem;
-  }
-
-  .platform-tags {
-    gap: 0.5rem;
-  }
-
-  .platform-tag {
-    padding: 0.25rem 0.625rem;
-    font-size: 0.6875rem;
-  }
 }
 </style>

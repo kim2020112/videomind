@@ -207,6 +207,13 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
             if cached_whisper and len(cached_whisper.strip()) >= 20:
                 fast_cached_sub = True
 
+        # B站视频：CC API 只需 BV ID，无需 parse_info，先尝试获取
+        if not fast_cached_sub:
+            from core.pipeline.subtitle import try_get_bilibili_cc_subtitle
+            cc_result = try_get_bilibili_cc_subtitle(url)
+            if cc_result and cc_result.get("has_subtitle"):
+                fast_cached_sub = True
+
         duration_from_cache = cached_info.get("duration", 0) if cached_info else 0
         need_whisper = not fast_cached_sub and is_model_available()
 

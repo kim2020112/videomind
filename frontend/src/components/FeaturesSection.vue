@@ -66,8 +66,7 @@
         </div>
 
         <!-- Feature 5 -->
-        <div class="feature-card pro-card">
-          <div class="pro-badge">Pro</div>
+        <div class="feature-card">
           <div class="feature-icon pink">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -81,8 +80,7 @@
         </div>
 
         <!-- Feature 6 -->
-        <div class="feature-card pro-card">
-          <div class="pro-badge">Pro</div>
+        <div class="feature-card">
           <div class="feature-icon orange">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -203,28 +201,6 @@
   font-size: 0.875rem;
   color: var(--text-secondary);
   line-height: 1.7;
-}
-
-.pro-card {
-  border-color: rgba(236, 72, 153, 0.2);
-}
-
-.pro-card:hover {
-  border-color: rgba(236, 72, 153, 0.4);
-}
-
-.pro-badge {
-  position: absolute;
-  top: 1rem;
-  right: 1rem;
-  padding: 0.2rem 0.625rem;
-  background: linear-gradient(135deg, var(--accent-pink) 0%, #a855f7 100%);
-  border-radius: 999px;
-  font-size: 0.6875rem;
-  font-weight: 700;
-  color: white;
-  letter-spacing: 0.05em;
-  font-family: 'Plus Jakarta Sans', sans-serif;
 }
 
 @media (max-width: 1024px) {

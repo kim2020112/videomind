@@ -1188,6 +1188,10 @@ function downloadNotes() {
 /* 流式文本 */
 .streaming-text { min-height: 60px; padding: 0.75rem 1rem; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,0.02); }
 .streaming-text :deep(pre) { background: rgba(0,0,0,0.3); padding: 0.75rem 1rem; border-radius: 6px; overflow-x: auto; }
+.streaming-text :deep(code) { background: rgba(255,255,255,0.06); padding: 0.15rem 0.4rem; border-radius: 3px; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.85em; }
+.streaming-text :deep(code::before),
+.streaming-text :deep(code::after) { content: none; }
+.streaming-text :deep(pre code) { background: none; padding: 0; font-size: inherit; }
 .streaming-text :deep(blockquote) { border-left-color: var(--accent-blue); }
 .streaming-text :deep(a) { color: var(--accent-blue); }
 
@@ -1232,6 +1236,10 @@ function downloadNotes() {
 .summary-section { padding: 0; margin-bottom: 1.25rem; }
 .summary-text { margin: 0; }
 .summary-text :deep(pre) { background: rgba(0,0,0,0.3); padding: 0.75rem 1rem; border-radius: 6px; overflow-x: auto; }
+.summary-text :deep(code) { background: rgba(255,255,255,0.06); padding: 0.15rem 0.4rem; border-radius: 3px; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.85em; }
+.summary-text :deep(code::before),
+.summary-text :deep(code::after) { content: none; }
+.summary-text :deep(pre code) { background: none; padding: 0; font-size: inherit; }
 .summary-text :deep(blockquote) { border-left-color: var(--accent-blue); }
 .summary-text :deep(a) { color: var(--accent-blue); }
 .summary-text :deep(ul),
@@ -1452,6 +1460,8 @@ function downloadNotes() {
 .qa-pair-answer-content :deep(li) { margin: 0.25rem 0; }
 .qa-pair-answer-content :deep(pre) { background: rgba(0,0,0,0.3); padding: 0.5rem 0.75rem; border-radius: 4px; overflow-x: auto; font-size: 0.8125rem; margin: 0.5rem 0; }
 .qa-pair-answer-content :deep(code) { font-size: 0.8125rem; background: rgba(255,255,255,0.06); padding: 0.125rem 0.375rem; border-radius: 3px; }
+.qa-pair-answer-content :deep(code::before),
+.qa-pair-answer-content :deep(code::after) { content: none; }
 .qa-pair-answer-content :deep(a) { color: var(--accent-blue); }
 
 .chat-container { display: flex; flex-direction: column; height: 400px; }
@@ -1464,6 +1474,10 @@ function downloadNotes() {
 .chat-role { font-size: 0.6875rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.25rem; display: block; }
 .chat-content { margin: 0; }
 .chat-content :deep(pre) { background: rgba(0,0,0,0.3); padding: 0.5rem 0.75rem; border-radius: 4px; overflow-x: auto; font-size: 0.8125rem; }
+.chat-content :deep(code) { background: rgba(255,255,255,0.06); padding: 0.1rem 0.35rem; border-radius: 3px; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.85em; }
+.chat-content :deep(code::before),
+.chat-content :deep(code::after) { content: none; }
+.chat-content :deep(pre code) { background: none; padding: 0; font-size: inherit; }
 .chat-content :deep(blockquote) { border-left-color: var(--accent-blue); }
 .chat-content :deep(a) { color: var(--accent-blue); }
 .chat-error { color: #FCA5A5; font-size: 0.75rem; padding: 0.25rem 0.5rem; }
@@ -1622,6 +1636,8 @@ function downloadNotes() {
 .notes-content :deep(li) { margin: 0.25rem 0; }
 .notes-content :deep(pre) { background: rgba(0,0,0,0.4); padding: 0.75rem 1rem; border-radius: 6px; overflow-x: auto; margin: 0.75rem 0; }
 .notes-content :deep(code) { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.8125rem; }
+.notes-content :deep(code::before),
+.notes-content :deep(code::after) { content: none; }
 .notes-content :deep(blockquote) {
   border-left: 3px solid var(--accent-blue);
   padding: 0.375rem 0.75rem; margin: 0.5rem 0;

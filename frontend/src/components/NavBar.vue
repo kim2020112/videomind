@@ -34,11 +34,6 @@ async function handleLogout() {
         <span class="logo-text">VideoMind</span>
       </div>
 
-      <!-- Navigation Links -->
-      <div class="navbar-links">
-        <a href="#features" class="nav-link">功能特性</a>
-        <a href="#tutorial" class="nav-link">使用教程</a>
-      </div>
 
       <!-- Actions -->
       <div class="navbar-actions">
@@ -131,24 +126,6 @@ async function handleLogout() {
   font-weight: 700;
   color: var(--text-primary);
   font-family: 'Plus Jakarta Sans', sans-serif;
-}
-
-.navbar-links {
-  display: flex;
-  align-items: center;
-  gap: 2rem;
-}
-
-.nav-link {
-  color: var(--text-secondary);
-  text-decoration: none;
-  font-size: 0.9375rem;
-  font-weight: 500;
-  transition: color 0.2s;
-}
-
-.nav-link:hover {
-  color: var(--text-primary);
 }
 
 .navbar-actions {
@@ -297,10 +274,6 @@ async function handleLogout() {
 }
 
 @media (max-width: 768px) {
-  .navbar-links {
-    display: none;
-  }
-
   .navbar-container {
     padding: 1rem;
   }

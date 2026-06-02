@@ -23,27 +23,11 @@
             <a href="#features" class="footer-link">学习笔记</a>
             <a href="#features" class="footer-link">思维导图</a>
           </div>
-          <div class="footer-link-group">
-            <h4 class="footer-link-title">支持</h4>
-            <a href="#tutorial" class="footer-link">使用教程</a>
-            <a href="#faq" class="footer-link">常见问题</a>
-            <a href="#contact" class="footer-link">联系我们</a>
-          </div>
-          <div class="footer-link-group">
-            <h4 class="footer-link-title">法律</h4>
-            <a href="#terms" class="footer-link">服务条款</a>
-            <a href="#privacy" class="footer-link">隐私政策</a>
-          </div>
         </div>
       </div>
 
-      <div class="footer-platforms">
-        <span class="footer-platforms-label">支持平台：</span>
-        <span class="footer-platforms-list">B站 · YouTube · 抖音 · 小红书 · TikTok</span>
-      </div>
-
       <div class="footer-bottom">
-        <span class="footer-copyright">&copy; 2026 VideoMind. All rights reserved.</span>
+        <span class="footer-copyright">&copy; 2026 VideoMind</span>
       </div>
     </div>
   </footer>
@@ -138,24 +122,6 @@
   color: var(--text-primary);
 }
 
-.footer-platforms {
-  padding: 1.25rem 0;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 1.5rem;
-}
-
-.footer-platforms-label {
-  font-size: 0.8125rem;
-  color: var(--text-muted);
-  font-weight: 600;
-}
-
-.footer-platforms-list {
-  font-size: 0.8125rem;
-  color: var(--text-muted);
-}
-
 .footer-bottom {
   display: flex;
   justify-content: center;
@@ -185,13 +151,5 @@
     flex-wrap: wrap;
   }
 
-  .footer-platforms-label,
-  .footer-platforms-list {
-    display: block;
-  }
-
-  .footer-platforms-list {
-    margin-top: 0.375rem;
-  }
 }
 </style>

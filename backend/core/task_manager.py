@@ -151,9 +151,12 @@ async def run_background_task(task_id: str):
         canonical_url = info.webpage_url or url
         canonical_hash = _url_hash(canonical_url)
 
-        # ── 2. Whisper 转录 ──
+        # ── 2. 字幕获取（四级降级：DB → B站CC → yt-dlp → Whisper） ──
         update_task(task_id, stage="transcribing")
-        subtitle_text = await transcribe_video_async(url, lang)
+        from core.pipeline.subtitle import fetch_subtitle
+        sub_result = await loop.run_in_executor(None, fetch_subtitle, canonical_url, info, lang)
+        subtitle_text = sub_result.get("text") if sub_result else None
+        sub_source = sub_result.get("source", "whisper") if sub_result else "whisper"
 
         if not subtitle_text or len(subtitle_text.strip()) < 20:
             update_task(task_id, status="failed", error="Whisper 转录结果为空")
@@ -172,7 +175,7 @@ async def run_background_task(task_id: str):
 
         fp = video_fingerprint(info.extractor, info.id) if info.extractor and info.id else None
         save_video_info_cache(canonical_url, info, fingerprint=fp)
-        save_subtitle(canonical_url, info, subtitle_text, "whisper", lang or "auto")
+        save_subtitle(canonical_url, info, subtitle_text, sub_source, lang or "auto")
 
         # ── 4. AI 流水线 ──
         update_task(task_id, stage="generating")
