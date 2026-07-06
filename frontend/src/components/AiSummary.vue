@@ -1669,6 +1669,75 @@ function downloadNotes() {
 .notes-empty { padding: 2rem; text-align: center; color: var(--text-muted); }
 .notes-empty p { margin: 0 0 0.75rem 0; }
 
+@media (min-width: 1024px) {
+  .parts-section {
+    margin-bottom: 1rem;
+    padding: 1rem;
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+
+  .parts-section .parts-label {
+    margin-bottom: 0.625rem;
+    font-size: 0.875rem;
+  }
+
+  .parts-section .parts-list {
+    max-height: 220px;
+    gap: 0.25rem;
+  }
+
+  .parts-section .part-row {
+    min-height: 40px;
+  }
+
+  .parts-section .part-info {
+    padding: 0.5rem 0.625rem;
+  }
+
+  .sub-tab-bar {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0.375rem;
+    padding: 0.25rem;
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    margin-bottom: 1.25rem;
+    overflow: visible;
+  }
+
+  .sub-tab-btn {
+    justify-content: center;
+    min-height: 46px;
+    padding: 0.625rem 0.75rem;
+    border-bottom: 0;
+    border-radius: 9px;
+    font-size: 0.875rem;
+  }
+
+  .sub-tab-btn:hover {
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .sub-tab-btn.active {
+    background: rgba(59, 130, 246, 0.15);
+    border-bottom-color: transparent;
+  }
+
+  .sub-tab-icon {
+    width: 16px;
+    height: 16px;
+  }
+
+  .summary-scroll {
+    max-height: none;
+    overflow: visible;
+    padding-right: 0;
+  }
+}
+
 @media (max-width: 768px) {
   /* 子 Tab 栏：确保 44px 触摸目标 */
   .sub-tab-btn { padding: 0.625rem 0.5rem; font-size: 0.75rem; gap: 0.2rem; min-height: 44px; }

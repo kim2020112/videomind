@@ -66,6 +66,7 @@ const summarizeUrl = computed(() => {
 const showSubtitles = ref(false)
 const showFullDescription = ref(false)
 const currentView = ref('home') // 'home' | 'history'
+const desktopSidebarCollapsed = ref(false)
 
 // 视频播放 Modal
 const showVideoModal = ref(false)
@@ -543,10 +544,53 @@ function formatTime(timestamp) {
             <span>{{ error }}</span>
           </div>
 
-          <DesktopWorkspace v-if="videoInfo">
+          <DesktopWorkspace v-if="videoInfo" :sidebarCollapsed="desktopSidebarCollapsed">
             <template #sidebar>
               <VideoSidebar>
-                <div class="video-card desktop-video-card desktop-sidebar-card">
+                <button
+                  type="button"
+                  class="desktop-sidebar-toggle"
+                  :aria-label="desktopSidebarCollapsed ? '展开视频侧栏' : '收起视频侧栏'"
+                  :aria-expanded="!desktopSidebarCollapsed"
+                  @click="desktopSidebarCollapsed = !desktopSidebarCollapsed"
+                >
+                  <svg v-if="desktopSidebarCollapsed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+                  </svg>
+                  <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/>
+                  </svg>
+                </button>
+
+                <div v-if="desktopSidebarCollapsed" class="desktop-sidebar-rail">
+                  <button
+                    type="button"
+                    class="desktop-sidebar-rail-thumb"
+                    :class="{ clickable: videoInfo.stream_url }"
+                    :title="videoInfo.title || '当前视频'"
+                    @click="videoInfo.stream_url ? openVideoModal() : (desktopSidebarCollapsed = false)"
+                  >
+                    <img v-if="videoInfo.thumbnail" :src="videoInfo.thumbnail" :alt="videoInfo.title || '视频缩略图'" />
+                    <svg v-else viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M8 5v14l11-7z"/>
+                    </svg>
+                  </button>
+                  <span v-if="currentSummarizePartInfo && currentSummarizePartInfo.index > 1" class="desktop-sidebar-rail-badge">
+                    P{{ currentSummarizePartInfo.index }}
+                  </span>
+                  <button
+                    type="button"
+                    class="desktop-sidebar-rail-action"
+                    title="展开下载工具"
+                    @click="desktopSidebarCollapsed = false"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 11l5 5m0 0l5-5m-5 5V3"/>
+                    </svg>
+                  </button>
+                </div>
+
+                <div v-else class="video-card desktop-video-card desktop-sidebar-card">
                   <div class="video-info desktop-video-info">
                     <div class="video-thumbnail-wrapper desktop-thumbnail-wrapper" :class="{ clickable: videoInfo.stream_url }" @click="openVideoModal" @keydown.enter="openVideoModal" tabindex="0" role="button">
                       <img v-if="videoInfo.thumbnail" :src="videoInfo.thumbnail" :alt="videoInfo.title || '视频缩略图'" class="video-thumbnail" />
@@ -1202,6 +1246,108 @@ function formatTime(timestamp) {
   border-radius: 12px;
 }
 
+.desktop-sidebar-toggle {
+  width: 40px;
+  height: 40px;
+  align-self: flex-end;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.desktop-sidebar-toggle:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+
+.desktop-sidebar-toggle svg {
+  width: 18px;
+  height: 18px;
+}
+
+.desktop-sidebar-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.625rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  backdrop-filter: blur(12px);
+}
+
+.desktop-sidebar-rail-thumb {
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.desktop-sidebar-rail-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.desktop-sidebar-rail-thumb svg {
+  width: 22px;
+  height: 22px;
+}
+
+.desktop-sidebar-rail-badge {
+  display: inline-flex;
+  min-width: 44px;
+  justify-content: center;
+  padding: 0.25rem 0.375rem;
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border-radius: 8px;
+  color: #93C5FD;
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+
+.desktop-sidebar-rail-action {
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.desktop-sidebar-rail-action:hover {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+
+.desktop-sidebar-rail-action svg {
+  width: 18px;
+  height: 18px;
+}
+
 .desktop-sidebar-card {
   display: flex;
   flex-direction: column;
@@ -1210,7 +1356,12 @@ function formatTime(timestamp) {
 
 .desktop-ai-card {
   padding: 1.5rem;
-  min-height: calc(100vh - 160px);
+}
+
+.desktop-ai-card :deep(.summary-scroll) {
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
 }
 
 .desktop-video-info {

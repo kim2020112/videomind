@@ -1,5 +1,11 @@
+<script setup>
+defineProps({
+  sidebarCollapsed: { type: Boolean, default: false },
+})
+</script>
+
 <template>
-  <div class="desktop-workspace">
+  <div class="desktop-workspace" :class="{ 'desktop-workspace--collapsed': sidebarCollapsed }">
     <aside class="desktop-workspace__sidebar">
       <slot name="sidebar" />
     </aside>
@@ -17,14 +23,16 @@
   grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
   gap: 1.25rem;
   align-items: start;
+  transition: grid-template-columns 0.2s ease;
+}
+
+.desktop-workspace--collapsed {
+  grid-template-columns: 72px minmax(0, 1fr);
 }
 
 .desktop-workspace__sidebar {
   position: sticky;
   top: 88px;
-  max-height: calc(100vh - 112px);
-  overflow: auto;
-  padding-right: 0.25rem;
 }
 
 .desktop-workspace__main {
