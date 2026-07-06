@@ -8,7 +8,7 @@ defineProps({
   currentView: { type: String, default: 'home' },
   activeTaskCount: { type: Number, default: 0 }
 })
-const emit = defineEmits(['toggle-history', 'go-home'])
+const emit = defineEmits(['toggle-history', 'go-home', 'logout'])
 
 const { user, usage, isLoggedIn, isAdmin, displayName, logout } = useAuth()
 const showLogin = ref(false)
