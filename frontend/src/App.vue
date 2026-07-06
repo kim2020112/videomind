@@ -583,28 +583,6 @@ function formatTime(timestamp) {
                     </button>
                   </div>
 
-                  <div v-if="videoInfo.parts && videoInfo.parts.length > 1" class="desktop-learning-parts">
-                    <div class="desktop-learning-parts__header">
-                      <p class="desktop-learning-parts__title">学习分P</p>
-                      <span class="desktop-learning-parts__count">{{ videoInfo.parts.length }} P</span>
-                    </div>
-                    <div class="desktop-learning-parts__list">
-                      <button
-                        v-for="part in videoInfo.parts"
-                        :key="part.index"
-                        type="button"
-                        class="desktop-learning-part"
-                        :class="{ active: currentSummarizePart === part.index }"
-                        @click="switchSummarizePart(part.index)"
-                      >
-                        <span class="desktop-learning-part__index">P{{ part.index }}</span>
-                        <span class="desktop-learning-part__title">{{ part.title }}</span>
-                        <span v-if="isSummarizing && currentSummarizePart === part.index" class="desktop-learning-part__status">生成中</span>
-                        <span v-else-if="part.duration" class="desktop-learning-part__duration">{{ formatDuration(part.duration) }}</span>
-                      </button>
-                    </div>
-                  </div>
-
                   <details class="sidebar-download">
                     <summary class="sidebar-download-summary">
                       <span>视频下载</span>
@@ -811,7 +789,7 @@ function formatTime(timestamp) {
                     :notesSections="notesSections"
                     :flashcards="flashcards"
                     :generationStage="generationStage"
-                    :multiParts="[]"
+                    :multiParts="videoInfo?.parts?.length > 1 ? videoInfo.parts : []"
                     :currentSummarizePart="currentSummarizePart"
                     :onSummarize="handleSummarize"
                     :onRegenerateSummary="handleRegenerateSummary"
@@ -1232,12 +1210,7 @@ function formatTime(timestamp) {
 
 .desktop-ai-card {
   padding: 1.5rem;
-}
-
-.desktop-ai-card :deep(.summary-scroll) {
-  max-height: none;
-  overflow: visible;
-  padding-right: 0;
+  min-height: calc(100vh - 160px);
 }
 
 .desktop-video-info {
@@ -1258,112 +1231,6 @@ function formatTime(timestamp) {
 
 .desktop-video-description {
   margin-bottom: 0;
-}
-
-.desktop-learning-parts {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.025);
-  padding: 0.875rem;
-}
-
-.desktop-learning-parts__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  margin-bottom: 0.625rem;
-}
-
-.desktop-learning-parts__title {
-  margin: 0;
-  color: var(--text-primary);
-  font-size: 0.875rem;
-  font-weight: 700;
-}
-
-.desktop-learning-parts__count {
-  color: var(--text-muted);
-  font-size: 0.75rem;
-  font-weight: 600;
-}
-
-.desktop-learning-parts__list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  max-height: 240px;
-  overflow-y: auto;
-  padding-right: 0.25rem;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255,255,255,0.12) transparent;
-}
-
-.desktop-learning-parts__list::-webkit-scrollbar {
-  width: 6px;
-}
-
-.desktop-learning-parts__list::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.desktop-learning-parts__list::-webkit-scrollbar-thumb {
-  background: rgba(255,255,255,0.12);
-  border-radius: 3px;
-}
-
-.desktop-learning-part {
-  width: 100%;
-  min-height: 40px;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 0.625rem;
-  background: transparent;
-  border: 0;
-  border-radius: 8px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  text-align: left;
-  transition: background 0.15s, color 0.15s;
-}
-
-.desktop-learning-part:hover {
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text-primary);
-}
-
-.desktop-learning-part.active {
-  background: rgba(59, 130, 246, 0.14);
-  color: var(--text-primary);
-}
-
-.desktop-learning-part__index {
-  color: var(--accent-blue);
-  font-size: 0.8125rem;
-  font-weight: 800;
-}
-
-.desktop-learning-part__title {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 0.8125rem;
-  font-weight: 600;
-}
-
-.desktop-learning-part__duration,
-.desktop-learning-part__status {
-  color: var(--text-muted);
-  font-size: 0.75rem;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.desktop-learning-part__status {
-  color: var(--accent-cyan);
 }
 
 .sidebar-download {

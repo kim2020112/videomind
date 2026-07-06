@@ -22,6 +22,9 @@
 .desktop-workspace__sidebar {
   position: sticky;
   top: 88px;
+  max-height: calc(100vh - 112px);
+  overflow: auto;
+  padding-right: 0.25rem;
 }
 
 .desktop-workspace__main {

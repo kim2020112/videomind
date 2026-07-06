@@ -134,9 +134,9 @@ function handleMobileAction(action) {
 }
 
 .navbar-container {
-  max-width: 1480px;
+  max-width: 1200px;
   margin: 0 auto;
-  padding: 1rem clamp(1.5rem, 3vw, 3rem);
+  padding: 1rem 2rem;
   display: flex;
   align-items: center;
   justify-content: space-between;
