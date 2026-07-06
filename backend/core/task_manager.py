@@ -154,9 +154,7 @@ async def run_background_task(task_id: str):
         # ── 2. 字幕获取（四级降级：DB → B站CC → yt-dlp → Whisper） ──
         update_task(task_id, stage="transcribing")
         from core.pipeline.subtitle import fetch_subtitle
-        sub_result = await loop.run_in_executor(None, fetch_subtitle, canonical_url, info, lang)
-        subtitle_text = sub_result.get("text") if sub_result else None
-        sub_source = sub_result.get("source", "whisper") if sub_result else "whisper"
+        subtitle_text, sub_source, _sub_lang = await fetch_subtitle(canonical_url, info, lang)
 
         if not subtitle_text or len(subtitle_text.strip()) < 20:
             update_task(task_id, status="failed", error="Whisper 转录结果为空")
