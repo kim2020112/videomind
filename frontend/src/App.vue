@@ -8,6 +8,10 @@ import FooterSection from './components/FooterSection.vue'
 import AiSummary from './components/AiSummary.vue'
 import HistoryPage from './components/HistoryPage.vue'
 import VideoPlayerModal from './components/VideoPlayerModal.vue'
+import ResultWorkspace from './components/ResultWorkspace.vue'
+import DesktopWorkspace from './components/DesktopWorkspace.vue'
+import VideoSidebar from './components/VideoSidebar.vue'
+import AiWorkspace from './components/AiWorkspace.vue'
 import { useSummary } from './composables/useSummary.js'
 import { useChat } from './composables/useChat.js'
 import { useQa } from './composables/useQa.js'
@@ -529,7 +533,311 @@ function formatTime(timestamp) {
     />
 
     <!-- Results Section -->
-    <section v-if="videoInfo || error" class="results-section">
+    <ResultWorkspace v-if="videoInfo || error">
+      <template #desktop>
+        <div class="desktop-results-container">
+          <div v-if="error" class="error-card">
+            <svg class="error-icon" fill="currentColor" viewBox="0 0 20 20">
+              <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
+            </svg>
+            <span>{{ error }}</span>
+          </div>
+
+          <DesktopWorkspace v-if="videoInfo">
+            <template #sidebar>
+              <VideoSidebar>
+                <div class="video-card desktop-video-card desktop-sidebar-card">
+                  <div class="video-info desktop-video-info">
+                    <div class="video-thumbnail-wrapper desktop-thumbnail-wrapper" :class="{ clickable: videoInfo.stream_url }" @click="openVideoModal" @keydown.enter="openVideoModal" tabindex="0" role="button">
+                      <img v-if="videoInfo.thumbnail" :src="videoInfo.thumbnail" :alt="videoInfo.title || '视频缩略图'" class="video-thumbnail" />
+                      <div v-if="videoInfo.stream_url" class="video-thumbnail-play">
+                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                      </div>
+                      <span v-if="videoInfo.duration_string" class="video-thumbnail-duration">{{ currentSummarizePartInfo?.duration ? formatDuration(currentSummarizePartInfo.duration) : videoInfo.duration_string }}</span>
+                    </div>
+                    <div class="video-details">
+                      <h3 class="video-title">
+                        {{ videoInfo.title }}
+                        <span v-if="currentSummarizePartInfo && currentSummarizePartInfo.index > 1" class="part-badge">P{{ currentSummarizePartInfo.index }}</span>
+                      </h3>
+                      <div class="video-meta-row">
+                        <span class="video-meta-item">{{ videoInfo.extractor }}</span>
+                        <span v-if="videoInfo.uploader" class="video-meta-item">{{ videoInfo.uploader }}</span>
+                        <span v-if="videoInfo.view_count" class="video-meta-item">{{ formatViewCount(videoInfo.view_count) }} 次播放</span>
+                      </div>
+                      <a v-if="videoInfo.webpage_url" :href="videoInfo.webpage_url" target="_blank" rel="noopener" class="video-original-link">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+                        查看原视频
+                      </a>
+                    </div>
+                  </div>
+
+                  <div v-if="videoInfo.description" class="video-description desktop-video-description" :class="{ expanded: showFullDescription }">
+                    <p class="video-description-text">{{ videoInfo.description }}</p>
+                    <button
+                      v-if="videoInfo.description.length > 150"
+                      class="description-toggle"
+                      @click="showFullDescription = !showFullDescription"
+                    >
+                      {{ showFullDescription ? '收起' : '展开全部' }}
+                    </button>
+                  </div>
+
+                  <details class="sidebar-download">
+                    <summary class="sidebar-download-summary">
+                      <span>视频下载</span>
+                      <span v-if="selectedPartIndices.length > 0" class="sidebar-download-meta">{{ selectedPartIndices.length }} P</span>
+                    </summary>
+                    <div class="sidebar-download-content">
+                      <div v-if="videoInfo.parts && videoInfo.parts.length" class="parts-section">
+                        <div class="parts-header">
+                          <p class="parts-label">
+                            分P列表（共 {{ videoInfo.parts.length }} P）
+                            <span v-if="selectedPartIndices.length > 0" class="parts-total-size">
+                              · 选中 {{ selectedPartIndices.length }} P
+                            </span>
+                          </p>
+                          <div class="parts-actions">
+                            <button @click="handleSelectAll" class="select-all-button">
+                              {{ isAllPartsSelected ? '取消全选' : '全选' }}
+                            </button>
+                            <button
+                              v-if="selectedPartIndices.length >= 1"
+                              @click="handleDownloadSelected"
+                              :disabled="progress && progress.status === 'downloading'"
+                              class="download-selected-button"
+                            >下载选中({{ selectedPartIndices.length }})</button>
+                            <button
+                              @click="handleDownloadAll"
+                              :disabled="progress && progress.status === 'downloading'"
+                              class="download-all-button"
+                            >全部</button>
+                          </div>
+                        </div>
+                        <div class="parts-list sidebar-parts-list">
+                          <div
+                            v-for="part in videoInfo.parts"
+                            :key="part.index"
+                            class="part-row"
+                            :class="{ active: currentPart === part.index, selected: selectedPartIndices.includes(part.index) }"
+                          >
+                            <div
+                              class="part-checkbox"
+                              :class="{ checked: selectedPartIndices.includes(part.index) }"
+                              @click="togglePartSelection(part.index)"
+                            >
+                              <svg v-if="selectedPartIndices.includes(part.index)" viewBox="0 0 12 10" fill="none">
+                                <path d="M1 5l3 3.5L11 1" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                              </svg>
+                            </div>
+                            <div class="part-info">
+                              <span class="part-index">P{{ part.index }}</span>
+                              <span class="part-title">{{ part.title }}</span>
+                              <span v-if="part.duration" class="part-duration">{{ formatDuration(part.duration) }}</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div v-if="displayFormats.length" class="format-section">
+                        <p class="format-label">选择清晰度</p>
+                        <div class="format-grid sidebar-format-grid">
+                          <button
+                            v-for="f in displayFormats"
+                            :key="f.format_id"
+                            @click="selectedFormat = f.format_id"
+                            class="format-button"
+                            :class="{
+                              active: selectedFormat === f.format_id,
+                              'format-best': f.is_best,
+                              'format-audio': f.is_audio_only,
+                            }"
+                          >
+                            <span v-if="f.is_best" class="format-badge-best">
+                              <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25z"/></svg>
+                              推荐
+                            </span>
+                            <span class="format-name">{{ f.is_audio_only ? (f.label || f.ext.toUpperCase()) : stripSizeFromLabel(f.label) || (f.height ? f.height + 'p' : f.ext.toUpperCase()) }}</span>
+                            <span class="format-sub">
+                              <span v-if="f.is_audio_only" class="format-tag-audio">仅音频</span>
+                              <template v-else>{{ f.ext.toUpperCase() }}</template>
+                              <template v-if="f.adjusted_filesize_str"> · {{ f.adjusted_filesize_str }}</template>
+                              <template v-else-if="f.filesize_str"> · {{ f.filesize_str }}</template>
+                            </span>
+                          </button>
+                        </div>
+                      </div>
+
+                      <div v-if="subtitles.length" class="subtitle-section">
+                        <button
+                          type="button"
+                          class="subtitle-collapse-toggle"
+                          :aria-expanded="showSubtitles"
+                          @click="showSubtitles = !showSubtitles"
+                        >
+                          <svg
+                            class="subtitle-toggle-chevron"
+                            :class="{ rotated: showSubtitles }"
+                            viewBox="0 0 20 20"
+                            fill="currentColor"
+                          >
+                            <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
+                          </svg>
+                          <span class="subtitle-toggle-label">
+                            字幕文件（{{ subtitles.length }}）
+                          </span>
+                        </button>
+                        <div v-show="showSubtitles" class="subtitle-expanded">
+                          <div class="subtitle-translate-bar">
+                            <span class="subtitle-translate-hint">翻译：</span>
+                            <select v-model="translateTargetLang" class="subtitle-lang-select">
+                              <option v-for="lang in translateLangs" :key="lang.code" :value="lang.code">
+                                {{ lang.name }}
+                              </option>
+                            </select>
+                          </div>
+                          <div v-if="manualSubtitles.length" class="subtitle-group">
+                            <p class="subtitle-group-label">手动字幕</p>
+                            <div class="subtitle-list">
+                              <div v-for="sub in manualSubtitles" :key="sub.lang" class="subtitle-item">
+                                <span class="subtitle-name">{{ subtitleDisplayName(sub) }}（{{ sub.ext }}）</span>
+                                <div class="subtitle-actions">
+                                  <button @click="handleDownloadSubtitle(sub)" class="subtitle-btn subtitle-download-btn">下载</button>
+                                  <button @click="handleTranslateSubtitle(sub)" class="subtitle-btn subtitle-translate-btn">翻译</button>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                          <div v-if="autoSubtitles.length" class="subtitle-group">
+                            <p class="subtitle-group-label">自动生成字幕</p>
+                            <div class="subtitle-list">
+                              <div v-for="sub in autoSubtitles" :key="sub.lang" class="subtitle-item">
+                                <span class="subtitle-name">{{ subtitleDisplayName(sub) }}（{{ sub.ext }}）</span>
+                                <div class="subtitle-actions">
+                                  <button @click="handleDownloadSubtitle(sub)" class="subtitle-btn subtitle-download-btn">下载</button>
+                                  <button @click="handleTranslateSubtitle(sub)" class="subtitle-btn subtitle-translate-btn">翻译</button>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div v-if="selectedFormatDetail" class="format-detail sidebar-format-detail">
+                        <span class="format-detail-item">格式：{{ selectedFormatDetail.ext.toUpperCase() }}</span>
+                        <span v-if="selectedFormatDetail.vcodec && selectedFormatDetail.vcodec !== 'none'" class="format-detail-item">编码：{{ selectedFormatDetail.vcodec }}</span>
+                        <span v-if="selectedFormatDetail.fps" class="format-detail-item">{{ selectedFormatDetail.fps }}fps</span>
+                        <button
+                          @click="handleDownload"
+                          :disabled="progress && progress.status === 'downloading'"
+                          class="download-btn-inline"
+                        >
+                          <svg class="download-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                          </svg>
+                          {{ progress && progress.status === 'downloading' ? '下载中...' : '下载' }}
+                        </button>
+                      </div>
+
+                      <div v-if="progress" class="progress-card" :class="'progress-' + progress.status">
+                        <div class="progress-header">
+                          <span class="progress-label">
+                            <svg v-if="progress.status === 'completed'" class="progress-status-icon progress-status-success" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+                            <svg v-else-if="progress.status === 'failed'" class="progress-status-icon progress-status-error" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/></svg>
+                            {{ progress.status === 'completed' ? '下载完成' : progress.status === 'failed' ? '下载失败' : '下载中' }}
+                          </span>
+                          <span class="progress-percent">{{ progress.percent }}%</span>
+                        </div>
+                        <div class="progress-bar-container">
+                          <div class="progress-bar" :class="{ 'progress-bar-shimmer': progress.status === 'downloading' }" :style="{ width: progress.percent + '%' }"></div>
+                        </div>
+                        <div v-if="progress.speed" class="progress-info">
+                          {{ progress.speed }} · 剩余约 {{ progress.eta }} 秒
+                        </div>
+                        <div v-if="progress.error" class="progress-error">{{ progress.error }}</div>
+                      </div>
+                    </div>
+                  </details>
+                </div>
+              </VideoSidebar>
+            </template>
+
+            <template #main>
+              <AiWorkspace>
+                <div class="video-card desktop-ai-card">
+                  <AiSummary
+                    :result="summaryResult"
+                    :loading="isSummarizing"
+                    :regeneratingMode="regeneratingMode"
+                    :subtitleSource="subtitleSource"
+                    :error="summarizeError"
+                    :streamingText="streamingText"
+                    :subtitleText="subtitleText"
+                    :isFetchingSubtitle="isFetchingSubtitle"
+                    :subtitleError="subtitleError"
+                    :chatMessages="chatMessages"
+                    :isChatStreaming="isChatStreaming"
+                    :chatError="chatError"
+                    :subtitleInfo="subtitleInfo"
+                    :isPartialSummary="isPartialSummary"
+                    :whisperEstimate="whisperEstimate"
+                    :backgroundTask="backgroundTask"
+                    :videoTitle="videoInfo?.title || ''"
+                    :mindmapMarkdown="mindmapMarkdown"
+                    :notesMarkdown="notesMarkdown"
+                    :notesSections="notesSections"
+                    :flashcards="flashcards"
+                    :generationStage="generationStage"
+                    :multiParts="videoInfo?.parts?.length > 1 ? videoInfo.parts : []"
+                    :currentSummarizePart="currentSummarizePart"
+                    :onSummarize="handleSummarize"
+                    :onRegenerateSummary="handleRegenerateSummary"
+                    :onRegenerateMindmap="handleRegenerateMindmap"
+                    :onRegenerateNotes="handleRegenerateNotes"
+                    :onRegenerateSubtitle="handleRegenerateSubtitle"
+                    :onFetchSubtitle="handleFetchSubtitle"
+                    :onSendQuestion="handleSendQuestion"
+                    :onGenerateQa="handleGenerateQa"
+                    :onRegenerateQa="handleRegenerateQa"
+                    :qaPairs="displayQaPairs"
+                    :isQaGenerating="isQaGenerating"
+                    :qaError="qaError"
+                    :onToggleQaExpand="toggleQaExpand"
+                    :onSwitchPart="switchSummarizePart"
+                    :onSeekVideo="handleSeekVideo"
+                    :currentVideoTime="videoCurrentTime"
+                  />
+                </div>
+
+                <div v-if="downloadHistory.length" class="history-card desktop-download-history">
+                  <p class="history-label">下载记录</p>
+                  <div class="history-list">
+                    <div v-for="item in downloadHistory" :key="item.task_id" class="history-item">
+                      <svg v-if="item.status === 'completed'" class="history-status-icon history-status-success" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+                      <svg v-else class="history-status-icon history-status-error" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/></svg>
+                      <div class="history-item-content">
+                        <span class="history-title">{{ item.title }}</span>
+                        <span v-if="item.time" class="history-time">{{ formatTime(item.time) }}</span>
+                      </div>
+                      <button
+                        v-if="item.status === 'completed'"
+                        @click="handleDownloadFile(item.task_id)"
+                        class="save-button"
+                      >
+                        <svg viewBox="0 0 20 20" fill="currentColor" class="save-icon"><path d="M10.75 2.75a.75.75 0 00-1.5 0v8.614L6.295 8.235a.75.75 0 10-1.09 1.03l4.25 4.5a.75.75 0 001.09 0l4.25-4.5a.75.75 0 00-1.09-1.03l-2.955 3.129V2.75z"/><path d="M3.5 12.75a.75.75 0 00-1.5 0v2.5A2.75 2.75 0 004.75 18h10.5A2.75 2.75 0 0018 15.25v-2.5a.75.75 0 00-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5z"/></svg>
+                        保存
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </AiWorkspace>
+            </template>
+          </DesktopWorkspace>
+        </div>
+      </template>
+
+      <template #mobile>
       <div class="results-container">
         <!-- Error Message -->
         <div v-if="error" class="error-card">
@@ -847,7 +1155,8 @@ function formatTime(timestamp) {
           </div>
         </div>
       </div>
-    </section>
+      </template>
+    </ResultWorkspace>
 
     </template>
 
@@ -882,6 +1191,121 @@ function formatTime(timestamp) {
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
+}
+
+.desktop-results-container {
+  width: 100%;
+}
+
+.desktop-video-card {
+  padding: 1rem;
+  border-radius: 12px;
+}
+
+.desktop-sidebar-card {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.desktop-ai-card {
+  padding: 1.5rem;
+  min-height: calc(100vh - 160px);
+}
+
+.desktop-video-info {
+  flex-direction: column;
+  gap: 0.875rem;
+  margin-bottom: 0;
+}
+
+.desktop-thumbnail-wrapper {
+  width: 100%;
+}
+
+.desktop-thumbnail-wrapper .video-thumbnail {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+}
+
+.desktop-video-description {
+  margin-bottom: 0;
+}
+
+.sidebar-download {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+  overflow: hidden;
+}
+
+.sidebar-download[open] {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.sidebar-download-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem 0.875rem;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  font-weight: 700;
+  cursor: pointer;
+  list-style: none;
+}
+
+.sidebar-download-summary::-webkit-details-marker {
+  display: none;
+}
+
+.sidebar-download-summary::after {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--text-muted);
+  border-bottom: 2px solid var(--text-muted);
+  transform: rotate(45deg);
+  transition: transform 0.2s;
+}
+
+.sidebar-download[open] .sidebar-download-summary::after {
+  transform: rotate(225deg);
+}
+
+.sidebar-download-meta {
+  margin-left: auto;
+  color: var(--accent-cyan);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.sidebar-download-content {
+  padding: 0 0.875rem 0.875rem;
+}
+
+.sidebar-parts-list {
+  max-height: 180px;
+}
+
+.sidebar-format-grid {
+  grid-template-columns: 1fr;
+}
+
+.sidebar-format-detail {
+  align-items: flex-start;
+}
+
+.sidebar-format-detail .download-btn-inline {
+  width: 100%;
+  justify-content: center;
+  margin-left: 0;
+}
+
+.desktop-download-history {
+  margin-top: 1rem;
 }
 
 .error-card {
