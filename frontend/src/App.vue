@@ -547,22 +547,19 @@ function formatTime(timestamp) {
           <DesktopWorkspace v-if="videoInfo" :sidebarCollapsed="desktopSidebarCollapsed">
             <template #sidebar>
               <VideoSidebar>
-                <button
-                  type="button"
-                  class="desktop-sidebar-toggle"
-                  :aria-label="desktopSidebarCollapsed ? '展开视频侧栏' : '收起视频侧栏'"
-                  :aria-expanded="!desktopSidebarCollapsed"
-                  @click="desktopSidebarCollapsed = !desktopSidebarCollapsed"
-                >
-                  <svg v-if="desktopSidebarCollapsed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
-                  </svg>
-                  <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/>
-                  </svg>
-                </button>
-
                 <div v-if="desktopSidebarCollapsed" class="desktop-sidebar-rail">
+                  <button
+                    type="button"
+                    class="desktop-sidebar-rail-control"
+                    aria-label="展开视频侧栏"
+                    :aria-expanded="false"
+                    title="展开视频侧栏"
+                    @click="desktopSidebarCollapsed = false"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+                    </svg>
+                  </button>
                   <button
                     type="button"
                     class="desktop-sidebar-rail-thumb"
@@ -591,6 +588,18 @@ function formatTime(timestamp) {
                 </div>
 
                 <div v-else class="video-card desktop-video-card desktop-sidebar-card">
+                  <button
+                    type="button"
+                    class="desktop-sidebar-toggle"
+                    aria-label="收起视频侧栏"
+                    :aria-expanded="true"
+                    title="收起视频侧栏"
+                    @click="desktopSidebarCollapsed = true"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/>
+                    </svg>
+                  </button>
                   <div class="video-info desktop-video-info">
                     <div class="video-thumbnail-wrapper desktop-thumbnail-wrapper" :class="{ clickable: videoInfo.stream_url }" @click="openVideoModal" @keydown.enter="openVideoModal" tabindex="0" role="button">
                       <img v-if="videoInfo.thumbnail" :src="videoInfo.thumbnail" :alt="videoInfo.title || '视频缩略图'" class="video-thumbnail" />
@@ -1247,46 +1256,81 @@ function formatTime(timestamp) {
 }
 
 .desktop-sidebar-toggle {
-  width: 40px;
-  height: 40px;
-  align-self: flex-end;
+  position: absolute;
+  top: 1.125rem;
+  right: -17px;
+  z-index: 2;
+  width: 34px;
+  height: 46px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 999px;
+  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.22);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  transition: transform 0.15s ease, background 0.15s, color 0.15s, border-color 0.15s;
 }
 
 .desktop-sidebar-toggle:hover {
   background: var(--bg-card-hover);
   border-color: var(--border-hover);
   color: var(--text-primary);
+  transform: translateX(-2px);
 }
 
 .desktop-sidebar-toggle svg {
-  width: 18px;
-  height: 18px;
+  width: 17px;
+  height: 17px;
 }
 
 .desktop-sidebar-rail {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.75rem;
-  padding: 0.625rem;
+  gap: 0.875rem;
+  width: 96px;
+  min-height: 238px;
+  padding: 0.875rem 0.625rem;
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 16px;
   backdrop-filter: blur(12px);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.16);
+}
+
+.desktop-sidebar-rail-control {
+  width: 52px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.22);
+  border-radius: 12px;
+  color: #93C5FD;
+  cursor: pointer;
+  transition: transform 0.15s ease, background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.desktop-sidebar-rail-control:hover {
+  transform: translateX(2px);
+  background: rgba(59, 130, 246, 0.18);
+  border-color: rgba(59, 130, 246, 0.36);
+  color: #BFDBFE;
+}
+
+.desktop-sidebar-rail-control svg {
+  width: 18px;
+  height: 18px;
 }
 
 .desktop-sidebar-rail-thumb {
-  width: 48px;
-  height: 48px;
+  width: 58px;
+  height: 58px;
   padding: 0;
   display: inline-flex;
   align-items: center;
@@ -1294,9 +1338,16 @@ function formatTime(timestamp) {
   overflow: hidden;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 14px;
   color: var(--text-secondary);
   cursor: pointer;
+  transition: transform 0.15s ease, border-color 0.15s, filter 0.15s;
+}
+
+.desktop-sidebar-rail-thumb:hover {
+  border-color: var(--border-hover);
+  filter: brightness(1.08);
+  transform: translateY(-1px);
 }
 
 .desktop-sidebar-rail-thumb img {
@@ -1312,19 +1363,19 @@ function formatTime(timestamp) {
 
 .desktop-sidebar-rail-badge {
   display: inline-flex;
-  min-width: 44px;
+  min-width: 52px;
   justify-content: center;
-  padding: 0.25rem 0.375rem;
+  padding: 0.25rem 0.5rem;
   background: rgba(59, 130, 246, 0.15);
   border: 1px solid rgba(59, 130, 246, 0.25);
-  border-radius: 8px;
+  border-radius: 999px;
   color: #93C5FD;
   font-size: 0.75rem;
   font-weight: 800;
 }
 
 .desktop-sidebar-rail-action {
-  width: 44px;
+  width: 52px;
   height: 44px;
   display: inline-flex;
   align-items: center;
@@ -1332,15 +1383,17 @@ function formatTime(timestamp) {
   padding: 0;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
   color: var(--text-muted);
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition: transform 0.15s ease, background 0.15s, color 0.15s, border-color 0.15s;
 }
 
 .desktop-sidebar-rail-action:hover {
   background: var(--bg-card-hover);
+  border-color: var(--border-hover);
   color: var(--text-primary);
+  transform: translateY(-1px);
 }
 
 .desktop-sidebar-rail-action svg {
@@ -1349,13 +1402,15 @@ function formatTime(timestamp) {
 }
 
 .desktop-sidebar-card {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 1rem;
+  overflow: visible;
 }
 
 .desktop-ai-card {
-  padding: 1.5rem;
+  padding: 1.75rem;
 }
 
 .desktop-ai-card :deep(.summary-scroll) {

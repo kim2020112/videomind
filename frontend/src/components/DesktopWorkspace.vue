@@ -21,18 +21,19 @@ defineProps({
   margin: 0 auto;
   display: grid;
   grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
-  gap: 1.25rem;
+  gap: 1.5rem;
   align-items: start;
   transition: grid-template-columns 0.2s ease;
 }
 
 .desktop-workspace--collapsed {
-  grid-template-columns: 72px minmax(0, 1fr);
+  grid-template-columns: 96px minmax(0, 1fr);
 }
 
 .desktop-workspace__sidebar {
   position: sticky;
   top: 88px;
+  min-width: 0;
 }
 
 .desktop-workspace__main {
