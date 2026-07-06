@@ -2,7 +2,7 @@
 
 import asyncio
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 import re as _re
 from core.summarizer import clean_subtitle_text, _clean_danmaku_xml, extract_bilibili_subtitle, extract_bilibili_subtitle_by_cid, extract_subtitle_segments
 from core.cache import get_video_info_cache, save_video_info_cache, video_fingerprint
@@ -10,6 +10,8 @@ from config import WHISPER_MAX_DURATION
 from database import get_subtitle_from_db, save_subtitle_to_db
 
 from api.routes import extract_url, downloader
+from api.auth_routes import get_identity
+from core.auth import check_usage_limit
 from core.pipeline.subtitle import (
     _select_subtitle_lang, _download_subtitle_content,
     extract_bvid, _build_part_info, transcribe_and_correct,
@@ -35,6 +37,7 @@ def _build_response(text, lang, name, ext, is_auto, segments=None):
 
 @router.get("/api/subtitle/text")
 async def get_subtitle_text(
+    request: Request,
     url: str = Query(..., description="视频 URL"),
     lang: str = Query("", description="首选语言"),
 ):
@@ -125,8 +128,15 @@ async def get_subtitle_text(
                 except Exception as e:
                     sub_error = str(e)
 
-        # 3. 兜底：Whisper 转录
-        if info.duration and info.duration > WHISPER_MAX_DURATION:
+        # 3. 兜底：Whisper 转录（CPU 密集，需身份 + 次数校验，防匿名 DoS）
+        identity = get_identity(request)
+        allowed, used, limit = check_usage_limit(
+            identity.get("user_id"), identity.get("guest_id"), identity.get("guest_sig")
+        )
+        if not allowed:
+            raise HTTPException(status_code=429, detail=f"今日 AI 次数已用完或未登录（{used}/{limit}），无法使用语音识别")
+
+        if info.duration and WHISPER_MAX_DURATION > 0 and info.duration > WHISPER_MAX_DURATION:
             raise HTTPException(status_code=400, detail=f"视频时长 {int(info.duration)} 秒超过 {WHISPER_MAX_DURATION} 秒限制，不支持语音识别。请尝试有字幕的视频")
 
         corrected, raw_text = await transcribe_and_correct(

@@ -4,6 +4,9 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 from typing import Optional
 
+import time
+import threading
+
 from core.auth import (
     create_user, get_user_by_username, verify_password,
     create_session, get_user_by_session, delete_session,
@@ -14,6 +17,25 @@ from config import REGISTRATION_ENABLED, USER_DAILY_LIMIT, GUEST_DAILY_LIMIT
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 SESSION_COOKIE = "vm_session"
+
+# ── 简易内存 IP 限流（防 guest-sign 被刷新 device_id 绕过限额）──
+_GUEST_SIGN_WINDOW = 3600          # 窗口 1 小时
+_GUEST_SIGN_MAX = 20               # 每 IP 每小时最多签发次数
+_guest_sign_hits: dict[str, list[float]] = {}
+_guest_sign_lock = threading.Lock()
+
+
+def _check_guest_sign_rate(ip: str) -> bool:
+    """滑动窗口限流。返回 True 表示允许。"""
+    now = time.time()
+    with _guest_sign_lock:
+        hits = [t for t in _guest_sign_hits.get(ip, []) if now - t < _GUEST_SIGN_WINDOW]
+        if len(hits) >= _GUEST_SIGN_MAX:
+            _guest_sign_hits[ip] = hits
+            return False
+        hits.append(now)
+        _guest_sign_hits[ip] = hits
+        return True
 
 
 # ── 依赖：从 cookie 获取当前用户 ──
@@ -156,9 +178,13 @@ async def get_usage(request: Request):
 
 
 @router.post("/guest-sign")
-async def guest_sign(req: GuestSignRequest):
+async def guest_sign(req: GuestSignRequest, request: Request):
     """为游客 device_id 生成签名。"""
     if not req.device_id or len(req.device_id) < 8:
         raise HTTPException(400, "无效的 device_id")
+    # nginx 反代后 request.client.host 恒为 127.0.0.1，优先取 X-Real-IP
+    client_ip = request.headers.get("X-Real-IP") or (request.client.host if request.client else "unknown")
+    if not _check_guest_sign_rate(client_ip):
+        raise HTTPException(429, "签名请求过于频繁，请稍后再试")
     sig = sign_guest_id(req.device_id)
     return {"signature": sig}

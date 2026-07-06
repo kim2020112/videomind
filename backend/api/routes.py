@@ -108,6 +108,35 @@ def _get_cdn_referer(url: str) -> str | None:
     )
 
 
+def _validate_public_url(url: str) -> None:
+    """SSRF 防护：仅允许 http/https，且目标解析后不得为私网/环回/链路本地/保留地址。
+
+    校验失败抛 HTTPException(400)。防止把代理端点当作打内网、云元数据（169.254.169.254）
+    的跳板。DNS 解析后逐个 IP 校验，覆盖域名指向内网的情况。
+    """
+    import socket
+    import ipaddress
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="仅支持 http/https 链接")
+    host = parsed.hostname
+    if not host:
+        raise HTTPException(status_code=400, detail="无效的 URL")
+
+    try:
+        addr_infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        raise HTTPException(status_code=400, detail="无法解析目标域名")
+
+    for info in addr_infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            raise HTTPException(status_code=400, detail="拒绝访问内网地址")
+
+
 # 全局下载器实例
 downloader = VideoDownloader(output_dir=os.path.join(os.path.dirname(os.path.dirname(__file__)), "downloads"))
 
@@ -173,6 +202,7 @@ async def refresh_stream_url(url: str):
 @router.get("/api/video/stream")
 async def proxy_video_stream(url: str, request: Request, video_url: str = ""):
     """代理视频流请求，解决 Bilibili 等平台 CDN 的 Referer 限制。"""
+    _validate_public_url(url)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
@@ -227,6 +257,7 @@ async def proxy_thumbnail(url: str):
     if url.startswith("http://"):
         url = "https://" + url[7:]
 
+    _validate_public_url(url)
     referer = _get_cdn_referer(url)
 
     def _fetch():
