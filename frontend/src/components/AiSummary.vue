@@ -1601,8 +1601,8 @@ function downloadNotes() {
   background: var(--success);
 }
 @media (max-width: 768px) {
-  .progress-line { width: 18px; }
-  .step-label { font-size: 0.6rem; }
+  .progress-line { width: 22px; }
+  .step-label { font-size: 0.6875rem; }
 }
 
 /* 笔记 */
@@ -1670,9 +1670,9 @@ function downloadNotes() {
 .notes-empty p { margin: 0 0 0.75rem 0; }
 
 @media (max-width: 768px) {
-  /* 子 Tab 栏：缩小以放下 5 个 Tab */
-  .sub-tab-btn { padding: 0.5rem 0.5rem; font-size: 0.75rem; gap: 0.2rem; }
-  .sub-tab-icon { width: 12px; height: 12px; }
+  /* 子 Tab 栏：确保 44px 触摸目标 */
+  .sub-tab-btn { padding: 0.625rem 0.5rem; font-size: 0.75rem; gap: 0.2rem; min-height: 44px; }
+  .sub-tab-icon { width: 14px; height: 14px; }
   .sub-tab-bar { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.1) transparent; }
   .sub-tab-bar::-webkit-scrollbar { display: block; height: 3px; }
   .sub-tab-bar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
@@ -1690,15 +1690,24 @@ function downloadNotes() {
   .notes-content :deep(h3) { font-size: 0.9375rem; }
   .notes-content :deep(pre) { padding: 0.5rem 0.75rem; font-size: 0.75rem; }
 
-  /* 问答输入 */
+  /* 问答输入：确保 48px 高度 */
   .chat-input-row { gap: 0.375rem; }
-  .chat-input { font-size: 0.875rem; padding: 0.625rem 0.75rem; }
-  .chat-send-btn { padding: 0.625rem 1rem; font-size: 0.8125rem; }
+  .chat-input { font-size: 0.875rem; padding: 0.75rem; min-height: 48px; }
+  .chat-send-btn { padding: 0.75rem 1rem; font-size: 0.8125rem; min-height: 48px; }
 
   /* 闪卡 */
   .flashcard-answer { font-size: 0.8125rem; }
 
-  /* 分P选择器 */
-  .parts-nav-btn { padding: 0.375rem 0.625rem; font-size: 0.75rem; max-width: 150px; }
+  /* 分P选择器：确保 44px 触摸目标 */
+  .parts-nav-btn { padding: 0.5rem 0.625rem; font-size: 0.75rem; max-width: 150px; min-height: 44px; }
+
+  /* 缩放按钮 */
+  .zoom-btn { min-height: 44px; min-width: 44px; }
+
+  /* 重新生成按钮 */
+  .regenerate-btn { min-height: 44px; }
+
+  /* 笔记操作按钮 */
+  .notes-action-btn { min-height: 44px; padding: 0.5rem 0.75rem; }
 }
 </style>

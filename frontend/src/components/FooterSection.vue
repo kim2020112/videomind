@@ -116,6 +116,10 @@
   font-size: 0.875rem;
   color: var(--text-muted);
   transition: color 0.2s;
+  display: inline-block;
+  padding: 0.25rem 0;
+  min-height: 44px;
+  line-height: 44px;
 }
 
 .footer-link:hover {

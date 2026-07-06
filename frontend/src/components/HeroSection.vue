@@ -174,15 +174,12 @@ const emit = defineEmits(['update:url'])
 
   .hero-title {
     font-size: 1.5rem;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 
   .hero-subtitle {
-    font-size: 0.8125rem;
+    font-size: 0.875rem;
     margin-bottom: 1.25rem;
-    line-height: 1.5;
+    line-height: 1.6;
   }
 
   .hero-input-section {

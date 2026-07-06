@@ -1098,12 +1098,14 @@ function formatTime(timestamp) {
 .description-toggle {
   display: inline-block;
   margin-top: 0.375rem;
-  padding: 0;
+  padding: 0.25rem 0.5rem;
   background: none;
   border: none;
   color: var(--accent-blue);
   font-size: 0.75rem;
   cursor: pointer;
+  min-height: 44px;
+  line-height: 44px;
 }
 .description-toggle:hover {
   color: var(--accent-cyan);
@@ -1853,19 +1855,19 @@ function formatTime(timestamp) {
   .video-thumbnail-play { opacity: 1; }
   .video-title { font-size: 0.9375rem; }
   .video-meta-row { flex-wrap: wrap; gap: 0.375rem; }
-  .video-meta-item { font-size: 0.6875rem; }
+  .video-meta-item { font-size: 0.75rem; }
   .video-original-link { font-size: 0.75rem; }
 
   /* 下载区域 */
   .format-grid { grid-template-columns: 1fr; }
-  .format-button { padding: 0.625rem 0.75rem; }
+  .format-button { padding: 0.625rem 0.75rem; min-height: 44px; }
   .parts-section { font-size: 0.8125rem; }
   .part-row { padding: 0.5rem; }
   .part-title { font-size: 0.8125rem; }
 
   /* Tab 栏 */
   .tab-bar { gap: 0.125rem; }
-  .tab-button { padding: 0.5rem 0.625rem; font-size: 0.8125rem; gap: 0.25rem; }
+  .tab-button { padding: 0.5rem 0.625rem; font-size: 0.8125rem; gap: 0.25rem; min-height: 44px; }
   .tab-icon { width: 14px; height: 14px; }
 
   /* 历史 */

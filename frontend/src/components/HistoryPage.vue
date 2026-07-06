@@ -1196,5 +1196,9 @@ fetchHistoryPage()
   .search-controls { flex-wrap: wrap; }
   .hp-card-header { flex-direction: column; gap: 0.375rem; }
   .hp-card-footer { flex-direction: column; align-items: flex-start; gap: 0.5rem; }
+
+  /* 操作按钮确保 44px 触摸目标 */
+  .hp-action-btn { width: 44px; height: 44px; }
+  .tag-btn { min-height: 44px; padding: 0.5rem 0.75rem; }
 }
 </style>

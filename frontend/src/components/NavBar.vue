@@ -13,11 +13,22 @@ const emit = defineEmits(['toggle-history', 'go-home'])
 const { user, usage, isLoggedIn, isAdmin, displayName, logout } = useAuth()
 const showLogin = ref(false)
 const showSettings = ref(false)
+const showMobileMenu = ref(false)
 
 async function handleLogout() {
+  showMobileMenu.value = false
   await logout()
   emit('logout')
   emit('go-home')
+}
+
+function toggleMobileMenu() {
+  showMobileMenu.value = !showMobileMenu.value
+}
+
+function handleMobileAction(action) {
+  showMobileMenu.value = false
+  action()
 }
 </script>
 
@@ -70,7 +81,40 @@ async function handleLogout() {
         <template v-else>
           <button class="btn-login" @click="showLogin = true">登录</button>
         </template>
+
+        <!-- 手机端汉堡菜单按钮 -->
+        <button v-if="isLoggedIn" class="btn-hamburger" @click="toggleMobileMenu" :class="{ open: showMobileMenu }">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path v-if="!showMobileMenu" stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16"/>
+            <path v-else stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
       </div>
+
+      <!-- 手机端下拉菜单 -->
+      <Transition name="menu-slide">
+        <div v-if="showMobileMenu && isLoggedIn" class="mobile-menu">
+          <button v-if="isAdmin" class="mobile-menu-item" @click="handleMobileAction(() => showSettings = true)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+            </svg>
+            <span>模型配置</span>
+          </button>
+          <button class="mobile-menu-item" @click="handleMobileAction(() => $emit('toggle-history'))">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <span>学习历史</span>
+            <span v-if="activeTaskCount > 0" class="task-badge">{{ activeTaskCount }}</span>
+          </button>
+          <div class="mobile-menu-divider"></div>
+          <button class="mobile-menu-item mobile-menu-item--logout" @click="handleLogout">
+            <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 102 0V4a1 1 0 00-1-1zm10.293 9.293a1 1 0 001.414 1.414l3-3a1 1 0 000-1.414l-3-3a1 1 0 10-1.414 1.414L14.586 9H7a1 1 0 100 2h7.586l-1.293 1.293z" clip-rule="evenodd"/></svg>
+            <span>退出登录</span>
+          </button>
+        </div>
+      </Transition>
     </div>
   </nav>
 
@@ -273,11 +317,92 @@ async function handleLogout() {
   border-color: rgba(59, 130, 246, 0.5);
 }
 
+/* 手机端汉堡菜单按钮 */
+.btn-hamburger {
+  display: none;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+.btn-hamburger:hover {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+.btn-hamburger svg { width: 20px; height: 20px; }
+
+/* 手机端下拉菜单 */
+.mobile-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: rgba(15, 23, 42, 0.98);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border);
+  z-index: 99;
+  padding: 0.5rem;
+}
+
+.mobile-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.875rem 1rem;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 0.9375rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+  min-height: 48px;
+}
+.mobile-menu-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+}
+.mobile-menu-item svg { width: 18px; height: 18px; flex-shrink: 0; }
+.mobile-menu-item .task-badge { margin-left: auto; }
+
+.mobile-menu-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 0.25rem 0.5rem;
+}
+
+.mobile-menu-item--logout { color: #fca5a5; }
+.mobile-menu-item--logout:hover { background: rgba(239, 68, 68, 0.1); color: #fca5a5; }
+
+/* 下拉动画 */
+.menu-slide-enter-active, .menu-slide-leave-active {
+  transition: opacity 0.2s, transform 0.2s;
+}
+.menu-slide-enter-from, .menu-slide-leave-to {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
 @media (max-width: 768px) {
   .navbar-container {
     padding: 1rem;
+    position: relative;
   }
 
   .usage-badge { display: none; }
+  .btn-settings { display: none; }
+  .btn-history { display: none; }
+  .user-menu { display: none; }
+  .btn-hamburger { display: flex; }
 }
 </style>
