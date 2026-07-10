@@ -15,7 +15,7 @@ from core.pipeline.subtitle import try_get_bilibili_cc_subtitle, fetch_subtitle
 
 # 复用已有模块中的工具函数和实例
 from api.routes import extract_url, downloader
-from api.auth_routes import get_identity
+from api.security import ensure_public_http_url, require_identity
 from core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -27,7 +27,7 @@ router = APIRouter()
 @router.post("/api/summarize", response_model=SummaryResult)
 async def summarize_video(req: SummarizeRequest, request: Request):
     """AI 视频总结：提取字幕 -> DeepSeek 生成摘要/章节/思维导图。"""
-    identity = get_identity(request)
+    identity = require_identity(request)
     allowed, used, limit = check_usage_limit(
         identity.get("user_id"), identity.get("guest_id"), identity.get("guest_sig")
     )
@@ -36,10 +36,11 @@ async def summarize_video(req: SummarizeRequest, request: Request):
 
     try:
         url = extract_url(req.url)
+        ensure_public_http_url(url)
 
         # 视频信息缓存预检：已缓存的超长视频直接跳过
         cached_info = get_video_info_cache(url)
-        if cached_info and cached_info.get("duration", 0) > WHISPER_MAX_DURATION:
+        if WHISPER_MAX_DURATION > 0 and cached_info and cached_info.get("duration", 0) > WHISPER_MAX_DURATION:
             bilibili_sub = try_get_bilibili_cc_subtitle(url, cached_info)
             if bilibili_sub and bilibili_sub.get('has_subtitle'):
                 pass  # 有 B站 CC 字幕，跳过快速路径，走正常 AI 管线

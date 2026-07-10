@@ -1,5 +1,51 @@
 # 变更记录
 
+## [3.4.0] - 2026-07-10
+
+### 新增
+
+- **请求安全模块**（`backend/api/security.py`）：
+  - 从各路由文件提取的安全守卫统一为独立模块：`require_identity()`、`require_admin()`、`require_usage_allowed()`、`ensure_public_http_url()`、`require_websocket_identity()`
+  - 所有公开 API 端点（`/api/parse`、`/api/video/*`、`/api/subtitle/*`、`/api/history/*` 等）强制身份校验，匿名请求被拒绝
+  - SSRF 防护（DNS 解析后逐 IP 校验私网/环回/链路本地地址）覆盖所有接受 URL 参数的端点
+  - 游客签名安全检查：`GUEST_SECRET` 为默认值时拒绝签名，防止未配置密钥的环境绕过认证
+  - WebSocket 连接支持 query 参数或 header 传递游客身份
+
+- **前端组件拆分**（`frontend/src/components/`）：
+  - `DownloadTools.vue`：从 App.vue 提取的下载工具区域（格式选择、分P多选、字幕下载/翻译、下载进度），支持 mobile/sidebar 两种布局变体
+  - `VideoContextPanel.vue`：从 App.vue 提取的视频信息展示区（封面、标题、元数据、播放按钮），支持 collapsed 展开/收起
+  - `DownloadHistoryPanel.vue`：从 App.vue 提取的下载记录列表组件
+  - `resultFormatters.js`（`frontend/src/utils/`）：提取公共格式化工具函数（`formatBytes`、`formatViewCount`、`formatDuration`、`stripSizeFromLabel`、`subtitleDisplayName`、`translateLangs`）
+  - App.vue 大幅瘦身（约 -1900 行）
+
+- **AI 配置示例文件**（`backend/data/ai_config.example.json`）：
+  - 提供 AI 服务商/模型配置的 JSON 结构示例，方便新部署参考
+
+### 变更
+
+- **后端路由安全加固**（所有 `backend/api/` 路由文件）：
+  - `routes.py`：`/api/parse`、`/api/video/refresh`、`/api/video/stream`、`/api/subtitle`、`/api/subtitle/translate`、`/api/download`、`/ws/download/{task_id}` 均新增身份校验
+  - `stream_routes.py`：`/api/summarize/stream`、`/api/chat/stream`、`/api/qa/stream` 改用 `require_identity()`，活跃任务检查增加 user_id/guest_id 过滤
+  - `summary_routes.py`、`subtitle_text_routes.py`：改用 `require_identity()` + `ensure_public_http_url()`
+  - `knowledge_routes.py`：`/api/history`、`/api/history/*`、`/api/search` 改用 `require_identity()`；`/api/videos`、`/api/tags`、`/api/search` 改为 admin-only
+  - `task_routes.py`：`/api/tasks/{task_id}` 新增资源归属校验（`owns_resource()`），非 admin 用户只能查看自己的任务
+  - `admin_routes.py`：删除内部 `_require_admin()` 函数，改用共享的 `require_admin()`
+  - `ai_routes.py`：`/api/ingest`、`/api/rag/query/stream` 改为 admin-only + SSRF 防护
+
+- **DownloadTask 模型扩展**（`backend/core/models.py`）：
+  - 新增 `user_id`、`guest_id`、`source_url`、`created_at` 字段，支持任务归属追踪
+
+- **前端请求认证**（`frontend/src/composables/`）：
+  - `useDownloader.js`：所有 fetch 请求添加 `getAuthHeaders()` + `credentials: 'same-origin'`；WebSocket URL 携带游客签名参数；文件下载改为 fetch + blob 方式（替代 `window.open`），确保认证头正确传递
+  - `useSummary.js`：字幕文本请求添加认证头
+  - `useAuth.js`：游客签名 localStorage 中 `"undefined"`/`"null"` 字符串自动清理；`guest-sign` 响应校验增强
+  - `VideoPlayerModal.vue`：视频流代理和刷新请求携带游客签名
+
+- **依赖更新**（`backend/requirements.txt`）：
+  - 新增 `passlib[bcrypt]>=1.7.4`（密码哈希依赖，之前未显式声明）
+
+---
+
 ## [3.3.1] - 2026-06-01
 
 ### 修复

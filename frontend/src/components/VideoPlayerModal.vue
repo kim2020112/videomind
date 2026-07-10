@@ -1,5 +1,6 @@
 <script setup>
 import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { useAuth } from '../composables/useAuth.js'
 
 const props = defineProps({
   streamUrl: String,
@@ -14,12 +15,16 @@ const videoRef = ref(null)
 const currentUrl = ref('')
 const isRefreshing = ref(false)
 const loadError = ref(false)
+const { getAuthHeaders, guestId, guestSig } = useAuth()
 
 function toProxyUrl(rawUrl) {
   if (!rawUrl) return ''
   let proxy = `/api/video/stream?url=${encodeURIComponent(rawUrl)}`
   if (props.videoUrl) {
     proxy += `&video_url=${encodeURIComponent(props.videoUrl)}`
+  }
+  if (guestId.value && guestSig.value) {
+    proxy += `&guest_id=${encodeURIComponent(guestId.value)}&guest_sig=${encodeURIComponent(guestSig.value)}`
   }
   return proxy
 }
@@ -64,7 +69,11 @@ async function onVideoError() {
   isRefreshing.value = true
   loadError.value = false
   try {
-    const resp = await fetch(`/api/video/refresh?url=${encodeURIComponent(props.videoUrl)}`)
+    const params = new URLSearchParams({ url: props.videoUrl })
+    const resp = await fetch(`/api/video/refresh?${params}`, {
+      headers: getAuthHeaders(),
+      credentials: 'same-origin',
+    })
     const data = await resp.json()
     if (data.stream_url) {
       currentUrl.value = toProxyUrl(data.stream_url)

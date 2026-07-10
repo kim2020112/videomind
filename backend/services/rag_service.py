@@ -17,4 +17,5 @@ async def stream_query(question: str, video_id: Optional[int] = None, top_k: int
     if not results["documents"]:
         yield ("text", {"text": "知识库中没有找到相关内容，请先添加视频。"})
         return
-    yield from ai_client.stream_rag_answer(question, results["documents"])
+    for item in ai_client.stream_rag_answer(question, results["documents"]):
+        yield item

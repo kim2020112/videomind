@@ -1,0 +1,22 @@
+{
+  "providers": [
+    {
+      "id": "example-provider",
+      "name": "Example Provider",
+      "provider": "deepseek",
+      "api_key": "",
+      "base_url": "https://api.example.com/anthropic",
+      "models": [
+        {
+          "id": "example-model",
+          "name": "Example Model",
+          "model": "example-model"
+        }
+      ]
+    }
+  ],
+  "active": {
+    "provider_id": "example-provider",
+    "model_id": "example-model"
+  }
+}

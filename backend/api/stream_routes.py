@@ -36,7 +36,7 @@ from core.whisper import is_model_available, transcribe_video_async, estimate_tr
 from core.tag_extractor import detect_platform
 
 from api.routes import extract_url, downloader
-from api.auth_routes import get_identity
+from api.security import ensure_public_http_url, require_identity
 from core.auth import check_usage_limit, log_usage, add_user_history
 from core.cache import _url_hash
 
@@ -141,7 +141,8 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
     try:
         trace_id = uuid.uuid4().hex[:8]
         url = extract_url(req.url)
-        identity = get_identity(request)
+        ensure_public_http_url(url)
+        identity = require_identity(request)
 
         # ── 缓存检查 ──
         cached = get_cached(url)
@@ -187,7 +188,11 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
         fast_url_hash = _url_hash(url)
 
         # 检查是否已有活跃任务
-        existing_task = has_active_task(fast_url_hash)
+        existing_task = has_active_task(
+            fast_url_hash,
+            user_id=identity.get("user_id"),
+            guest_id=identity.get("guest_id"),
+        )
         if existing_task:
             dur = cached_info.get("duration", 0) if cached_info else 0
             def _already_running():
@@ -260,7 +265,11 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
 
         # 检查是否已有活跃任务（用 canonical_url 重新检查）
         if url_hash != fast_url_hash:
-            existing_task = has_active_task(url_hash)
+            existing_task = has_active_task(
+                url_hash,
+                user_id=identity.get("user_id"),
+                guest_id=identity.get("guest_id"),
+            )
             if existing_task:
                 def _already_running2():
                     yield PipelineEvent("background_started", {
@@ -655,7 +664,7 @@ async def chat_stream(req: ChatRequest, request: Request):
     if not req.subtitle_text or len(req.subtitle_text.strip()) < 10:
         raise HTTPException(status_code=400, detail="字幕内容为空，无法进行问答")
 
-    identity = get_identity(request)
+    identity = require_identity(request)
     allowed, used, limit = check_usage_limit(
         identity.get("user_id"), identity.get("guest_id"), identity.get("guest_sig")
     )
@@ -718,7 +727,7 @@ async def qa_stream(req: QaGenerationRequest, request: Request):
     if not req.subtitle_text or len(req.subtitle_text.strip()) < 10:
         raise HTTPException(status_code=400, detail="字幕内容为空，无法生成问答")
 
-    identity = get_identity(request)
+    identity = require_identity(request)
 
     # ── 缓存检查 ──
     if req.url and not req.force:

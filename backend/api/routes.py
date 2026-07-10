@@ -6,8 +6,10 @@ import uuid
 import os
 import re
 import asyncio
+import time
 from asyncio import Queue
 
+from api.security import ensure_public_http_url, owns_resource, require_identity, require_websocket_identity
 from core.pipeline.subtitle import _download_subtitle_content
 from core.logging_config import get_logger
 
@@ -109,32 +111,7 @@ def _get_cdn_referer(url: str) -> str | None:
 
 
 def _validate_public_url(url: str) -> None:
-    """SSRF 防护：仅允许 http/https，且目标解析后不得为私网/环回/链路本地/保留地址。
-
-    校验失败抛 HTTPException(400)。防止把代理端点当作打内网、云元数据（169.254.169.254）
-    的跳板。DNS 解析后逐个 IP 校验，覆盖域名指向内网的情况。
-    """
-    import socket
-    import ipaddress
-    from urllib.parse import urlparse
-
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise HTTPException(status_code=400, detail="仅支持 http/https 链接")
-    host = parsed.hostname
-    if not host:
-        raise HTTPException(status_code=400, detail="无效的 URL")
-
-    try:
-        addr_infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        raise HTTPException(status_code=400, detail="无法解析目标域名")
-
-    for info in addr_infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if (ip.is_private or ip.is_loopback or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
-            raise HTTPException(status_code=400, detail="拒绝访问内网地址")
+    ensure_public_http_url(url)
 
 
 # 全局下载器实例
@@ -150,10 +127,12 @@ async def health():
 
 
 @router.post("/api/parse", response_model=VideoInfo)
-async def parse_video(req: ParseRequest):
+async def parse_video(req: ParseRequest, request: Request):
     """解析视频链接，返回视频信息和可用格式列表。"""
     try:
+        require_identity(request)
         url = extract_url(req.url)
+        ensure_public_http_url(url)
         info = downloader.parse_info(url)
         save_video_info_cache(url, info)
         return info
@@ -162,12 +141,14 @@ async def parse_video(req: ParseRequest):
 
 
 @router.get("/api/video/refresh")
-async def refresh_stream_url(url: str):
+async def refresh_stream_url(url: str, request: Request):
     """刷新过期的视频直链，轻量级（仅提取 formats，不完整 parse）。"""
     try:
+        require_identity(request)
         import time as _time
         import yt_dlp
         url = extract_url(url)
+        ensure_public_http_url(url)
         ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True, 'noplaylist': True}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -202,6 +183,7 @@ async def refresh_stream_url(url: str):
 @router.get("/api/video/stream")
 async def proxy_video_stream(url: str, request: Request, video_url: str = ""):
     """代理视频流请求，解决 Bilibili 等平台 CDN 的 Referer 限制。"""
+    require_identity(request)
     _validate_public_url(url)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -345,10 +327,12 @@ def _batch_translate(texts: list[str], src: str, dest: str, batch_size: int = 20
 
 
 @router.get("/api/subtitle")
-async def download_subtitle(url: str, lang: str, auto: bool = False):
+async def download_subtitle(url: str, lang: str, request: Request, auto: bool = False):
     """下载字幕文件。"""
     try:
+        require_identity(request)
         url = extract_url(url)
+        ensure_public_http_url(url)
         content, ext = await asyncio.get_event_loop().run_in_executor(
             None, _download_subtitle_content, url, lang, auto
         )
@@ -363,13 +347,15 @@ async def download_subtitle(url: str, lang: str, auto: bool = False):
 
 
 @router.get("/api/subtitle/translate")
-async def translate_subtitle(url: str, lang: str, target: str, auto: bool = False):
+async def translate_subtitle(url: str, lang: str, target: str, request: Request, auto: bool = False):
     """下载并翻译字幕文件。
     优先使用 YouTube 原生翻译（yt-dlp 的 automatic_captions 中已有翻译条目），
     失败时降级到外部翻译服务。
     """
     try:
+        require_identity(request)
         url = extract_url(url)
+        ensure_public_http_url(url)
 
         # 优先尝试 YouTube 原生翻译：用 target-lang 格式直接下载翻译字幕
         # 例如 lang="en", target="zh-Hans" → 尝试下载 "zh-Hans-en"
@@ -434,14 +420,21 @@ async def translate_subtitle(url: str, lang: str, target: str, auto: bool = Fals
 
 
 @router.post("/api/download")
-async def start_download(req: DownloadRequest):
+async def start_download(req: DownloadRequest, request: Request):
     """创建下载任务，返回 WebSocket 连接地址。"""
+    identity = require_identity(request)
+    url = extract_url(req.url)
+    ensure_public_http_url(url)
     task_id = uuid.uuid4().hex[:12]
 
     task = DownloadTask(
         task_id=task_id,
         title="准备下载...",
         status="pending",
+        user_id=identity.get("user_id"),
+        guest_id=identity.get("guest_id"),
+        source_url=url,
+        created_at=time.time(),
     )
     tasks[task_id] = task
 
@@ -462,13 +455,25 @@ async def download_progress(websocket: WebSocket, task_id: str):
         return
 
     task = tasks[task_id]
+    try:
+        identity = require_websocket_identity(websocket)
+    except HTTPException as e:
+        await websocket.send_json({"status": "error", "error": e.detail})
+        await websocket.close()
+        return
+    if not owns_resource(identity, task.model_dump()):
+        await websocket.send_json({"status": "error", "error": "无权操作此任务"})
+        await websocket.close()
+        return
+
     progress_queue: Queue = Queue()
     downloader.register_progress_queue(task_id, progress_queue)
 
     try:
         # 接收下载指令
         data = await websocket.receive_json()
-        url = extract_url(data.get("url", ""))
+        url = task.source_url or extract_url(data.get("url", ""))
+        ensure_public_http_url(url)
         format_id = data.get("format_id", "best")
         concat_parts = data.get("concat_parts", False)
         selected_parts = data.get("selected_parts", None)
@@ -534,29 +539,42 @@ async def download_progress(websocket: WebSocket, task_id: str):
 
 
 @router.get("/api/files/{task_id}")
-async def get_downloaded_file(task_id: str):
+async def get_downloaded_file(task_id: str, request: Request):
     """获取已下载的视频文件。"""
+    identity = require_identity(request)
     task = tasks.get(task_id)
     if not task or not task.file_path:
         raise HTTPException(status_code=404, detail="文件不存在或任务未完成")
+    if not owns_resource(identity, task.model_dump()):
+        raise HTTPException(status_code=403, detail="无权下载此文件")
 
     file_path = task.file_path
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="文件已被删除")
+    root = os.path.abspath(downloader.output_dir)
+    real_path = os.path.abspath(file_path)
+    if not real_path.startswith(root + os.sep):
+        raise HTTPException(status_code=403, detail="非法文件路径")
 
-    file_name = os.path.basename(file_path)
+    file_name = os.path.basename(real_path)
     return FileResponse(
-        path=file_path,
+        path=real_path,
         filename=file_name,
         media_type="application/octet-stream",
     )
 
 
 @router.get("/api/downloads")
-async def list_downloads():
+async def list_downloads(request: Request):
+    identity = require_identity(request)
     completed = [
-        {"task_id": t.task_id, "title": t.title, "status": t.status, "file_path": t.file_path}
+        {
+            "task_id": t.task_id,
+            "title": t.title,
+            "status": t.status,
+            "created_at": t.created_at,
+        }
         for t in tasks.values()
-        if t.status in ("completed", "failed")
+        if t.status in ("completed", "failed") and owns_resource(identity, t.model_dump())
     ]
     return {"downloads": completed}

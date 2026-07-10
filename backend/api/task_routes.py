@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query, Request
 from typing import Optional
 from core.task_queue import task_queue
+from api.security import owns_resource, require_identity
 
 router = APIRouter(prefix="/api", tags=["tasks"])
 
@@ -9,8 +10,7 @@ router = APIRouter(prefix="/api", tags=["tasks"])
 async def get_active_tasks(request: Request):
     """返回当前用户所有活跃的后台转录任务。"""
     from core.task_manager import get_active_tasks as _get_tasks
-    from api.auth_routes import get_identity
-    identity = get_identity(request)
+    identity = require_identity(request)
     tasks = _get_tasks(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"))
     return {"tasks": tasks}
 
@@ -19,8 +19,7 @@ async def get_active_tasks(request: Request):
 async def cancel_task(task_id: str, request: Request):
     """取消/删除一个后台任务（真正停止正在运行的 asyncio Task）。"""
     from core.task_manager import get_task, remove_task, _update_db_status
-    from api.auth_routes import get_identity
-    identity = get_identity(request)
+    identity = require_identity(request)
     task = get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -36,16 +35,21 @@ async def cancel_task(task_id: str, request: Request):
 
 
 @router.get("/tasks/{task_id}")
-async def get_task_status(task_id: str):
+async def get_task_status(task_id: str, request: Request):
+    identity = require_identity(request)
     # 先查内存任务管理器
     from core.task_manager import get_task
     task = get_task(task_id)
     if task:
+        if not owns_resource(identity, task):
+            raise HTTPException(status_code=403, detail="无权查看此任务")
         return task
     # 回退到旧的 task_queue
     task = task_queue.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+    if identity.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="无权查看此任务")
     return {
         "id": task.id,
         "type": task.task_type.value,

@@ -10,7 +10,7 @@ from config import WHISPER_MAX_DURATION
 from database import get_subtitle_from_db, save_subtitle_to_db
 
 from api.routes import extract_url, downloader
-from api.auth_routes import get_identity
+from api.security import ensure_public_http_url, require_identity
 from core.auth import check_usage_limit
 from core.pipeline.subtitle import (
     _select_subtitle_lang, _download_subtitle_content,
@@ -44,7 +44,9 @@ async def get_subtitle_text(
     """返回清洗后的字幕纯文本，用于前端展示和问答上下文。
     优先 DB 缓存 → Bilibili CC 字幕 → yt-dlp 原生字幕 → Whisper 转录。"""
     try:
+        identity = require_identity(request)
         url = extract_url(url)
+        ensure_public_http_url(url)
 
         # 0. DB 缓存检查
         cached_sub = get_subtitle_from_db(url)
@@ -96,7 +98,7 @@ async def get_subtitle_text(
 
         # 2. 降级：通过 yt-dlp 获取字幕
         cached_info = get_video_info_cache(url)
-        if cached_info and cached_info.get("duration", 0) > WHISPER_MAX_DURATION:
+        if WHISPER_MAX_DURATION > 0 and cached_info and cached_info.get("duration", 0) > WHISPER_MAX_DURATION:
             raise HTTPException(status_code=400, detail=f"视频时长 {int(cached_info['duration'])} 秒超过 {WHISPER_MAX_DURATION} 秒限制，不支持语音识别。请尝试有字幕的视频")
 
         info = downloader.parse_info(url)
@@ -129,7 +131,6 @@ async def get_subtitle_text(
                     sub_error = str(e)
 
         # 3. 兜底：Whisper 转录（CPU 密集，需身份 + 次数校验，防匿名 DoS）
-        identity = get_identity(request)
         allowed, used, limit = check_usage_limit(
             identity.get("user_id"), identity.get("guest_id"), identity.get("guest_sig")
         )

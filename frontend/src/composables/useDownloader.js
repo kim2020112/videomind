@@ -1,8 +1,10 @@
-import { ref, reactive, onUnmounted } from 'vue'
+import { ref, onUnmounted } from 'vue'
+import { useAuth } from './useAuth.js'
 
 const API_BASE = '/api'
 
 export function useDownloader() {
+  const { getAuthHeaders, guestId, guestSig } = useAuth()
   const videoInfo = ref(null)
   const formats = ref([])
   const selectedFormat = ref('best')
@@ -23,7 +25,7 @@ export function useDownloader() {
     try {
       const res = await fetch(`${API_BASE}/parse`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ url }),
       })
 
@@ -61,10 +63,14 @@ export function useDownloader() {
     // 先创建任务
     fetch(`${API_BASE}/download`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ url, format_id: selectedFormat.value }),
     })
-      .then((res) => res.json())
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(data.detail || '创建下载任务失败')
+        return data
+      })
       .then((data) => {
         taskId.value = data.task_id
         connectWebSocket(data.task_id, url, {})
@@ -78,10 +84,14 @@ export function useDownloader() {
     progress.value = { status: 'pending', percent: 0 }
     fetch(`${API_BASE}/download`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ url, format_id: selectedFormat.value }),
     })
-      .then((res) => res.json())
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(data.detail || '创建下载任务失败')
+        return data
+      })
       .then((data) => {
         taskId.value = data.task_id
         connectWebSocket(data.task_id, url, { concat_parts: true, selected_parts: selectedParts })
@@ -96,10 +106,14 @@ export function useDownloader() {
 
     fetch(`${API_BASE}/download`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ url, format_id: selectedFormat.value }),
     })
-      .then((res) => res.json())
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(data.detail || '创建下载任务失败')
+        return data
+      })
       .then((data) => {
         taskId.value = data.task_id
         connectWebSocket(data.task_id, url, { concat_parts: true })
@@ -116,7 +130,13 @@ export function useDownloader() {
     }
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${protocol}//${window.location.host}/ws/download/${tid}`
+    const params = new URLSearchParams()
+    if (guestId.value && guestSig.value) {
+      params.set('guest_id', guestId.value)
+      params.set('guest_sig', guestSig.value)
+    }
+    const query = params.toString() ? `?${params}` : ''
+    const wsUrl = `${protocol}//${window.location.host}/ws/download/${tid}${query}`
 
     ws = new WebSocket(wsUrl)
 
@@ -162,18 +182,49 @@ export function useDownloader() {
     }
   }
 
-  function downloadFile(tid) {
-    window.open(`${API_BASE}/files/${tid}`, '_blank')
+  async function saveBlobResponse(res, fallbackName) {
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.detail || '下载失败')
+    }
+    const blob = await res.blob()
+    const disposition = res.headers.get('Content-Disposition') || ''
+    const match = disposition.match(/filename="?([^"]+)"?/i)
+    const filename = match ? decodeURIComponent(match[1]) : fallbackName
+    const objectUrl = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = objectUrl
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(objectUrl)
   }
 
-  function downloadSubtitle(url, lang, isAuto) {
+  async function downloadFile(tid) {
+    const res = await fetch(`${API_BASE}/files/${tid}`, {
+      headers: getAuthHeaders(),
+      credentials: 'same-origin',
+    })
+    await saveBlobResponse(res, 'download')
+  }
+
+  async function downloadSubtitle(url, lang, isAuto) {
     const params = new URLSearchParams({ url, lang, auto: isAuto })
-    window.open(`${API_BASE}/subtitle?${params}`, '_blank')
+    const res = await fetch(`${API_BASE}/subtitle?${params}`, {
+      headers: getAuthHeaders(),
+      credentials: 'same-origin',
+    })
+    await saveBlobResponse(res, `subtitle.${lang}.txt`)
   }
 
-  function translateSubtitle(url, lang, isAuto, targetLang) {
+  async function translateSubtitle(url, lang, isAuto, targetLang) {
     const params = new URLSearchParams({ url, lang, auto: isAuto, target: targetLang })
-    window.open(`${API_BASE}/subtitle/translate?${params}`, '_blank')
+    const res = await fetch(`${API_BASE}/subtitle/translate?${params}`, {
+      headers: getAuthHeaders(),
+      credentials: 'same-origin',
+    })
+    await saveBlobResponse(res, `subtitle.${lang}.${targetLang}.txt`)
   }
 
   function reset() {

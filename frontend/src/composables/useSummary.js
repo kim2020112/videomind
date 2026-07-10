@@ -36,7 +36,10 @@ export function useSummary() {
     try {
       const params = new URLSearchParams({ url })
       if (lang) params.set('lang', lang)
-      const res = await fetch(`${API_BASE}/subtitle/text?${params}`)
+      const res = await fetch(`${API_BASE}/subtitle/text?${params}`, {
+        headers: getAuthHeaders(),
+        credentials: 'same-origin',
+      })
       if (!res.ok) {
         const err = await res.json()
         throw new Error(err.detail || '字幕加载失败')

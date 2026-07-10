@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from passlib.hash import bcrypt
 
 from config import (
-    ADMIN_USERNAME, ADMIN_PASSWORD, GUEST_SECRET,
+    ADMIN_USERNAME, ADMIN_PASSWORD, DEFAULT_GUEST_SECRET, GUEST_SECRET,
     GUEST_DAILY_LIMIT, USER_DAILY_LIMIT,
 )
 from database import get_db
@@ -108,6 +108,8 @@ def ensure_admin():
 # ── 游客签名 ──
 
 def sign_guest_id(device_id: str) -> str:
+    if not GUEST_SECRET or GUEST_SECRET == DEFAULT_GUEST_SECRET:
+        raise ValueError("游客签名未安全配置，请设置 GUEST_SECRET")
     return hmac.new(
         GUEST_SECRET.encode(), device_id.encode(), hashlib.sha256
     ).hexdigest()[:16]
@@ -116,7 +118,10 @@ def sign_guest_id(device_id: str) -> str:
 def verify_guest_id(device_id: str, signature: str) -> bool:
     if not device_id or not signature:
         return False
-    return hmac.compare_digest(sign_guest_id(device_id), signature)
+    try:
+        return hmac.compare_digest(sign_guest_id(device_id), signature)
+    except ValueError:
+        return False
 
 
 # ── 使用次数（统一入口）──

@@ -98,11 +98,17 @@ def remove_task(task_id: str):
         at.cancel()
 
 
-def has_active_task(url_hash: str) -> str | None:
+def has_active_task(url_hash: str, user_id: int = None, guest_id: str = None) -> str | None:
     """检查是否有针对该 url_hash 的活跃任务，返回 task_id 或 None。"""
     now = time.time()
     for task in _tasks.values():
         if task["url_hash"] == url_hash and task["status"] == "running":
+            if user_id and task.get("user_id") != user_id:
+                continue
+            if guest_id and task.get("guest_id") != guest_id:
+                continue
+            if not user_id and not guest_id:
+                continue
             if now - task["started_at"] > _TASK_TIMEOUT:
                 task["status"] = "failed"
                 task["error"] = "任务超时（30分钟）"

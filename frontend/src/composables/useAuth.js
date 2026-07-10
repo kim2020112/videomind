@@ -39,6 +39,10 @@ export function useAuth() {
   async function ensureGuestId() {
     let id = localStorage.getItem('vm_guest_id')
     let sig = localStorage.getItem('vm_guest_sig')
+    if (sig === 'undefined' || sig === 'null') {
+      localStorage.removeItem('vm_guest_sig')
+      sig = ''
+    }
     if (id && sig) {
       guestId.value = id
       guestSig.value = sig
@@ -52,8 +56,14 @@ export function useAuth() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ device_id: id }),
       })
+      if (!resp.ok) {
+        throw new Error('guest-sign failed')
+      }
       const data = await resp.json()
       sig = data.signature
+      if (!sig) {
+        throw new Error('guest-sign missing signature')
+      }
       localStorage.setItem('vm_guest_id', id)
       localStorage.setItem('vm_guest_sig', sig)
       guestId.value = id

@@ -1,10 +1,12 @@
 """AI 相关路由 — 入库、RAG 问答。"""
 
 import asyncio
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
+
+from api.security import ensure_public_http_url, require_admin
 
 router = APIRouter(prefix="/api", tags=["ai"])
 
@@ -19,7 +21,9 @@ class RAGQueryRequest(BaseModel):
 
 
 @router.post("/ingest")
-async def ingest(req: IngestRequest):
+async def ingest(req: IngestRequest, request: Request):
+    require_admin(request)
+    ensure_public_http_url(req.url)
     from services.ingest_service import ingest_video
     from core.task_queue import task_queue, TaskType, Task
     import uuid
@@ -45,13 +49,12 @@ async def ingest(req: IngestRequest):
 
 
 @router.post("/rag/query/stream")
-async def rag_query_stream(req: RAGQueryRequest):
+async def rag_query_stream(req: RAGQueryRequest, request: Request):
+    require_admin(request)
     from services import rag_service
 
     async def generate():
-        async for event_type, data in _wrap_sync_gen(
-            rag_service.stream_query, req.question, req.video_id
-        ):
+        async for event_type, data in rag_service.stream_query(req.question, req.video_id):
             if event_type == "text":
                 yield f"data: {data['text']}\n\n"
             elif event_type == "error":
@@ -59,8 +62,3 @@ async def rag_query_stream(req: RAGQueryRequest):
         yield "event: done\ndata: \n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
-
-
-async def _wrap_sync_gen(fn, *args):
-    for item in fn(*args):
-        yield item

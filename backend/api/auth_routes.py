@@ -12,7 +12,13 @@ from core.auth import (
     create_session, get_user_by_session, delete_session,
     sign_guest_id, get_today_usage, get_user_by_id,
 )
-from config import REGISTRATION_ENABLED, USER_DAILY_LIMIT, GUEST_DAILY_LIMIT
+from config import (
+    DEFAULT_GUEST_SECRET,
+    GUEST_SECRET,
+    REGISTRATION_ENABLED,
+    USER_DAILY_LIMIT,
+    GUEST_DAILY_LIMIT,
+)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -180,6 +186,8 @@ async def get_usage(request: Request):
 @router.post("/guest-sign")
 async def guest_sign(req: GuestSignRequest, request: Request):
     """为游客 device_id 生成签名。"""
+    if not GUEST_SECRET or GUEST_SECRET == DEFAULT_GUEST_SECRET:
+        raise HTTPException(503, "游客模式未安全配置，请设置 GUEST_SECRET 或登录后使用")
     if not req.device_id or len(req.device_id) < 8:
         raise HTTPException(400, "无效的 device_id")
     # nginx 反代后 request.client.host 恒为 127.0.0.1，优先取 X-Real-IP

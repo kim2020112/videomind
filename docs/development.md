@@ -131,6 +131,7 @@ mkdir -p backend/data/whisper_models/faster-whisper-small
 - 修改 `backend/core/cache.py` 来调整缓存策略或表结构（ai_cache / whisper_cache / video_info_cache / user_history）
 - 修改 `backend/core/auth.py` 来调整用户认证、Session 管理、使用次数统计逻辑
 - 修改 `backend/api/auth_routes.py` 来调整认证路由（注册/登录/退出/me/usage）
+- 修改 `backend/api/security.py` 来调整请求安全守卫（身份校验、SSRF 防护、管理员检查）
 - 修改 `backend/api/routes.py` 来增删视频下载相关 API 端点
 - 修改 `backend/api/summary_routes.py` 来调整 AI 总结路由逻辑
 - 修改 `backend/api/stream_routes.py` 来调整 SSE 流式端点逻辑
@@ -288,12 +289,14 @@ videomind/
 │   ├── api/
 │   │   ├── __init__.py
 │   │   ├── routes.py                # REST + WebSocket 路由（含 bilibili.com URL 规范化）
+│   │   ├── security.py              # 请求安全守卫（身份校验、SSRF 防护、管理员检查、WebSocket 认证）
 │   │   ├── summary_routes.py        # AI 总结路由（/api/summarize，含无字幕降级）
 │   │   ├── stream_routes.py         # SSE 流式端点（/api/summarize/stream + /api/chat/stream）
 │   │   ├── subtitle_text_routes.py  # 字幕文本提取端点（/api/subtitle/text）
 │   │   ├── knowledge_routes.py      # 知识管理端点（/api/history、/api/search、/api/tags）
 │   │   ├── auth_routes.py           # 认证路由（/api/auth/*）
-│   │   └── task_routes.py           # 异步任务路由
+│   │   ├── ai_routes.py             # AI 入库/RAG 路由（/api/ingest、/api/rag/query/stream，admin-only）
+│   │   └── task_routes.py           # 异步任务路由（含资源归属校验）
 │   └── downloads/              # 视频下载输出目录（自动创建）
 ├── frontend/                   # Vue 3 前端
 │   ├── vite.config.js          # Vite 配置（插件、代理）
@@ -308,17 +311,26 @@ videomind/
 │       │   ├── LoginModal.vue      # 登录注册弹窗（深色主题，登录/注册切换）
 │       │   ├── HeroSection.vue     # Hero 区域（含输入框和解析按钮）
 │       │   ├── AiSummary.vue       # AI 总结（流式摘要+章节大纲+思维导图+AI 问答，Markdown 渲染，含 CJK 宽度修正）
-│       │   ├── FeaturesSection.vue # 特性展示（4 卡片一行）
+│       │   ├── VideoContextPanel.vue # 视频信息展示区（封面/标题/元数据/播放，sidebar 折叠模式）
+│       │   ├── DownloadTools.vue   # 下载工具区（格式/分P/字幕/进度，mobile/sidebar 双布局）
+│       │   ├── DownloadHistoryPanel.vue # 下载记录列表组件
+│       │   ├── VideoPlayerModal.vue # 视频播放弹窗（HTML5 原生播放器，stream_url 过期自动刷新）
+│       │   ├── FeaturesSection.vue # 特性展示（6 卡片 3 列）
+│       │   ├── FooterSection.vue   # 页脚
+│       │   ├── HistoryPage.vue     # 学习历史页（搜索+标签+收藏+删除+多P折叠+语义搜索+统计）
+│       │   ├── AdminSettings.vue   # AI 模型配置弹窗（管理员专用）
 │       │   ├── UrlInput.vue        # 备用（当前未使用）
 │       │   ├── VideoInfo.vue       # 备用（当前未使用）
 │       │   ├── FormatSelector.vue  # 备用（当前未使用）
 │       │   ├── DownloadProgress.vue # 备用（当前未使用）
 │       │   └── DownloadHistory.vue  # 备用（当前未使用）
-│       └── composables/
-│           ├── useAuth.js      # 用户认证状态管理（登录/注册/退出/游客身份/用量查询）
-│           ├── useDownloader.js # 下载 API/WebSocket 对接（核心状态管理）
-│           ├── useSummary.js    # AI 总结状态管理（SSE 流式接收、Markdown 渲染、字幕文本获取）
-│           └── useChat.js       # AI 问答状态管理（流式对话、历史记录）
+│       ├── composables/
+│       │   ├── useAuth.js      # 用户认证状态管理（登录/注册/退出/游客身份/用量查询）
+│       │   ├── useDownloader.js # 下载 API/WebSocket 对接（核心状态管理，含认证头和 blob 下载）
+│       │   ├── useSummary.js    # AI 总结状态管理（SSE 流式接收、Markdown 渲染、字幕文本获取）
+│       │   └── useChat.js       # AI 问答状态管理（流式对话、历史记录）
+│       └── utils/
+│           └── resultFormatters.js # 公共格式化工具（formatBytes/formatViewCount/formatDuration 等）
 ├── docs/                       # 项目文档
 ├── start.bat                   # Windows 一键启动脚本
 └── README.md

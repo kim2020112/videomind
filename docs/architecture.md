@@ -338,7 +338,7 @@ data: {"type": "done", "data": {}}
 - url, format_id, concat_parts（是否合并分P）, selected_parts（选中的分P索引列表）
 
 **DownloadTask**：下载任务
-- task_id, url, format_id, status, ws_url, file_path, title, created_at
+- task_id, url, format_id, status, ws_url, file_path, title, created_at, user_id, guest_id, source_url
 
 **ProgressData**：进度数据
 - status, percent, speed, eta, downloaded, total, file_path, error
@@ -390,17 +390,13 @@ App.vue（~1900 行，视图路由：home / history）
 ├── results section (内联)     # 解析结果区域（仅在有结果或错误时显示）
 │   ├── error-card             # 错误提示（红色半透明背景）
 │   ├── video-card             # 视频信息卡片
-│   │   ├── video-info         # 封面图（含播放图标叠加层+时长角标）+ 标题 + 元数据标签行 + 原视频链接
+│   │   ├── VideoContextPanel.vue  # 视频信息（封面+标题+元数据+播放，sidebar 折叠模式）
 │   │   ├── tab-bar            # 标签栏（下载 / AI 总结）
 │   │   ├── [下载标签页]
-│   │   │   ├── parts-section      # 分P选择器（B站多P视频，checkbox+序号+标题+时长）
-│   │   │   ├── format-section     # 格式选择（2列等宽网格，视频/音频合并展示）
-│   │   │   ├── subtitle-section   # 字幕区（手动/自动分组，下载+翻译按钮）
-│   │   │   ├── download-button    # 下载按钮（蓝青渐变，全宽）
-│   │   │   └── progress-card      # 下载进度（shimmer动画，状态图标+边框变色）
+│   │   │   └── DownloadTools.vue  # 下载工具（格式/分P/字幕/进度，mobile/sidebar 双布局）
 │   │   └── [AI 总结标签页]
 │   │       └── AiSummary.vue      # AI 总结组件（内含：分P选择器 + 字幕加载状态 + 流式摘要 + 章节大纲 + 思维导图 + 学习笔记 + AI 问答，Markdown 渲染，移动端 Tab/内容区自适应）
-│   └── history-card           # 下载记录（状态图标+标题+时间戳+保存按钮）
+│   └── DownloadHistoryPanel.vue # 下载记录列表（状态图标+标题+时间戳+保存按钮）
 ├── FeaturesSection.vue        # 特性展示区（6 个卡片，3 列排列，含 2 个 Pro 卡片）
 └── FooterSection.vue          # 页脚（品牌 + 链接 + 平台列表 + 版权）
 ```
@@ -454,6 +450,9 @@ App.vue（~1900 行，视图路由：home / history）
 | 数据库连接 | database.get_db() 上下文管理器 | 统一 WAL 模式、事务管理、自动 rollback；auth.py 等模块不再手动管理连接 |
 | 用量查询 | 独立 /api/auth/usage 端点 | AI 调用后只需刷新用量数字，无需拉取完整用户信息；减少网络开销 |
 | AI 模型运行时配置 | 服务商分组 + JSON 持久化 | 一个服务商下多个模型共享 API Key；热切换无需重启；管理员专用前端 UI；fallback 到 .env 默认值 |
+| 请求安全守卫 | api/security.py 统一模块 | SSRF 防护 + 身份校验 + 管理员检查 + WebSocket 认证集中管理，路由文件只调用一行守卫函数 |
+| 前端组件拆分 | DownloadTools/VideoContextPanel/DownloadHistoryPanel | App.vue 从 ~1900 行精简；下载工具区支持 mobile/sidebar 双布局；公共工具函数提取到 utils/resultFormatters.js |
+| 文件下载认证 | fetch + blob + 认证头 | 替代 window.open，确保认证头正确传递；前端 saveBlobResponse() 统一处理 blob→下载链接 |
 
 ## 7. 平台兼容层
 
@@ -577,13 +576,15 @@ videomind/
 │   │   └── subtitle_correction/v1.txt
 │   ├── api/
 │   │   ├── routes.py                # REST + WebSocket 路由（含 bilibili.com URL 规范化）
+│   │   ├── security.py              # 请求安全守卫（身份校验、SSRF 防护、管理员检查、WebSocket 认证）
 │   │   ├── summary_routes.py        # AI 总结路由（/api/summarize，含无字幕降级+Whisper）
 │   │   ├── stream_routes.py         # SSE 流式端点（/api/summarize/stream + /api/chat/stream，含视频缓存预检）
 │   │   ├── subtitle_text_routes.py  # 字幕文本提取端点（/api/subtitle/text，含Whisper兜底）
 │   │   ├── knowledge_routes.py      # 知识管理端点（/api/history、/api/search、/api/tags，含收藏/删除/统计）
 │   │   ├── auth_routes.py           # 认证路由（/api/auth/*，注册/登录/退出/me/usage/guest-sign）
 │   │   ├── admin_routes.py          # 管理员路由（/api/admin/*，AI 服务商/模型配置 CRUD、切换、测试）
-│   │   └── task_routes.py           # 异步任务路由
+│   │   ├── ai_routes.py             # AI 入库/RAG 路由（/api/ingest、/api/rag/query/stream，admin-only）
+│   │   └── task_routes.py           # 异步任务路由（含资源归属校验）
 │   ├── database.py                  # 数据库初始化 + get_db() 上下文管理器（WAL/事务/rollback）
 │   ├── config.py                    # 配置管理（环境变量加载）
 │   ├── core/
@@ -608,6 +609,9 @@ videomind/
 │   │   │   ├── HeroSection.vue     # Hero 区域（深色背景 + 光晕 + 输入框 + 平台标签流）
 │   │   │   ├── FeaturesSection.vue # 特性展示（6 卡片 3 列，含 Pro 卡片）
 │   │   │   ├── FooterSection.vue   # 页脚（品牌 + 链接 + 平台列表 + 版权）
+│   │   │   ├── VideoContextPanel.vue # 视频信息展示区（封面/标题/元数据/播放，支持 sidebar 折叠）
+│   │   │   ├── DownloadTools.vue   # 下载工具区（格式/分P/字幕/进度，mobile/sidebar 双布局）
+│   │   │   └── DownloadHistoryPanel.vue # 下载记录列表组件
 │   │   │   ├── UrlInput.vue        # 备用（当前未使用）
 │   │   │   ├── VideoInfo.vue       # 备用（当前未使用）
 │   │   │   ├── FormatSelector.vue  # 备用（当前未使用）
@@ -615,9 +619,11 @@ videomind/
 │   │   │   └── DownloadHistory.vue  # 备用（当前未使用）
 │   │   └── composables/
 │   │       ├── useAuth.js          # 用户认证状态管理（登录/注册/退出/游客身份/用量查询）
-│   │       ├── useDownloader.js    # 下载 API/WebSocket 对接（核心状态管理）
+│   │       ├── useDownloader.js    # 下载 API/WebSocket 对接（核心状态管理，含认证头和 blob 下载）
 │   │       ├── useSummary.js       # AI 总结状态管理（SSE 流式接收、Markdown 渲染、字幕文本获取）
 │   │       └── useChat.js          # AI 问答状态管理（流式对话、历史记录）
+│   │   └── utils/
+│   │       └── resultFormatters.js # 公共格式化工具（formatBytes/formatViewCount/formatDuration/stripSizeFromLabel/subtitleDisplayName/translateLangs）
 │   ├── vite.config.js          # Vite + Tailwind + 代理
 │   └── index.html
 ├── docs/                       # 项目文档

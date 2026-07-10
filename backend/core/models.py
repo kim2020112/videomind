@@ -92,6 +92,10 @@ class DownloadTask(BaseModel):
     title: str
     status: str = "pending"  # pending, downloading, processing, completed, failed
     progress: float = 0.0
+    user_id: Optional[int] = None
+    guest_id: Optional[str] = None
+    source_url: Optional[str] = None
+    created_at: Optional[float] = None
     speed: Optional[str] = None
     eta: Optional[int] = None
     file_path: Optional[str] = None

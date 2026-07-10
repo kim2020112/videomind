@@ -4,18 +4,20 @@ from typing import Optional
 from database import get_db
 from core.cache import list_history_enhanced, toggle_favorite, get_learning_stats, get_all_tags, delete_cache
 from core.vectorstore import query_chunks
-from api.auth_routes import get_identity
+from api.security import require_admin, require_identity
 
 router = APIRouter(prefix="/api", tags=["knowledge"])
 
 
 @router.get("/videos")
 async def list_videos(
+    request: Request,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     status: Optional[str] = None,
     platform: Optional[str] = None,
 ):
+    require_admin(request)
     offset = (page - 1) * page_size
     with get_db() as conn:
         conditions = []
@@ -43,7 +45,8 @@ async def list_videos(
 
 
 @router.get("/videos/{video_id}")
-async def get_video(video_id: int):
+async def get_video(video_id: int, request: Request):
+    require_admin(request)
     with get_db() as conn:
         video = conn.execute(
             "SELECT * FROM videos WHERE id = ?", (video_id,)
@@ -67,7 +70,8 @@ async def get_video(video_id: int):
 
 
 @router.delete("/videos/{video_id}")
-async def delete_video(video_id: int):
+async def delete_video(video_id: int, request: Request):
+    require_admin(request)
     with get_db() as conn:
         video = conn.execute(
             "SELECT id FROM videos WHERE id = ?", (video_id,)
@@ -82,7 +86,8 @@ async def delete_video(video_id: int):
 
 
 @router.get("/tags")
-async def list_tags():
+async def list_tags(request: Request):
+    require_admin(request)
     with get_db() as conn:
         rows = conn.execute("SELECT * FROM tags ORDER BY name").fetchall()
     return [dict(r) for r in rows]
@@ -101,7 +106,7 @@ async def list_history(
     offset: int = Query(0, ge=0),
 ):
     """学习历史列表：支持搜索、标签过滤、平台过滤。按用户隔离。"""
-    identity = get_identity(request)
+    identity = require_identity(request)
     return list_history_enhanced(
         q=q, tag=tag, platform=platform, sort=sort, limit=limit, offset=offset,
         user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
@@ -112,7 +117,7 @@ async def list_history(
 @router.post("/history/{url_hash}/favorite")
 async def toggle_favorite_endpoint(url_hash: str, request: Request):
     """切换收藏状态。按用户隔离。"""
-    identity = get_identity(request)
+    identity = require_identity(request)
     new_state = toggle_favorite(url_hash, user_id=identity.get("user_id"), guest_id=identity.get("guest_id"))
     return {"is_favorite": new_state}
 
@@ -126,7 +131,7 @@ async def batch_delete_history(req: BatchDeleteRequest, request: Request):
     """批量删除学习历史记录。Admin 全局删除，普通用户按用户隔离。"""
     if not req.url_hashes:
         return {"ok": True, "deleted": 0}
-    identity = get_identity(request)
+    identity = require_identity(request)
     role = identity.get("role", "guest")
     deleted = 0
     for url_hash in req.url_hashes:
@@ -158,7 +163,7 @@ async def batch_delete_history(req: BatchDeleteRequest, request: Request):
 @router.delete("/history/{url_hash}")
 async def delete_history(url_hash: str, request: Request):
     """删除学习历史记录。Admin 全局删除，普通用户按用户隔离。"""
-    identity = get_identity(request)
+    identity = require_identity(request)
     role = identity.get("role", "guest")
     if role == "admin":
         # Admin：全局删除 — 先查 ai_cache 拿 url/fingerprint，再逐个删除
@@ -185,14 +190,14 @@ async def delete_history(url_hash: str, request: Request):
 @router.get("/history/stats")
 async def get_stats(request: Request):
     """学习统计数据。按用户过滤。"""
-    identity = get_identity(request)
+    identity = require_identity(request)
     return get_learning_stats(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"), role=identity.get("role"))
 
 
 @router.get("/history/tags")
 async def list_history_tags(request: Request):
     """获取标签（含使用次数）。按用户隔离。"""
-    identity = get_identity(request)
+    identity = require_identity(request)
     return get_all_tags(
         user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
         role=identity.get("role"),
@@ -203,10 +208,12 @@ async def list_history_tags(request: Request):
 
 @router.get("/search")
 async def knowledge_search(
+    request: Request,
     q: str = Query(..., min_length=1),
     limit: int = Query(10, ge=1, le=50),
 ):
     """跨视频语义搜索，返回匹配片段 + 来源视频。"""
+    require_admin(request)
     results = await query_chunks(q, n_results=limit, video_id=None)
     items = []
     for i, doc in enumerate(results.get("documents", [])):
