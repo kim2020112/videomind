@@ -16,6 +16,7 @@ from core.pipeline.subtitle import try_get_bilibili_cc_subtitle, fetch_subtitle
 # 复用已有模块中的工具函数和实例
 from api.routes import extract_url, downloader
 from api.security import ensure_public_http_url, require_identity
+from core.features import is_ai_available
 from core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -27,6 +28,8 @@ router = APIRouter()
 @router.post("/api/summarize", response_model=SummaryResult)
 async def summarize_video(req: SummarizeRequest, request: Request):
     """AI 视频总结：提取字幕 -> DeepSeek 生成摘要/章节/思维导图。"""
+    if not is_ai_available():
+        raise HTTPException(status_code=503, detail="feature_unavailable: AI 功能不可用（SDK 未安装、未启用或未配置 API Key）")
     identity = require_identity(request)
     allowed, used, limit = check_usage_limit(
         identity.get("user_id"), identity.get("guest_id"), identity.get("guest_sig")

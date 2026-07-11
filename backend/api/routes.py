@@ -126,6 +126,13 @@ async def health():
     return {"status": "ok"}
 
 
+@router.get("/api/capabilities")
+async def capabilities():
+    """返回当前服务能力状态，前端据此隐藏/禁用功能。"""
+    from core.features import get_capabilities
+    return get_capabilities()
+
+
 @router.post("/api/parse", response_model=VideoInfo)
 async def parse_video(req: ParseRequest, request: Request):
     """解析视频链接，返回视频信息和可用格式列表。"""

@@ -6,14 +6,12 @@ import tempfile
 import uuid
 from pathlib import Path
 
-import anthropic
-
 import config as app_config
 from core.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-_CONFIG_PATH = Path(__file__).parent.parent / "data" / "ai_config.json"
+_CONFIG_PATH = app_config.AI_CONFIG_PATH
 
 # 新格式: {"providers": [{id, name, provider, api_key, base_url, models: [{id, name, model}]}], "active": {provider_id, model_id}}
 _store: dict = {"providers": [], "active": {"provider_id": "", "model_id": ""}}
@@ -366,6 +364,7 @@ def _do_test(api_key: str, base_url: str, model: str) -> dict:
     if not api_key:
         return {"success": False, "message": "未配置 API Key", "model": model}
     try:
+        import anthropic
         client = anthropic.Anthropic(api_key=api_key, base_url=base_url)
         resp = client.messages.create(
             model=model,

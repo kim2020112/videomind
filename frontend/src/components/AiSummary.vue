@@ -724,6 +724,18 @@ const stageLabels = {
   notes: '笔记已生成',
 }
 
+function backgroundStageLabel(task) {
+  return {
+    queued: task.queue_position ? `等待处理（队列第 ${task.queue_position} 位）` : '等待后台处理',
+    downloading: '正在下载音频',
+    transcribing: 'Whisper 转录中',
+    generating: '正在生成学习内容',
+    failed: '后台处理失败',
+    cancelled: '任务已取消',
+    done: '后台处理完成',
+  }[task.status] || '转录已加入后台队列'
+}
+
 function copyNotes() {
   if (!props.notesMarkdown) return
   const text = props.notesMarkdown
@@ -802,12 +814,16 @@ function downloadNotes() {
     <div v-if="backgroundTask" class="background-task-card">
       <div class="task-header">
         <svg class="task-icon task-pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 00-3.7-3.7 48.678 48.678 0 00-7.324 0 4.006 4.006 0 00-3.7 3.7c-.017.22-.032.441-.046.662M19.5 12l3-3m-3 3l-3-3m-12 3c0 1.232.046 2.453.138 3.662a4.006 4.006 0 003.7 3.7 48.656 48.656 0 007.324 0 4.006 4.006 0 003.7-3.7c.017-.22.032-.441.046-.662M4.5 12l3 3m-3-3l-3 3" /></svg>
-        <span class="task-title">转录已加入后台队列</span>
+        <span class="task-title">{{ backgroundStageLabel(backgroundTask) }}</span>
       </div>
-      <p class="task-detail">
-        视频时长 {{ Math.floor(backgroundTask.duration / 60) }} 分 {{ backgroundTask.duration % 60 }} 秒，
-        预计转录需要 {{ Math.floor(backgroundTask.estimated_seconds / 60) }} 分 {{ backgroundTask.estimated_seconds % 60 }} 秒
+      <div v-if="backgroundTask.progress > 0" class="task-progress-track" role="progressbar" :aria-valuenow="Math.round(backgroundTask.progress)" aria-valuemin="0" aria-valuemax="100">
+        <div class="task-progress-fill" :style="{ width: `${Math.min(100, backgroundTask.progress)}%` }"></div>
+      </div>
+      <p v-if="backgroundTask.message" class="task-detail">{{ backgroundTask.message }}</p>
+      <p v-else-if="backgroundTask.estimated_seconds" class="task-detail">
+        预计处理需要 {{ Math.floor(backgroundTask.estimated_seconds / 60) }} 分 {{ backgroundTask.estimated_seconds % 60 }} 秒
       </p>
+      <p v-if="backgroundTask.error" class="task-detail">{{ backgroundTask.error }}</p>
       <p class="task-hint">您可以继续浏览其他视频，转录完成后会在学习历史中显示</p>
     </div>
 
@@ -1516,6 +1532,8 @@ function downloadNotes() {
 .task-title { font-size: 0.875rem; font-weight: 600; color: var(--text-primary); }
 .task-detail { font-size: 0.8125rem; color: var(--text-secondary); margin: 0; }
 .task-hint { font-size: 0.75rem; color: var(--text-muted); margin: 0; }
+.task-progress-track { width: 100%; height: 6px; overflow: hidden; background: rgba(255, 255, 255, 0.08); border-radius: 3px; }
+.task-progress-fill { height: 100%; background: #f59e0b; border-radius: 3px; transition: width 0.25s ease; }
 .pro-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3); }
 
 .flashcards-section { margin-top: 1.25rem; padding-top: 1.25rem; border-top: 1px solid var(--border); }

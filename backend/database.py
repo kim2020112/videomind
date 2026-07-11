@@ -117,6 +117,37 @@ CREATE INDEX IF NOT EXISTS idx_history_guest ON user_history(guest_id, created_a
 CREATE INDEX IF NOT EXISTS idx_history_url_hash ON user_history(url_hash);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_history_user_url ON user_history(user_id, url_hash) WHERE user_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_history_guest_url ON user_history(guest_id, url_hash) WHERE guest_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS background_jobs (
+    id TEXT PRIMARY KEY,
+    job_type TEXT NOT NULL DEFAULT 'whisper',
+    user_id INTEGER,
+    guest_id TEXT,
+    url_hash TEXT NOT NULL,
+    url TEXT NOT NULL,
+    lang TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'queued',
+    progress REAL NOT NULL DEFAULT 0,
+    message TEXT DEFAULT '',
+    error TEXT,
+    estimated_seconds INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    result_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_background_jobs_status_created
+    ON background_jobs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_background_jobs_user_created
+    ON background_jobs(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_background_jobs_guest_created
+    ON background_jobs(guest_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_background_jobs_url_hash
+    ON background_jobs(url_hash);
 """
 
 

@@ -5,7 +5,6 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import anthropic
 from config import (PROMPT_VERSION, BASE_DIR,
                     SUMMARY_PROMPT_VERSION, NOTES_PROMPT_VERSION, MINDMAP_PROMPT_VERSION,
                     QANDA_PROMPT_VERSION)
@@ -25,6 +24,10 @@ _RETRY_BASE_DELAY = 2  # 秒，指数退避基数
 
 def _is_recoverable(err: Exception) -> bool:
     """判断是否为可恢复的错误（网络/超时/服务端/限流），4xx 不可恢复。"""
+    try:
+        import anthropic
+    except ImportError:
+        return isinstance(err, (ConnectionError, TimeoutError, OSError))
     if isinstance(err, (anthropic.APIConnectionError, anthropic.APITimeoutError)):
         return True
     if isinstance(err, anthropic.APIStatusError):
@@ -69,7 +72,9 @@ def _load_prompt(name: str) -> str:
 
 # ──── AI Client ────
 
-def _get_client() -> anthropic.Anthropic:
+def _get_client():
+    """获取 Anthropic 客户端（延迟导入）。"""
+    import anthropic
     api_key = get_effective_api_key()
     if not api_key:
         raise ValueError("未配置 AI_API_KEY，请在 backend/.env 中设置")
@@ -295,38 +300,6 @@ def generate_mindmap(subtitle_text: str, video_title: str = "") -> str:
     return _extract_text(resp)
 
 
-def rag_answer(question: str, context_chunks: list[str], history: list = None) -> str:
-    client = _get_client()
-    context = "\n\n---\n\n".join(context_chunks)
-    history_text = ""
-    if history:
-        lines = []
-        for msg in history[-10:]:
-            role = "用户" if msg.get("role") == "user" else "助手"
-            lines.append(f"{role}：{msg.get('content', '')}")
-        history_text = "\n历史对话：\n" + "\n".join(lines) + "\n"
-
-    prompt = f"""你是一个基于视频知识库的问答助手。请根据以下检索到的内容回答用户问题。
-
-相关内容：
----
-{context}
----
-{history_text}
-用户问题：{question}
-
-要求：
-- 基于提供的内容回答，如果内容中没有相关信息请如实告知
-- 用中文回答，保持简洁准确
-- 使用 Markdown 格式"""
-
-    resp = _retry(client.messages.create,
-        model=get_effective_model(), max_tokens=2000,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return _extract_text(resp)
-
-
 # ──── 字幕校正 ────
 
 def correct_subtitle(subtitle_text: str, video_title: str = "", video_description: str = "") -> str:
@@ -453,35 +426,6 @@ def stream_chat(subtitle_text: str, question: str, history: list = None):
 用户问题：{question}
 
 请基于以上字幕内容回答问题。如果答案不在字幕中，请如实告知。用中文回答，保持简洁准确。"""
-
-    try:
-        with client.messages.stream(
-            model=get_effective_model(), max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}],
-        ) as stream:
-            for event in stream:
-                if event.type == "content_block_delta":
-                    delta = event.delta
-                    if hasattr(delta, "text") and delta.text:
-                        yield ("text", {"text": delta.text})
-    except Exception as e:
-        yield ("error", {"message": str(e)})
-
-
-def stream_rag_answer(question: str, context_chunks: list[str], history: list = None):
-    """流式 RAG 问答。"""
-    client = _get_client()
-    context = "\n\n---\n\n".join(context_chunks)
-    prompt = f"""你是一个基于视频知识库的问答助手。
-
-相关内容：
----
-{context}
----
-
-用户问题：{question}
-
-基于提供的内容回答，用中文，使用 Markdown 格式。"""
 
     try:
         with client.messages.stream(

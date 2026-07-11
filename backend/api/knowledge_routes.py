@@ -3,7 +3,6 @@ from pydantic import BaseModel
 from typing import Optional
 from database import get_db
 from core.cache import list_history_enhanced, toggle_favorite, get_learning_stats, get_all_tags, delete_cache
-from core.vectorstore import query_chunks
 from api.security import require_admin, require_identity
 
 router = APIRouter(prefix="/api", tags=["knowledge"])
@@ -101,7 +100,7 @@ async def list_history(
     q: Optional[str] = None,
     tag: Optional[str] = None,
     platform: Optional[str] = None,
-    sort: str = Query("newest", regex="^(newest|oldest)$"),
+    sort: str = Query("newest", pattern="^(newest|oldest)$"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
@@ -202,26 +201,3 @@ async def list_history_tags(request: Request):
         user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
         role=identity.get("role"),
     )
-
-
-# ──── 全局知识搜索 ────
-
-@router.get("/search")
-async def knowledge_search(
-    request: Request,
-    q: str = Query(..., min_length=1),
-    limit: int = Query(10, ge=1, le=50),
-):
-    """跨视频语义搜索，返回匹配片段 + 来源视频。"""
-    require_admin(request)
-    results = await query_chunks(q, n_results=limit, video_id=None)
-    items = []
-    for i, doc in enumerate(results.get("documents", [])):
-        meta = results.get("metadatas", [{}])[i] if i < len(results.get("metadatas", [])) else {}
-        items.append({
-            "video_title": meta.get("video_title", ""),
-            "video_id": meta.get("video_id"),
-            "snippet": doc[:300],
-            "chunk_index": meta.get("chunk_index", 0),
-        })
-    return {"results": items, "query": q}

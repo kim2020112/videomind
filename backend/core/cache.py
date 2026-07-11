@@ -91,7 +91,7 @@ def _ensure_table():
         """)
 
 
-def _init_cache():
+def init_cache():
     """应用启动时一次性初始化所有缓存表。"""
     global _initialized
     if _initialized:
@@ -981,7 +981,3 @@ def get_learning_stats(user_id: int = None, guest_id: str = None, role: str = "g
         "platform_distribution": platform_distribution,
         "recent_trend": recent_trend,
     }
-
-
-# 模块加载完成后一次性初始化所有缓存表
-_init_cache()

@@ -3,6 +3,7 @@
 import asyncio
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 import re as _re
 from core.summarizer import clean_subtitle_text, _clean_danmaku_xml, extract_bilibili_subtitle, extract_bilibili_subtitle_by_cid, extract_subtitle_segments
 from core.cache import get_video_info_cache, save_video_info_cache, video_fingerprint
@@ -11,11 +12,15 @@ from database import get_subtitle_from_db, save_subtitle_to_db
 
 from api.routes import extract_url, downloader
 from api.security import ensure_public_http_url, require_identity
+from core.features import is_whisper_available
 from core.auth import check_usage_limit
 from core.pipeline.subtitle import (
     _select_subtitle_lang, _download_subtitle_content,
-    extract_bvid, _build_part_info, transcribe_and_correct,
+    extract_bvid, _build_part_info,
 )
+from core.background_pipeline import enqueue_whisper_job
+from core.cache import _url_hash
+from core.whisper import estimate_transcribe_time
 from core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -131,6 +136,10 @@ async def get_subtitle_text(
                     sub_error = str(e)
 
         # 3. 兜底：Whisper 转录（CPU 密集，需身份 + 次数校验，防匿名 DoS）
+        if not is_whisper_available():
+            if sub_error:
+                raise HTTPException(status_code=404, detail=f"字幕获取失败: {sub_error}; Whisper 转录不可用")
+            raise HTTPException(status_code=404, detail="该视频没有可用字幕，Whisper 功能不可用")
         allowed, used, limit = check_usage_limit(
             identity.get("user_id"), identity.get("guest_id"), identity.get("guest_sig")
         )
@@ -140,17 +149,27 @@ async def get_subtitle_text(
         if info.duration and WHISPER_MAX_DURATION > 0 and info.duration > WHISPER_MAX_DURATION:
             raise HTTPException(status_code=400, detail=f"视频时长 {int(info.duration)} 秒超过 {WHISPER_MAX_DURATION} 秒限制，不支持语音识别。请尝试有字幕的视频")
 
-        corrected, raw_text = await transcribe_and_correct(
-            url, lang, fp, info.title or "", info.description or ""
+        job = enqueue_whisper_job(
+            url_hash=_url_hash(canonical_url),
+            url=canonical_url,
+            identity=identity,
+            lang=lang,
+            estimated_seconds=estimate_transcribe_time(info.duration or 0),
+            info=info,
+            fingerprint=fp,
+            pipeline="subtitle_only",
         )
-        if corrected and len(corrected.strip()) >= 20:
-            _pi = _build_part_info(url, info)
-            save_subtitle_to_db(canonical_url, "whisper", lang or "auto", corrected, info.title, platform, part_info=_pi)
-            return _build_response(corrected, lang or "auto", f"Whisper 语音识别（{lang or 'auto'}）", "txt", True)
-        elif sub_error:
-            raise HTTPException(status_code=404, detail=f"字幕获取失败: {sub_error}; Whisper 转录也失败")
-
-        raise HTTPException(status_code=404, detail="该视频没有可用字幕，Whisper 转录也未成功")
+        return JSONResponse(
+            status_code=202,
+            content={
+                "background": True,
+                "task_id": job["task_id"],
+                "url_hash": job["url_hash"],
+                "queue_position": job["queue_position"],
+                "estimated_seconds": job["estimated_seconds"],
+                "message": "没有可用原生字幕，Whisper 转录已加入后台队列",
+            },
+        )
 
     except HTTPException:
         raise

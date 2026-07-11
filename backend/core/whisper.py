@@ -7,9 +7,7 @@
 - 启动时检查模型目录，缺失时记录错误日志但不阻塞服务
 """
 
-import asyncio
 import os
-import sys
 import tempfile
 import shutil
 
@@ -18,34 +16,26 @@ from core.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-_whisper_semaphore = asyncio.Semaphore(1)
-_model_instance = None
-
-
 def estimate_transcribe_time(duration_seconds: int) -> int:
     """预估 Whisper 转录耗时（秒）。CPU int8 small 模型约 2-3 倍实时速度，加上下载和校正开销。"""
     return max(60, int(duration_seconds * 3.5))
 
-_MODEL_DIR = os.path.join(str(WHISPER_MODELS_DIR), f"faster-whisper-{WHISPER_MODEL}")
 _REQUIRED_FILES = ["config.json", "model.bin", "tokenizer.json", "vocabulary.txt"]
+
+
+def model_directory() -> str:
+    return os.path.join(str(WHISPER_MODELS_DIR), f"faster-whisper-{WHISPER_MODEL}")
 
 
 def is_model_available() -> bool:
     """检查本地 Whisper 模型文件是否完整。"""
-    if not os.path.isdir(_MODEL_DIR):
+    model_dir = model_directory()
+    if not os.path.isdir(model_dir):
         return False
     for f in _REQUIRED_FILES:
-        if not os.path.isfile(os.path.join(_MODEL_DIR, f)):
+        if not os.path.isfile(os.path.join(model_dir, f)):
             return False
     return True
-
-
-# 启动时检查
-if is_model_available():
-    logger.info(f"模型已就绪: {_MODEL_DIR}")
-else:
-    missing = [f for f in _REQUIRED_FILES if not os.path.isfile(os.path.join(_MODEL_DIR, f))]
-    logger.warning(f"模型不可用（{_MODEL_DIR}），缺失: {missing or '目录不存在'}。Whisper 转录已禁用。")
 
 
 def _download_audio(url: str) -> str:
@@ -85,62 +75,4 @@ def _download_audio(url: str) -> str:
         raise
 
 
-def _get_model():
-    global _model_instance
-    if _model_instance is None:
-        from faster_whisper import WhisperModel
-        _model_instance = WhisperModel(
-            _MODEL_DIR, device="cpu", compute_type="int8",
-            local_files_only=True,
-            cpu_threads=max(1, os.cpu_count() // 2),
-        )
-    return _model_instance
-
-
-def transcribe(audio_path: str, language: str = None) -> str:
-    """Faster-Whisper 转录音频为带时间戳的文本。仅使用本地模型，不联网。"""
-    if not is_model_available():
-        raise RuntimeError(
-            f"Whisper 模型未就绪，请将模型文件放入 {_MODEL_DIR}"
-        )
-
-    model = _get_model()
-
-    transcribe_opts = {"beam_size": 3, "vad_filter": True}
-    if language:
-        transcribe_opts["language"] = language
-
-    segments, _ = model.transcribe(audio_path, **transcribe_opts)
-
-    lines = []
-    for seg in segments:
-        text = seg.text.strip()
-        if not text:
-            continue
-        mm = int(seg.start // 60)
-        ss = int(seg.start % 60)
-        lines.append(f"[{mm:02d}:{ss:02d}] {text}")
-
-    return "\n".join(lines)
-
-
-def transcribe_video(url: str, language: str = None) -> str:
-    """下载视频音频 + Whisper 转录，返回字幕文本。用完自动清理临时文件。"""
-    os.nice(10)  # 降低进程优先级，让 web 服务优先获得 CPU
-    if not is_model_available():
-        raise RuntimeError(
-            f"Whisper 模型未就绪，请将模型文件放入 {_MODEL_DIR}"
-        )
-    audio_path = _download_audio(url)
-    tmpdir = os.path.dirname(audio_path)
-    try:
-        return transcribe(audio_path, language)
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-async def transcribe_video_async(url: str, language: str = None) -> str:
-    """异步安全版本：全局 Semaphore(1) 保护，防止并发转录打爆 CPU。"""
-    loop = asyncio.get_event_loop()
-    async with _whisper_semaphore:
-        return await loop.run_in_executor(None, transcribe_video, url, language)
+__all__ = ["estimate_transcribe_time", "is_model_available", "model_directory"]

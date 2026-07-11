@@ -18,16 +18,8 @@ watch(() => props.activeTasks.length, () => {
   _prevTaskHashes.value = newHashes
 
   if (disappeared.length > 0) {
-    // 立即更新前端内存中的状态，避免显示"转录中断"
-    for (const urlHash of disappeared) {
-      const item = historyItems.value.find(h => h.url_hash === urlHash)
-      if (item && (item.status === 'transcribing' || item.status === 'generating')) {
-        item.status = 'done'
-      }
-    }
-    // 后台刷新确认数据
     clearTimeout(_refreshTimer)
-    _refreshTimer = setTimeout(() => fetchHistoryPage(), 1500)
+    _refreshTimer = setTimeout(() => fetchHistoryPage(), 800)
   }
 })
 
@@ -40,7 +32,9 @@ function getTaskForUrl(urlHash) {
 }
 
 function getElapsedSeconds(task) {
-  return Math.floor((Date.now() / 1000) - task.started_at)
+  const startedAt = Date.parse(task.started_at || task.created_at || '')
+  if (!Number.isFinite(startedAt)) return 0
+  return Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
 }
 
 function getRemainingEstimate(task) {
@@ -50,6 +44,9 @@ function getRemainingEstimate(task) {
 
 function formatRemaining(task) {
   if (!task) return ''
+  if (task.status === 'queued') {
+    return task.queue_position ? `队列第 ${task.queue_position} 位` : '等待调度'
+  }
   const elapsed = getElapsedSeconds(task)
   const remaining = Math.max(0, task.estimated_seconds - elapsed)
   if (remaining > 0) {
@@ -61,6 +58,22 @@ function formatRemaining(task) {
   const em = Math.floor(elapsed / 60)
   const es = elapsed % 60
   return `已转录 ${em} 分 ${es} 秒，即将完成`
+}
+
+const activeStatuses = new Set(['queued', 'downloading', 'transcribing', 'generating'])
+
+function isActiveItem(item) {
+  return Boolean(getTaskForUrl(item.url_hash)) || activeStatuses.has(item.status)
+}
+
+function taskStageLabel(task, item) {
+  const status = task?.status || item.status
+  return {
+    queued: '等待后台处理',
+    downloading: '正在下载音频',
+    transcribing: 'Whisper 转录中',
+    generating: 'AI 生成中',
+  }[status] || '后台处理中'
 }
 
 const historySearchQuery = ref('')
@@ -85,14 +98,12 @@ function showError(msg) {
   clearTimeout(errorTimer)
   errorTimer = setTimeout(() => { errorMessage.value = '' }, 4000)
 }
-const searchMode = ref('text') // 'text' | 'semantic'
-const semanticResults = ref([])
 const expandedGroups = ref({}) // { groupKey: true/false }
 const expandedTaskItem = ref(null) // url_hash of expanded transcribing item
 const cancelingTaskId = ref(null)
 
 function toggleTaskDetail(item) {
-  if (item.status === 'transcribing' || item.status === 'generating') {
+  if (isActiveItem(item)) {
     expandedTaskItem.value = expandedTaskItem.value === item.url_hash ? null : item.url_hash
   }
 }
@@ -187,27 +198,8 @@ async function loadMoreHistory() {
   }
 }
 
-async function handleSemanticSearch() {
-  if (!historySearchQuery.value.trim()) return
-  historyLoading.value = true
-  try {
-    const res = await fetch(`/api/search?q=${encodeURIComponent(historySearchQuery.value)}&limit=10`)
-    if (res.ok) {
-      const data = await res.json()
-      semanticResults.value = data.results || []
-    }
-  } catch { showError('语义搜索失败，请稍后重试') } finally {
-    historyLoading.value = false
-  }
-}
-
 function handleHistorySearch() {
-  if (searchMode.value === 'semantic') {
-    handleSemanticSearch()
-  } else {
-    semanticResults.value = []
-    fetchHistoryPage()
-  }
+  fetchHistoryPage()
 }
 
 function setHistoryTag(tag) {
@@ -239,7 +231,7 @@ async function toggleFavorite(item) {
 
 async function deleteHistoryItem(item) {
   // 转录中的记录需要同时取消后台任务
-  if (item.status === 'transcribing' || item.status === 'generating') {
+  if (isActiveItem(item)) {
     return deleteTranscribingItem(item)
   }
   if (item.is_multipart) {
@@ -265,7 +257,7 @@ async function deleteHistoryItem(item) {
 }
 
 function selectHistory(item) {
-  if (item.status === 'transcribing' || item.status === 'generating') {
+  if (isActiveItem(item)) {
     toggleTaskDetail(item)
     return
   }
@@ -411,20 +403,11 @@ fetchHistoryPage()
           <input
             v-model="historySearchQuery"
             class="search-input"
-            :placeholder="searchMode === 'semantic' ? '语义搜索：如「哪个视频讲过IK分词器」' : '搜索标题或摘要...'"
+            placeholder="搜索标题或摘要..."
             @keyup.enter="handleHistorySearch"
           />
         </div>
         <div class="search-controls">
-          <button
-            class="search-mode-btn"
-            :class="{ active: searchMode === 'semantic' }"
-            @click="searchMode = searchMode === 'semantic' ? 'text' : 'semantic'"
-            title="语义搜索"
-          >
-            <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16"><path d="M10 1a6 6 0 00-3.815 10.631C7.237 12.5 8 13.443 8 14.456v.644a.75.75 0 00.572.729 6.016 6.016 0 002.856 0A.75.75 0 0012 15.1v-.644c0-1.013.762-1.957 1.815-2.825A6 6 0 0010 1zM8.863 17.414a.75.75 0 00-.226 1.483 9.066 9.066 0 002.726 0 .75.75 0 00-.226-1.483 7.553 7.553 0 01-2.274 0z"/></svg>
-            AI
-          </button>
           <select class="sort-select" :value="historySort" @change="setHistorySort($event.target.value)">
             <option value="newest">最新</option>
             <option value="oldest">最早</option>
@@ -465,17 +448,8 @@ fetchHistoryPage()
         >{{ tag.name }} <span class="tag-count">{{ tag.count }}</span></button>
       </div>
 
-      <!-- 语义搜索结果 -->
-      <div v-if="searchMode === 'semantic' && semanticResults.length" class="semantic-results">
-        <div class="section-title">知识搜索结果</div>
-        <div v-for="(r, i) in semanticResults" :key="i" class="semantic-card" @click="selectHistory({ url: r.video_url || '' })" @keydown.enter="selectHistory({ url: r.video_url || '' })" tabindex="0" role="button">
-          <div class="semantic-title">{{ r.video_title || '未知视频' }}</div>
-          <div class="semantic-snippet">{{ r.snippet }}</div>
-        </div>
-      </div>
-
       <!-- 历史卡片列表 -->
-      <div v-if="searchMode === 'text' || !semanticResults.length" class="history-card-list">
+      <div class="history-card-list">
         <div class="history-list-header">
           <div class="history-list-left">
             <label v-if="selectionMode" class="select-all-label">
@@ -511,7 +485,7 @@ fetchHistoryPage()
           <span class="empty-hint">使用 AI 总结视频后，记录会自动保存到这里</span>
         </div>
         <div v-else class="history-cards">
-          <div v-for="item in historyItems" :key="item.id" class="history-page-card" :class="{ 'hp-card-selected': selectionMode && isItemSelected(item), 'hp-card-transcribing': item.status === 'transcribing' || item.status === 'generating' }">
+          <div v-for="item in historyItems" :key="item.id" class="history-page-card" :class="{ 'hp-card-selected': selectionMode && isItemSelected(item), 'hp-card-transcribing': isActiveItem(item) }">
             <div v-if="selectionMode" class="hp-card-checkbox" @click.stop="toggleSelectItem(item)">
               <input type="checkbox" :checked="isItemSelected(item)" />
             </div>
@@ -520,25 +494,27 @@ fetchHistoryPage()
               <span v-if="item.platform" class="hp-platform-tag">{{ item.platform }}</span>
             </div>
             <!-- 转录状态 -->
-            <div v-if="item.status === 'transcribing' || item.status === 'generating'"
+            <div v-if="isActiveItem(item)"
                  class="hp-transcribing-badge" @click.stop="toggleTaskDetail(item)">
               <template v-if="getTaskForUrl(item.url_hash)">
                 <span class="hp-pulse-dot"></span>
-                <span>{{ item.status === 'transcribing' ? 'Whisper 转录中' : 'AI 生成中' }}</span>
+                <span>{{ taskStageLabel(getTaskForUrl(item.url_hash), item) }}</span>
                 <span class="hp-time-remaining">
                   · {{ formatRemaining(getTaskForUrl(item.url_hash)) }}
                 </span>
                 <span class="hp-expand-hint">{{ expandedTaskItem === item.url_hash ? '▲' : '▼' }}</span>
               </template>
               <template v-else>
-                <span>{{ item.status === 'transcribing' ? '转录中断' : '生成中断' }}</span>
+                <span>正在同步任务状态</span>
               </template>
             </div>
             <!-- 转录任务详情面板 -->
-            <div v-if="(item.status === 'transcribing' || item.status === 'generating') && expandedTaskItem === item.url_hash" class="hp-task-detail">
+            <div v-if="isActiveItem(item) && expandedTaskItem === item.url_hash" class="hp-task-detail">
               <div class="hp-task-info">
-                <span>视频时长：{{ formatDuration(getTaskForUrl(item.url_hash)?.duration || 0) }}</span>
-                <span v-if="getTaskForUrl(item.url_hash)">· 已转录 {{ getElapsedSeconds(getTaskForUrl(item.url_hash)) }} 秒</span>
+                <span v-if="getTaskForUrl(item.url_hash)?.status === 'queued'">{{ formatRemaining(getTaskForUrl(item.url_hash)) }}</span>
+                <span v-else-if="getTaskForUrl(item.url_hash)">已处理 {{ getElapsedSeconds(getTaskForUrl(item.url_hash)) }} 秒</span>
+                <span v-if="getTaskForUrl(item.url_hash)?.progress">· {{ Math.round(getTaskForUrl(item.url_hash).progress) }}%</span>
+                <span v-if="getTaskForUrl(item.url_hash)?.message">· {{ getTaskForUrl(item.url_hash).message }}</span>
               </div>
               <div class="hp-task-actions">
                 <button class="hp-btn-cancel" @click.stop="cancelTask(getTaskForUrl(item.url_hash)?.task_id)" :disabled="cancelingTaskId === getTaskForUrl(item.url_hash)?.task_id">
@@ -757,45 +733,6 @@ fetchHistoryPage()
   font-size: 0.6875rem;
   color: var(--text-muted);
   margin-left: 0.125rem;
-}
-
-/* 语义搜索结果 */
-.semantic-results {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-}
-.section-title {
-  font-size: 0.9375rem;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.semantic-card {
-  background: var(--bg-card);
-  border: 1px solid rgba(139, 92, 246, 0.2);
-  border-radius: 12px;
-  padding: 1rem 1.25rem;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.semantic-card:hover {
-  border-color: rgba(139, 92, 246, 0.4);
-  background: rgba(255, 255, 255, 0.06);
-}
-.semantic-title {
-  font-size: 0.875rem;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin-bottom: 0.5rem;
-}
-.semantic-snippet {
-  font-size: 0.8125rem;
-  color: var(--text-secondary);
-  line-height: 1.6;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
 }
 
 /* 历史卡片列表 */

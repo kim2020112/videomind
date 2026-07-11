@@ -32,8 +32,11 @@ from core.cache import (
     get_video_info_cache, save_video_info_cache, video_fingerprint,
     _get_cached_raw, get_whisper_cache,
 )
-from core.whisper import is_model_available, transcribe_video_async, estimate_transcribe_time
+from core.whisper import estimate_transcribe_time
+from core.background_pipeline import enqueue_whisper_job
+from core.job_store import find_active_job
 from core.tag_extractor import detect_platform
+from core.features import is_ai_available, is_whisper_available
 
 from api.routes import extract_url, downloader
 from api.security import ensure_public_http_url, require_identity
@@ -138,6 +141,8 @@ def _replay_cached(cached: dict, identity: dict, url: str, trace_id: str):
 @router.post("/api/summarize/stream")
 async def summarize_stream(req: SummarizeRequest, request: Request):
     """SSE 流式 AI 视频总结。"""
+    if not is_ai_available():
+        raise HTTPException(status_code=503, detail="feature_unavailable: AI 功能不可用（SDK 未安装、未启用或未配置 API Key）")
     try:
         trace_id = uuid.uuid4().hex[:8]
         url = extract_url(req.url)
@@ -182,18 +187,17 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
 
         # ── 快速后台转录判断（不调用 parse_info，立即返回） ──
         # 在 parse_info 之前判断，避免 10-30 秒的 yt-dlp 解析延迟
-        from core.task_manager import create_task, has_active_task, run_background_task
-
         # 用 URL 生成临时 url_hash（后续 parse_info 后会用 canonical_url 更新）
         fast_url_hash = _url_hash(url)
 
         # 检查是否已有活跃任务
-        existing_task = has_active_task(
+        existing_job = find_active_job(
             fast_url_hash,
             user_id=identity.get("user_id"),
             guest_id=identity.get("guest_id"),
         )
-        if existing_task:
+        if existing_job:
+            existing_task = existing_job["task_id"]
             dur = cached_info.get("duration", 0) if cached_info else 0
             def _already_running():
                 yield PipelineEvent("background_started", {
@@ -220,21 +224,21 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
                 fast_cached_sub = True
 
         duration_from_cache = cached_info.get("duration", 0) if cached_info else 0
-        need_whisper = not fast_cached_sub and is_model_available()
+        need_whisper = not fast_cached_sub and is_whisper_available()
 
-        if need_whisper and duration_from_cache > 60:
+        if need_whisper and cached_info:
             # 有缓存时长信息，立即走后台
             est = estimate_transcribe_time(duration_from_cache)
-            fast_platform = detect_platform(url, "")
-            task_id = create_task(fast_url_hash, url, identity, req.lang, est,
-                                  info=None, fingerprint=cached_fp)
-            add_user_history(
-                user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
-                url_hash=fast_url_hash, url=url,
-                title=cached_info.get("title", "") if cached_info else "",
-                platform=fast_platform, status="transcribing",
+            job = enqueue_whisper_job(
+                url_hash=fast_url_hash,
+                url=url,
+                identity=identity,
+                lang=req.lang,
+                estimated_seconds=est,
+                info=cached_info,
+                fingerprint=cached_fp,
             )
-            asyncio.create_task(run_background_task(task_id))
+            task_id = job["task_id"]
 
             def _bg_start():
                 yield PipelineEvent("background_started", {
@@ -265,12 +269,13 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
 
         # 检查是否已有活跃任务（用 canonical_url 重新检查）
         if url_hash != fast_url_hash:
-            existing_task = has_active_task(
+            existing_job = find_active_job(
                 url_hash,
                 user_id=identity.get("user_id"),
                 guest_id=identity.get("guest_id"),
             )
-            if existing_task:
+            if existing_job:
+                existing_task = existing_job["task_id"]
                 def _already_running2():
                     yield PipelineEvent("background_started", {
                         "task_id": existing_task, "url_hash": url_hash,
@@ -282,16 +287,18 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
 
         # 快速检查是否有非 Whisper 字幕源（需要完整 info 的网络检查）
         has_quick_sub = _quick_subtitle_check(canonical_url, info, req.lang, fp)
-        if not has_quick_sub and is_model_available() and info.duration and info.duration > 60:
-            est = estimate_transcribe_time(info.duration)
-            task_id = create_task(url_hash, canonical_url, identity, req.lang, est, info=info, fingerprint=fp)
-            add_user_history(
-                user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
-                url_hash=url_hash, url=canonical_url,
-                title=info.title, platform=detect_platform(canonical_url, info.extractor or ""),
-                status="transcribing",
+        if not has_quick_sub and is_whisper_available():
+            est = estimate_transcribe_time(info.duration or 0)
+            job = enqueue_whisper_job(
+                url_hash=url_hash,
+                url=canonical_url,
+                identity=identity,
+                lang=req.lang,
+                estimated_seconds=est,
+                info=info,
+                fingerprint=fp,
             )
-            asyncio.create_task(run_background_task(task_id))
+            task_id = job["task_id"]
 
             def _bg_start():
                 yield PipelineEvent("background_started", {
@@ -598,13 +605,14 @@ async def _handle_partial(req, cached: dict, identity: dict, url: str, trace_id:
 
 async def _partial_subtitle(req, cached: dict, identity: dict, url: str, trace_id: str):
     """字幕重新转录（Whisper）。"""
-    if not is_model_available():
-        raise HTTPException(status_code=400, detail="Whisper 模型未就绪，无法转录")
+    if not is_whisper_available():
+        raise HTTPException(status_code=503, detail="feature_unavailable: Whisper 功能不可用（faster-whisper 未安装或模型未就绪）")
 
     cached_info = get_video_info_cache(url)
     fp = cached_info.get("fingerprint") if cached_info else None
     cache_url = url
     video_title = ""
+    job_info = cached_info
     if cached_info:
         video_title = cached_info.get("title", "")
     else:
@@ -614,43 +622,31 @@ async def _partial_subtitle(req, cached: dict, identity: dict, url: str, trace_i
             cache_url = info.webpage_url or url
             save_video_info_cache(cache_url, info, fingerprint=fp)
             video_title = info.title or ""
+            job_info = info
         except Exception:
             pass  # parse_info 失败，继续使用已有缓存信息
 
     delete_whisper_cache(cache_url, fingerprint=fp)
-
-    whisper_text = ""
-    whisper_error = ""
-    try:
-        duration = cached_info.get("duration", 0) if cached_info else 0
-        timeout = max(600, duration * 3 + 120)
-        whisper_text = await asyncio.wait_for(transcribe_video_async(url, req.lang), timeout=timeout)
-    except Exception as e:
-        whisper_error = str(e)
-
-    corrected = ""
-    if whisper_text and len(whisper_text.strip()) >= 20:
-        corrected = await correct_subtitle_text(whisper_text, video_title, "", trace_id=trace_id)
-        from core.cache import save_whisper_cache
-        save_whisper_cache(cache_url, corrected, req.lang or "auto", whisper_text, fingerprint=fp)
-        if cached and cached.get("result_json"):
-            from core.cache import _max_prompt_version
-            _pi = _build_part_info(cache_url)
-            save_cache(cache_url, video_title, corrected, "whisper", cached["result_json"],
-                       fingerprint=fp, part_info=_pi, prompt_version=_max_prompt_version())
+    duration = cached_info.get("duration", 0) if cached_info else getattr(job_info, "duration", 0) or 0
+    job = enqueue_whisper_job(
+        url_hash=_url_hash(cache_url),
+        url=cache_url,
+        identity=identity,
+        lang=req.lang,
+        estimated_seconds=estimate_transcribe_time(duration),
+        info=job_info,
+        fingerprint=fp,
+        pipeline="subtitle_only",
+    )
 
     def _gen():
-        yield PipelineEvent("progress", {"stage": "subtitle_transcribing", "message": "正在用 Whisper 重新语音识别..."})
-        if whisper_error:
-            yield PipelineEvent("error", {"message": f"Whisper 转录失败: {whisper_error}"})
-            yield PipelineEvent("done", {})
-            return
-        if not whisper_text or len(whisper_text.strip()) < 20:
-            yield PipelineEvent("error", {"message": "Whisper 转录结果为空或过短"})
-            yield PipelineEvent("done", {})
-            return
-        yield PipelineEvent("progress", {"stage": "subtitle_loaded", "source": "whisper", "lang": req.lang or "auto", "message": "语音识别已完成，字幕已更新"})
-        yield PipelineEvent("subtitle_text", {"text": corrected})
+        yield PipelineEvent("background_started", {
+            "task_id": job["task_id"],
+            "url_hash": job["url_hash"],
+            "estimated_seconds": job["estimated_seconds"],
+            "queue_position": job["queue_position"],
+            "message": "字幕重转录已加入后台队列",
+        })
         yield PipelineEvent("done", {})
 
     return StreamingResponse(_sse_generator(_gen()), media_type="text/event-stream", headers=_sse_headers())
@@ -661,6 +657,8 @@ async def _partial_subtitle(req, cached: dict, identity: dict, url: str, trace_i
 @router.post("/api/chat/stream")
 async def chat_stream(req: ChatRequest, request: Request):
     """SSE 流式 AI 问答。"""
+    if not is_ai_available():
+        raise HTTPException(status_code=503, detail="feature_unavailable: AI 功能不可用（SDK 未安装、未启用或未配置 API Key）")
     if not req.subtitle_text or len(req.subtitle_text.strip()) < 10:
         raise HTTPException(status_code=400, detail="字幕内容为空，无法进行问答")
 
@@ -724,6 +722,8 @@ def _merge_and_save_qanda(url: str, subtitle_text: str, video_title: str, qa_pai
 @router.post("/api/qa/stream")
 async def qa_stream(req: QaGenerationRequest, request: Request):
     """SSE 流式 AI 关键问答对生成（支持缓存）。"""
+    if not is_ai_available():
+        raise HTTPException(status_code=503, detail="feature_unavailable: AI 功能不可用（SDK 未安装、未启用或未配置 API Key）")
     if not req.subtitle_text or len(req.subtitle_text.strip()) < 10:
         raise HTTPException(status_code=400, detail="字幕内容为空，无法生成问答")
 

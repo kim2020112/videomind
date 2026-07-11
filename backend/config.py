@@ -20,20 +20,24 @@ MINDMAP_PROMPT_VERSION = int(os.getenv("MINDMAP_PROMPT_VERSION", str(PROMPT_VERS
 QANDA_PROMPT_VERSION = int(os.getenv("QANDA_PROMPT_VERSION", str(PROMPT_VERSION)))
 
 # 数据库
-DB_PATH = BASE_DIR / "db" / "knowledge.db"
+DB_PATH = Path(os.getenv("DB_PATH", str(BASE_DIR / "db" / "knowledge.db"))).expanduser()
 
-# ChromaDB
-CHROMA_PATH = BASE_DIR / "data" / "chroma"
+# 后台管理页面保存的 AI 服务商配置
+AI_CONFIG_PATH = Path(
+    os.getenv("AI_CONFIG_PATH", str(BASE_DIR / "data" / "ai_config.json"))
+).expanduser()
 
 # 临时文件（视频/音频处理后删除）
-TEMP_DIR = BASE_DIR / "temp"
+TEMP_DIR = Path(os.getenv("TEMP_DIR", str(BASE_DIR / "temp"))).expanduser()
 
 # 下载目录（保留下载功能）
-DOWNLOAD_DIR = BASE_DIR / "downloads"
+DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", str(BASE_DIR / "downloads"))).expanduser()
 
 # Whisper（Faster-Whisper 转录兜底）
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")  # tiny | base | small | medium | large
-WHISPER_MODELS_DIR = BASE_DIR / "data" / "whisper_models"
+WHISPER_MODELS_DIR = Path(
+    os.getenv("WHISPER_MODELS_DIR", str(BASE_DIR / "data" / "whisper_models"))
+).expanduser()
 
 # Whisper 字幕校正（AI 后处理，修正语音识别错误）
 SUBTITLE_CORRECTION_ENABLED = os.getenv("SUBTITLE_CORRECTION_ENABLED", "true").lower() == "true"
@@ -59,6 +63,10 @@ GUEST_SECRET = os.getenv("GUEST_SECRET", DEFAULT_GUEST_SECRET)
 GUEST_DAILY_LIMIT = int(os.getenv("GUEST_DAILY_LIMIT", "3"))
 USER_DAILY_LIMIT = int(os.getenv("USER_DAILY_LIMIT", "20"))
 
-# 确保目录存在
-for d in [DB_PATH.parent, CHROMA_PATH, TEMP_DIR, DOWNLOAD_DIR]:
-    d.mkdir(parents=True, exist_ok=True)
+# 目录创建移至 FastAPI lifespan（main.py），避免导入时副作用
+
+
+def ensure_directories():
+    """创建所有必要的运行时目录。在 FastAPI lifespan 中调用。"""
+    for d in [DB_PATH.parent, AI_CONFIG_PATH.parent, TEMP_DIR, DOWNLOAD_DIR, WHISPER_MODELS_DIR]:
+        d.mkdir(parents=True, exist_ok=True)

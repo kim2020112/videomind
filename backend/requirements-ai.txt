@@ -1,0 +1,2 @@
+# AI 依赖 — Anthropic SDK（AI 总结、笔记、思维导图、问答）
+anthropic>=0.40.0

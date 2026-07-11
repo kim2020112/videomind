@@ -1,6 +1,8 @@
 """字幕获取 Pipeline。
 
-四级降级：DB 缓存 → B站 CC → yt-dlp 原生 → Whisper 转录（不含 AI 校正）。
+三级获取：DB 缓存 → B站 CC → yt-dlp 原生。
+
+Whisper 由 SQLite 后台任务和短生命周期子进程处理，不在 Web 进程中运行。
 
 同时提供字幕相关共享工具函数，供 api/ 层导入。
 """
@@ -17,10 +19,7 @@ from core.summarizer import (
     clean_subtitle_text, _clean_danmaku_xml,
     extract_bilibili_subtitle, extract_bilibili_subtitle_by_cid,
 )
-from core.cache import get_whisper_cache, save_whisper_cache, get_video_info_cache
-from core.whisper import transcribe_video_async, is_model_available
-from core.ai_client import correct_subtitle
-from config import WHISPER_MAX_DURATION, SUBTITLE_CORRECTION_ENABLED
+from core.cache import get_video_info_cache
 from core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -137,48 +136,6 @@ def try_get_bilibili_cc_subtitle(url: str, cached_info: dict = None) -> dict | N
     return extract_bilibili_subtitle(url)
 
 
-async def transcribe_and_correct(url: str, lang: str = None, fingerprint: str = None,
-                                  title: str = "", description: str = "") -> tuple[str | None, str | None]:
-    """Whisper 转录 + AI 校正（含缓存）。返回 (corrected_text, raw_text)，失败返回 (None, None)。"""
-    cached = get_whisper_cache(url, fingerprint=fingerprint)
-    if cached and len(cached.strip()) >= 20:
-        logger.info(f"Whisper缓存命中")
-        return cached, cached
-
-    if not is_model_available():
-        return None, None
-
-    try:
-        logger.info(f"开始 Whisper 转录...")
-        raw_text = await asyncio.wait_for(
-            transcribe_video_async(url, lang),
-            timeout=600,
-        )
-    except (asyncio.TimeoutError, Exception) as e:
-        logger.warning(f"Whisper 转录失败: {e}")
-        return None, None
-
-    if not raw_text or len(raw_text.strip()) < 20:
-        return None, None
-
-    corrected = raw_text
-    if SUBTITLE_CORRECTION_ENABLED:
-        try:
-            corrected = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(
-                    None, correct_subtitle, raw_text, title, description
-                ),
-                timeout=60,
-            )
-        except (asyncio.TimeoutError, Exception) as e:
-            logger.warning(f"字幕校正失败，使用原始文本: {e}")
-            corrected = raw_text
-
-    save_whisper_cache(url, corrected, lang or "auto", raw_text, fingerprint=fingerprint)
-    logger.info(f"Whisper 转录完成 len={len(corrected)}")
-    return corrected, raw_text
-
-
 # ─── Pipeline ────────────────────────────────────────────────
 
 async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = None,
@@ -249,34 +206,7 @@ async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = No
             except Exception as e:
                 logger.info(f"yt-dlp字幕获取失败: {e}")
 
-    # ── Pipeline 3: Whisper 转录（兜底，不含 AI 校正） ──
-    if is_model_available():
-        if WHISPER_MAX_DURATION > 0 and info.duration and info.duration > WHISPER_MAX_DURATION:
-            logger.info(f"视频时长 {info.duration}s 超过限制 {WHISPER_MAX_DURATION}s，跳过 Whisper")
-            return None, "", ""
-
-        cached_whisper = get_whisper_cache(url, fingerprint=fingerprint)
-        if cached_whisper and len(cached_whisper.strip()) >= 20:
-            logger.info(f"Whisper缓存命中")
-            return cached_whisper, "whisper", lang or "auto"
-
-        try:
-            timeout = max(600, (info.duration or 0) * 3 + 120)
-            logger.info(f"开始 Whisper 转录（预计超时 {timeout}s）...")
-            whisper_text = await asyncio.wait_for(
-                transcribe_video_async(url, lang),
-                timeout=timeout,
-            )
-            if whisper_text and len(whisper_text.strip()) >= 20:
-                save_whisper_cache(url, whisper_text, lang or "auto", whisper_text, fingerprint=fingerprint)
-                logger.info(f"Whisper 转录完成 len={len(whisper_text)}")
-                return whisper_text, "whisper", lang or "auto"
-        except asyncio.TimeoutError:
-            logger.info(f"Whisper 转录超时")
-        except Exception as e:
-            logger.info(f"Whisper 转录失败: {e}")
-
-    logger.info(f"所有字幕获取方式均失败")
+    logger.info(f"没有可用的原生字幕，调用方可提交后台 Whisper 任务")
     return None, "", ""
 
 

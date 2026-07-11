@@ -20,14 +20,17 @@ import { useChat } from './composables/useChat.js'
 import { useQa } from './composables/useQa.js'
 import { useAuth } from './composables/useAuth.js'
 import { useTaskPoller } from './composables/useTaskPoller.js'
+import { useCapabilities } from './composables/useCapabilities.js'
 import { formatBytes } from './utils/resultFormatters.js'
 
 const { init: initAuth, isLoggedIn } = useAuth()
 const { activeTasks, activeTaskCount, startPolling, stopPolling } = useTaskPoller()
+const { capabilities, fetchCapabilities } = useCapabilities()
 
 onMounted(() => {
   initAuth()
   startPolling()
+  fetchCapabilities()
 })
 onUnmounted(() => stopPolling())
 
@@ -165,6 +168,26 @@ const {
 const displayQaPairs = computed(() => {
   if (qaPairs.value.length > 0) return qaPairs.value
   return summaryQaPairs.value || []
+})
+
+const liveBackgroundTask = computed(() => {
+  if (!backgroundTask.value?.task_id) return backgroundTask.value
+  return activeTasks.value.find(task => task.task_id === backgroundTask.value.task_id) || backgroundTask.value
+})
+
+let backgroundTaskSeenActive = false
+watch(() => backgroundTask.value?.task_id, () => {
+  backgroundTaskSeenActive = false
+})
+watch(activeTasks, tasks => {
+  const taskId = backgroundTask.value?.task_id
+  if (!taskId) return
+  if (tasks.some(task => task.task_id === taskId)) {
+    backgroundTaskSeenActive = true
+  } else if (backgroundTaskSeenActive) {
+    backgroundTask.value = null
+    backgroundTaskSeenActive = false
+  }
 })
 
 async function handleSummarize(force = false) {
@@ -518,7 +541,7 @@ function handleUrlChange(value) {
                     :subtitleInfo="subtitleInfo"
                     :isPartialSummary="isPartialSummary"
                     :whisperEstimate="whisperEstimate"
-                    :backgroundTask="backgroundTask"
+                    :backgroundTask="liveBackgroundTask"
                     :videoTitle="videoInfo?.title || ''"
                     :mindmapMarkdown="mindmapMarkdown"
                     :notesMarkdown="notesMarkdown"
@@ -633,7 +656,7 @@ function handleUrlChange(value) {
               :subtitleInfo="subtitleInfo"
               :isPartialSummary="isPartialSummary"
               :whisperEstimate="whisperEstimate"
-              :backgroundTask="backgroundTask"
+              :backgroundTask="liveBackgroundTask"
               :videoTitle="videoInfo?.title || ''"
               :mindmapMarkdown="mindmapMarkdown"
               :notesMarkdown="notesMarkdown"
@@ -738,6 +761,18 @@ function handleUrlChange(value) {
   width: 20px;
   height: 20px;
   flex-shrink: 0;
+}
+
+.feature-warning {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0.75rem 1.25rem;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  border-radius: var(--radius);
+  color: #FCD34D;
+  font-size: 0.875rem;
+  text-align: center;
 }
 
 .tab-bar {

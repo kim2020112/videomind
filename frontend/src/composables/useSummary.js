@@ -45,6 +45,10 @@ export function useSummary() {
         throw new Error(err.detail || '字幕加载失败')
       }
       const data = await res.json()
+      if (data.background) {
+        backgroundTask.value = data
+        return ''
+      }
       subtitleText.value = data.text
       subtitleInfo.value = data
       return data.text

@@ -8,6 +8,7 @@ export function useTaskPoller() {
   const activeTasks = ref([])
   const activeTaskCount = computed(() => activeTasks.value.length)
   let pollTimer = null
+  let polling = false
 
   async function pollOnce() {
     try {
@@ -16,28 +17,41 @@ export function useTaskPoller() {
         const data = await res.json()
         const newTasks = data.tasks || []
         // 去重：内容相同时不替换引用，避免触发下游组件无意义重渲染
-        const oldIds = activeTasks.value.map(t => `${t.task_id}:${t.status}:${t.stage}`).join(',')
-        const newIds = newTasks.map(t => `${t.task_id}:${t.status}:${t.stage}`).join(',')
+        const signature = task => [
+          task.task_id,
+          task.status,
+          task.stage,
+          task.progress,
+          task.message,
+          task.queue_position,
+          task.error,
+        ].join(':')
+        const oldIds = activeTasks.value.map(signature).join(',')
+        const newIds = newTasks.map(signature).join(',')
         if (oldIds !== newIds) {
           activeTasks.value = newTasks
         }
       }
     } catch {
       // 静默失败，下次轮询重试
+    } finally {
+      if (polling) {
+        clearTimeout(pollTimer)
+        pollTimer = setTimeout(pollOnce, activeTasks.value.length > 0 ? 5000 : 15000)
+      }
     }
   }
 
   function startPolling() {
-    if (pollTimer) return
-    pollOnce() // 立即执行一次
-    pollTimer = setInterval(pollOnce, 10000)
+    if (polling) return
+    polling = true
+    pollOnce()
   }
 
   function stopPolling() {
-    if (pollTimer) {
-      clearInterval(pollTimer)
-      pollTimer = null
-    }
+    polling = false
+    clearTimeout(pollTimer)
+    pollTimer = null
   }
 
   return {

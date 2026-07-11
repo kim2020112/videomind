@@ -1,13 +1,7 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-yt-dlp==2025.1.26
-pydantic==2.10.4
-websockets==14.2
-python-multipart==0.0.20
-aiofiles==24.1.0
-deep-translator==1.11.4
-anthropic>=0.40.0
-python-dotenv>=1.0.0
-chromadb>=0.5.0
-faster-whisper>=1.0.0
-passlib[bcrypt]>=1.7.4
+# 全量安装 — 包含所有功能依赖
+# 核心模式：pip install -r requirements-core.txt
+# 全量模式：pip install -r requirements.txt
+
+-r requirements-core.txt
+-r requirements-ai.txt
+-r requirements-whisper.txt

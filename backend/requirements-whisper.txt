@@ -1,0 +1,2 @@
+# Whisper 依赖 — Faster-Whisper（语音识别转录）
+faster-whisper>=1.0.0
