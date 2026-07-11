@@ -1,463 +1,279 @@
-# 开发指南 — VideoMind
+# 开发指南
+
+> 架构说明见 `docs/architecture.md`。安装、更新和备份总览见根目录 `README.md`。
 
 ## 环境要求
 
-| 依赖 | 版本要求 | 说明 |
-|------|----------|------|
-| Python | >= 3.9（已在 3.14 验证） | 后端运行时 |
-| Node.js | >= 18 | 前端构建和开发 |
-| FFmpeg | 任意 | yt-dlp 合并音视频流必需 |
+| 依赖 | 版本 | 说明 |
+|------|------|------|
+| Python | 3.12 | 后端运行时（仓库 `.python-version`） |
+| Node.js | 22 | 前端开发与构建（仓库 `.nvmrc`） |
+| FFmpeg | 任意 | yt-dlp 合并音视频、Whisper 音频处理 |
 
-### FFmpeg 安装（Windows）
+Windows 可从 [FFmpeg Builds](https://github.com/BtbN/FFmpeg-Builds/releases) 下载，并把 `bin/` 加入 PATH。
 
-从 https://github.com/BtbN/FFmpeg-Builds/releases 下载，解压后将 `bin/` 目录加入系统 PATH。
+## 本地安装
 
-## 环境变量配置
+Linux / macOS：
 
-AI 总结功能需要在 `backend/.env` 中配置 API：
+```bash
+python3.12 -m venv .venv
+
+# 最小可启动（认证 / 解析 / 下载 / 历史）
+.venv/bin/pip install -r backend/requirements-core.txt
+
+# 可选能力
+.venv/bin/pip install -r backend/requirements-ai.txt
+.venv/bin/pip install -r backend/requirements-whisper.txt
+
+# 或一次装全量
+.venv/bin/pip install -r backend/requirements.txt
+
+npm --prefix frontend install
+cp backend/.env.example backend/.env
+```
+
+Windows PowerShell：
+
+```powershell
+py -3.12 -m venv .venv
+
+# 最小可启动
+.\.venv\Scripts\python -m pip install -r backend\requirements-core.txt
+
+# 可选能力，或改为安装 requirements.txt 一次装全量
+.\.venv\Scripts\python -m pip install -r backend\requirements-ai.txt
+.\.venv\Scripts\python -m pip install -r backend\requirements-whisper.txt
+
+npm --prefix frontend install
+Copy-Item backend\.env.example backend\.env
+```
+
+## 环境变量
+
+复制 `backend/.env.example` 为 `backend/.env` 后按需修改。关键项：
 
 ```env
-# ── AI Provider ──
-AI_PROVIDER=deepseek               # deepseek | openai | openrouter
-AI_API_KEY=your_api_key_here
+# 功能开关
+FEATURE_AI=true
+FEATURE_WHISPER=true
+
+# AI
+AI_PROVIDER=deepseek
+AI_API_KEY=
 AI_BASE_URL=https://api.deepseek.com/anthropic
 AI_MODEL=deepseek-v4-flash
 
-# ── Prompt ──
-PROMPT_VERSION=1                   # prompts/{name}/v{N}.txt 版本号
+# 管理员（密码为空则不会自动创建 admin）
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=
 
-# ── Whisper 语音转录 ──
-WHISPER_MODEL=small                # tiny | base | small | medium | large
-SUBTITLE_CORRECTION_ENABLED=true   # AI 字幕校正开关
-SUBTITLE_CORRECTION_MAX_CHARS=15000  # 校正最大字符数
-WHISPER_MAX_DURATION=120           # 转录最大视频时长（秒），超过则跳过
+# 游客与限额
+GUEST_SECRET=请改成随机字符串
+GUEST_DAILY_LIMIT=3
+USER_DAILY_LIMIT=20
+REGISTRATION_ENABLED=true
 
-# ── 用户认证 ──
-ADMIN_USERNAME=admin               # 管理员用户名（启动时自动创建）
-ADMIN_PASSWORD=your_admin_password # 管理员密码（留空则不创建 admin）
-GUEST_SECRET=random_secret_key     # 游客 device_id HMAC 签名密钥
-GUEST_DAILY_LIMIT=3                # 游客每日 AI 使用次数
-USER_DAILY_LIMIT=20                # 注册用户每日 AI 使用次数
-REGISTRATION_ENABLED=true          # 是否开放注册
+# 可选路径覆盖
+# DB_PATH=...
+# AI_CONFIG_PATH=...
+# TEMP_DIR=...
+# DOWNLOAD_DIR=...
+# WHISPER_MODELS_DIR=...
+# BACKUP_DIR=...
 ```
 
-### 兼容旧变量
+兼容旧变量：`DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` 仍可读，但优先使用 `AI_*`。
 
-旧版变量名仍然生效（优先级低于 `AI_*`）：
+`.env` 不要提交到 Git。
 
-```env
-DEEPSEEK_API_KEY=your_api_key_here
-DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic
-DEEPSEEK_MODEL=deepseek-v4-flash
-```
+## 启动
 
-说明：
-- `AI_BASE_URL` 使用 Anthropic 兼容端点（`/anthropic` 后缀），后端通过 `anthropic` SDK 调用
-- `AI_MODEL` 默认 `deepseek-v4-flash`（非思考模型，约 11s）；如需更高质量可改为 `deepseek-v4-pro`（思考模型，60s+）
-- `.env` 文件不应提交到 git
+### 方式一：脚本
 
-## 快速开始
+- Windows：`start.bat`
+- Linux / macOS：`start.sh`
 
-### 1. 安装依赖
+### 方式二：手动
+
+以下命令均从仓库根目录执行，并在两个终端分别运行：
 
 ```bash
-# 后端
-cd backend
-pip install -r requirements.txt
+# 后端（Linux / macOS）
+.venv/bin/python -m uvicorn main:app --app-dir backend --reload --host 127.0.0.1 --port 8000
 
-# 前端
-cd frontend
-npm install
+# 前端（第二个终端）
+npm --prefix frontend run dev
 ```
 
-### 2. 启动开发环境
+Windows 后端命令：
 
-**方式一：一键启动（Windows）**
-
-双击 `start.bat`
-
-**方式二：手动启动**
-
-终端 1 - 后端：
-```bash
-cd backend
-python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```powershell
+.\.venv\Scripts\python -m uvicorn main:app --app-dir backend --reload --host 127.0.0.1 --port 8000
 ```
 
-终端 2 - 前端：
-```bash
-cd frontend
-npm run dev
-```
+默认地址：
 
-### 3. 配置 Whisper 模型（可选）
+| 服务 | 地址 |
+|------|------|
+| 前端 | http://127.0.0.1:5173 |
+| 后端 | http://127.0.0.1:8000 |
+| API 文档 | http://127.0.0.1:8000/docs |
+| 能力状态 | http://127.0.0.1:8000/api/capabilities |
 
-Whisper 语音转录用于无字幕视频的兜底方案。模型文件需手动下载到本地：
+如果 5173 被占用，可临时：
 
 ```bash
-# 模型目录结构
-mkdir -p backend/data/whisper_models/faster-whisper-small
-
-# 必需文件（从 HuggingFace 下载，约 2.4 GB）
-# 国内镜像: https://hf-mirror.com/guillaumeklay/faster-whisper-small
-# 文件列表: config.json, model.bin, tokenizer.json, vocabulary.txt
+npm --prefix frontend run dev -- --port 5174
 ```
 
-启动时自动检查模型完整性，缺失则禁用 Whisper（不影响其他功能）。
+## Whisper 模型（可选）
 
-### 4. 访问
+默认目录：
 
-| 服务 | 地址 | 说明 |
-|------|------|------|
-| 前端页面 | http://localhost:5173 | Vue 3 开发服务器 |
-| 后端 API | http://localhost:8000 | FastAPI 服务器 |
-| API 文档 | http://localhost:8000/docs | Swagger UI |
+```text
+backend/data/whisper_models/faster-whisper-small/
+  config.json
+  model.bin
+  tokenizer.json
+  vocabulary.txt
+```
 
-## 开发工作流
+模型或 `faster-whisper` 缺失时，只禁用本地转录，不影响网站启动。
 
-### 前端开发
+不要把模型权重提交到 Git；仓库根目录的 `faster-whisper-small/` 仅供本机临时使用，已被忽略。
 
-- 修改 `frontend/src/components/` 下的组件，Vite 会自动热重载
-- `frontend/src/composables/useDownloader.js` 封装了所有 API 调用和 WebSocket 逻辑
-- Vite 开发服务器通过代理将 `/api` 和 `/ws` 请求转发到后端
+## 目录结构（当前）
 
-### 后端开发
+```text
+videomind/
+├── backend/
+│   ├── main.py
+│   ├── config.py
+│   ├── database.py
+│   ├── .env.example
+│   ├── requirements.txt              # 引用 core + ai + whisper
+│   ├── requirements-core.txt
+│   ├── requirements-ai.txt
+│   ├── requirements-whisper.txt
+│   ├── api/
+│   │   ├── routes.py                 # 解析 / 下载 / 字幕下载
+│   │   ├── stream_routes.py          # AI 流式总结 / 问答
+│   │   ├── summary_routes.py
+│   │   ├── subtitle_text_routes.py
+│   │   ├── knowledge_routes.py       # 历史 / 标签
+│   │   ├── task_routes.py            # 后台任务查询 / 取消
+│   │   ├── auth_routes.py
+│   │   ├── admin_routes.py
+│   │   ├── health_routes.py
+│   │   └── security.py
+│   ├── core/
+│   │   ├── auth.py
+│   │   ├── cache.py
+│   │   ├── features.py               # 能力检测与降级
+│   │   ├── storage.py                # 运行目录与库初始化入口
+│   │   ├── job_store.py              # background_jobs 持久化
+│   │   ├── job_scheduler.py          # 单并发调度
+│   │   ├── background_pipeline.py    # 任务完成后的业务收尾
+│   │   ├── whisper.py
+│   │   ├── ai_client.py
+│   │   ├── downloader.py
+│   │   └── pipeline/                 # 字幕 / 摘要 / 笔记 / 导图
+│   ├── workers/
+│   │   └── whisper_worker.py         # 短生命周期转录子进程
+│   ├── tests/
+│   ├── prompts/
+│   ├── db/                           # 本地数据库（运行时，不提交）
+│   ├── temp/                         # 本地临时文件（不提交）
+│   ├── downloads/                    # 本地下载文件（不提交）
+│   └── data/                         # 本地 AI 配置与模型（不提交）
+├── frontend/
+│   ├── src/
+│   │   ├── App.vue
+│   │   ├── components/
+│   │   ├── composables/
+│   │   │   ├── useAuth.js
+│   │   │   ├── useDownloader.js
+│   │   │   ├── useSummary.js
+│   │   │   ├── useTaskPoller.js
+│   │   │   └── useCapabilities.js
+│   │   └── utils/
+│   └── package.json
+├── deploy/
+│   ├── install.sh
+│   ├── update.sh
+│   ├── backup.sh
+│   ├── cleanup.sh
+│   ├── videomind.service
+│   └── Caddyfile.example
+├── docs/
+│   ├── architecture.md
+│   └── development.md
+├── start.bat
+├── start.sh
+└── README.md
+```
 
-- 修改 `backend/core/downloader.py` 来调整 yt-dlp 参数
-- 修改 `backend/core/ai_client.py` 来调整 AI API 调用（统一客户端，含摘要/导图/笔记/问答的流式与非流式实现）
-- 修改 `backend/core/pipeline/` 来调整共享流水线模块（字幕工具集、摘要/笔记/导图/标签生成逻辑）
-- 修改 `backend/core/summarizer.py` 来调整字幕清洗、B 站 CC 字幕提取或降级方案
-- 修改 `backend/core/whisper.py` 来调整 Whisper 模型配置或转录参数
-- 修改 `backend/core/cache.py` 来调整缓存策略或表结构（ai_cache / whisper_cache / video_info_cache / user_history）
-- 修改 `backend/core/auth.py` 来调整用户认证、Session 管理、使用次数统计逻辑
-- 修改 `backend/api/auth_routes.py` 来调整认证路由（注册/登录/退出/me/usage）
-- 修改 `backend/api/security.py` 来调整请求安全守卫（身份校验、SSRF 防护、管理员检查）
-- 修改 `backend/api/routes.py` 来增删视频下载相关 API 端点
-- 修改 `backend/api/summary_routes.py` 来调整 AI 总结路由逻辑
-- 修改 `backend/api/stream_routes.py` 来调整 SSE 流式端点逻辑
-- 修改 `backend/api/subtitle_text_routes.py` 来调整字幕文本提取逻辑
-- 修改 `backend/core/models.py` 来调整视频下载数据模型
-- 修改 `backend/core/summary_models.py` 来调整 AI 总结数据模型
-- 修改 `backend/prompts/` 下的模板文件来调整 AI 输出质量
-- 启用 `--reload` 参数后，代码修改会自动重启服务
+## 开发时该改哪里
 
-### AI 总结开发说明
+| 目标 | 优先文件 |
+|------|----------|
+| 视频解析 / 下载 | `backend/core/downloader.py`、`backend/api/routes.py` |
+| AI 总结 / 问答 | `backend/core/ai_client.py`、`backend/api/stream_routes.py`、`backend/prompts/` |
+| 字幕与 Whisper | `backend/core/pipeline/subtitle.py`、`backend/core/whisper.py`、`backend/workers/whisper_worker.py` |
+| 后台任务 | `backend/core/job_store.py`、`backend/core/job_scheduler.py`、`backend/api/task_routes.py` |
+| 历史与搜索 | `backend/api/knowledge_routes.py`、`backend/core/cache.py` |
+| 认证与权限 | `backend/core/auth.py`、`backend/api/auth_routes.py`、`backend/api/security.py` |
+| 能力降级 | `backend/core/features.py`、`frontend/src/composables/useCapabilities.js` |
+| 前端学习页 | `frontend/src/components/AiSummary.vue`、`HistoryPage.vue` |
+| 任务轮询 UI | `frontend/src/composables/useTaskPoller.js` |
 
-**架构分层**：
-- `core/ai_client.py` — 统一 AI API 客户端，所有 AI 调用入口（流式/非流式），不包含业务逻辑
-- `core/summarizer.py` — 字幕清洗 + B 站 CC 字幕提取 + 降级方案，AI 调用委托给 `ai_client.py`
-- `core/pipeline/` — 共享流水线工具包，消除 core↔api 反向依赖
-  - `subtitle.py`：统一字幕工具集（`extract_bvid()`、`try_get_bilibili_cc_subtitle()`、`transcribe_and_correct()` 等），被所有路由文件共用
-  - `summary.py`、`notes.py`、`mindmap.py`、`tags.py`：各阶段 AI 流水线逻辑
-  - `subtitle_postprocess.py`：时间戳注入与笔记联动后处理
-- `core/cache.py` — SQLite 持久化缓存，URL → AI 结果映射
-- `core/summary_models.py` — Pydantic 数据模型
-- `api/stream_routes.py` — SSE 流式端点，编排缓存→字幕→AI→持久化全流程
-- `api/summary_routes.py` — 同步 AI 总结端点，与 stream_routes.py 共用 pipeline 工具
-- `prompts/{name}/v{N}.txt` — Prompt 模板文件，通过 `{variable}` 占位符注入上下文
+## 测试
 
-**模块详解**：
+```bash
+.venv/bin/python -B -m unittest discover -s backend/tests -v
+```
 
-`core/ai_client.py`（统一 AI 客户端）：
-- `_load_prompt(name)` 从 `prompts/{name}/v{PROMPT_VERSION}.txt` 加载模板
-- `_parse_json_response(content)` 从 AI 响应提取 JSON（支持 ` ```json ``` ` 包裹和裸 JSON）
-- `_chunk_summarize(subtitle_text, title)` 长视频分片 pipeline（>60000 字符触发），阻塞式返回合并摘要文本
-- `stream_chunk_summaries(subtitle_text, title)` 长视频分片**生成器**，首片优先 yield。首片用详细提示词（200-300 字+核心概念，max_tokens=1500），后续片精简（100-150 字，max_tokens=600）。yield 事件：`first_chunk_ready` → `chunk_progress`（每片）→ `all_chunks_ready`
-- 流式 API 使用 `client.messages.stream()`，yield `(event_type, data)` tuple
-- 非流式 API 返回 dict（结构化 JSON 解析后）
-- `_extract_text(response)` 兼容思考模型（`ThinkingBlock` + `TextBlock`）和非思考模型
+Windows PowerShell：
 
-`core/cache.py`（SQLite 持久化缓存，三张表）：
-- 表 `ai_cache`：`url_hash TEXT PRIMARY KEY` + `url, fingerprint, video_title, subtitle_text, source, result_json, created_at, updated_at`
-- 多P视频缓存隔离：URL 含 `?p=N` 时跳过指纹匹配（`fingerprint`），避免不同分P命中同一缓存
-- 表 `whisper_cache`：`url_hash TEXT PRIMARY KEY` + `url, subtitle_text, language, raw_text, created_at` — 存储校正后文本 + 原始转录
-- 表 `video_info_cache`：`url_hash TEXT PRIMARY KEY` + `url, duration, title, info_json, created_at` — 避免重复 yt-dlp 解析
-- `get_cached(url)` → dict | None；`save_cache(url, ...)` → upsert；`list_history(limit)` / `delete_cache(url)`
-- 缓存完整 AI 输出（result + mindmap + notes），命中后 SSE 重放，零 token 消耗
+```powershell
+.\.venv\Scripts\python -B -m unittest discover -s backend/tests -v
+```
 
-`core/whisper.py`（Faster-Whisper 转录模块）：
-- `is_model_available()` — 检查本地模型文件完整性
-- `transcribe(audio_path, language)` — 直接转录音频文件
-- `transcribe_video(url, language)` — 下载音频 + 转录 + 清理临时文件
-- 模型配置：device="cpu"，compute_type="int8"，local_files_only=True
-- VAD 过滤：beam_size=5，vad_filter=True
-- 字幕 AI 校正：`correct_subtitle(text, title, description)` 在 `ai_client.py` 中
-
-`api/stream_routes.py`（SSE 流式端点）：
-- `_get_subtitle_text()` 标准化字幕 pipeline：B 站 CC API → yt-dlp 原生 → Whisper + AI 校正
-- 视频时长预检：先查 `video_info_cache`，超长视频直接拦截（跳过慢速 yt-dlp 解析）
-- 缓存优先：`get_cached()` 命中 → SSE 重放，不调用 AI
-- **长视频两阶段摘要**：`_split_text()` >60000 字符触发分片 → `stream_chunk_summaries()` 首片优先 → `first_chunk_ready` 阶段流式输出初步摘要（`is_partial: true`）→ `chunk_progress` 逐片进度 → `all_chunks_ready` 阶段流式输出完整摘要（`is_partial: false`）覆盖
-- 进度阶段：`subtitle_loaded` → `summary_initial` / `chunk_progress` / `summary_final`（长视频）或 `summary_generating`（短视频）→ `mindmap_generating` → `notes_generating`
-- 思维导图和笔记复用合并后的摘要文本，避免重复分片（总计 N+4 次 API 调用 vs 旧版 3N+3 次）
-- 流水线完成后 `save_cache()` + `save_video_info_cache()` 持久化
-- `_sse_generator` 使用 `asyncio.Queue` + `loop.call_soon_threadsafe` 跨线程实时流式
-
-**Prompt 系统**：
-- 模板位于 `backend/prompts/{name}/v{N}.txt`
-- 变量通过 Python `.format()` 注入：`{video_title}`、`{subtitle_text}`、`{content_summary}`
-- 切换版本：修改 `.env` 中 `PROMPT_VERSION`
-- 要求 AI 输出结构化 JSON（非纯文本），便于后续解析和学习卡片生成
-
-**其他要点**：
-- `extract_bilibili_subtitle(url)` 通过 Bilibili CC 字幕 API（`/x/v2/dm/view?type=1`）获取真实字幕，优先于 yt-dlp
-- `extract_bilibili_subtitle_by_cid(bvid, cid, aid)` 按分P的 cid 获取字幕，用于多P视频独立总结
-- 多P视频 URL 中的 `?p=N` 参数贯穿整个流水线：字幕获取、AI 总结、缓存隔离均按分P独立处理
-- 无字幕时自动降级到 `summarize_from_description()`，前端显示 `⚠️` 警告
-- `danmaku` 轨道在 `downloader.py` 中过滤，弹幕 XML 通过 `_clean_danmaku_xml()` 专门解析
-- 思维导图渲染使用 `markmap-lib` + `markmap-view`；导出须基于 `mindmapMarkdown` 离屏重新渲染
-- 前端 Markdown 渲染使用 `marked` + `DOMPurify`，注意 XSS 防护
-- 摘要区和问答区列表缩进依赖 `AiSummary.vue` 中显式 CSS，不要假设 `prose` 默认样式
-
-### 新增平台兼容补丁
-
-当某个平台出现解析错误时，在 `core/downloader.py` 末尾添加 monkey-patch 函数，参考已有的 `_patch_bilibili_extractor` 和 `_patch_douyin_extractor`。
-
-常见错误类型及处理思路：
-
-| 错误 | 原因 | 处理方式 |
-|------|------|----------|
-| HTTP 412 / 403 | 服务器 IP 被封，网页请求被拒 | 改调平台 API 接口，构造假网页数据 |
-| Fresh cookies needed | 需要 JS 生成的 cookie | 寻找移动端 API 或其他无 cookie 接口 |
-| Unable to extract | 提取器解析失败 | 查看 yt-dlp 源码，找降级路径 |
-
-### 新增短链支持
-
-在 `api/routes.py` 的 `_resolve_short_url` 函数中添加新平台的短链解析逻辑，参考已有的 `b23.tv` 和 `v.douyin.com` 处理方式：只取 302 重定向的 `Location` header，不跟随到最终页面。
-
-### 新增缩略图 CDN 映射
-
-在 `api/routes.py` 的 `proxy_thumbnail` 函数中的 `_CDN_REFERER` 字典里添加新平台的 CDN 域名后缀和对应 Referer。
-
-### 样式开发
-
-本项目前端样式采用**两层结构**：
-
-- **全局样式** `frontend/src/style.css`：仅包含 Tailwind 导入、基础重置（`* { box-sizing: border-box }`）和少量全局动画
-- **组件样式**：每个组件使用 `<style scoped>` 编写独立 CSS，不使用 Tailwind 原子类
-
-> 注意：早期版本曾使用 Tailwind 原子类，当前版本已全部迁移为 Scoped CSS，新增组件请遵循此规范。
+当前测试覆盖任务存储、调度、存储初始化、无 RAG 约束和任务路由等核心行为。
 
 ## 生产构建
 
 ```bash
-# 构建前端
-cd frontend
-npm run build
-
-# 启动生产模式（FastAPI 会托管前端静态文件）
-cd ../backend
-python main.py
+npm --prefix frontend run build
+cd backend
+../.venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-生产模式下访问 http://localhost:8000 即可。
+生产环境下 FastAPI 会托管 `frontend/dist`。更完整的服务器安装请用 `deploy/install.sh`。
 
-## 目录说明
+## 常见问题
 
-```
-videomind/
-├── backend/                    # Python 后端
-│   ├── main.py                 # FastAPI 应用入口（含 CORS、静态文件服务）
-│   ├── requirements.txt        # Python 依赖清单
-│   ├── .env                    # 环境变量（DEEPSEEK_API_KEY 等，不提交 git）
-│   ├── core/
-│   │   ├── __init__.py
-│   │   ├── downloader.py       # yt-dlp 核心封装类 VideoDownloader
-│   │   ├── ai_client.py        # 统一 AI API 客户端（流式/非流式，prompt 加载，字幕校正）
-│   │   ├── summarizer.py       # 字幕清洗 + B 站 CC 字幕提取 + 降级方案
-│   │   ├── whisper.py          # Faster-Whisper 转录模块（本地模型，CPU/int8）
-│   │   ├── cache.py            # SQLite 持久化缓存（ai_cache + whisper_cache + video_info_cache + user_history）
-│   │   ├── auth.py             # 用户认证核心（Session/密码/游客签名/使用次数统计）
-│   │   ├── summary_models.py   # AI 总结 Pydantic 模型
-│   │   ├── models.py           # 视频下载 Pydantic 数据模型
-│   │   └── pipeline/           # 共享流水线工具（api/ 与 core/ 共用）
-│   │       ├── subtitle.py            # 统一字幕工具集
-│   │       ├── summary.py             # 摘要生成流水线
-│   │       ├── notes.py               # 笔记生成流水线
-│   │       ├── mindmap.py             # 思维导图生成流水线
-│   │       ├── tags.py                # 标签提取流水线
-│   │       └── subtitle_postprocess.py # 时间戳注入与笔记联动
-│   ├── prompts/                # Prompt 模板（版本化）
-│   │   ├── summary/v1.txt
-│   │   ├── notes/v1.txt
-│   │   ├── mindmap/v1.txt
-│   │   ├── flashcard/v1.txt
-│   │   └── subtitle_correction/v1.txt
-│   ├── data/
-│   │   ├── chroma/              # ChromaDB 向量数据库
-│   │   └── whisper_models/      # Whisper 本地模型文件
-│   ├── api/
-│   │   ├── __init__.py
-│   │   ├── routes.py                # REST + WebSocket 路由（含 bilibili.com URL 规范化）
-│   │   ├── security.py              # 请求安全守卫（身份校验、SSRF 防护、管理员检查、WebSocket 认证）
-│   │   ├── summary_routes.py        # AI 总结路由（/api/summarize，含无字幕降级）
-│   │   ├── stream_routes.py         # SSE 流式端点（/api/summarize/stream + /api/chat/stream）
-│   │   ├── subtitle_text_routes.py  # 字幕文本提取端点（/api/subtitle/text）
-│   │   ├── knowledge_routes.py      # 知识管理端点（/api/history、/api/search、/api/tags）
-│   │   ├── auth_routes.py           # 认证路由（/api/auth/*）
-│   │   ├── ai_routes.py             # AI 入库/RAG 路由（/api/ingest、/api/rag/query/stream，admin-only）
-│   │   └── task_routes.py           # 异步任务路由（含资源归属校验）
-│   └── downloads/              # 视频下载输出目录（自动创建）
-├── frontend/                   # Vue 3 前端
-│   ├── vite.config.js          # Vite 配置（插件、代理）
-│   ├── index.html              # HTML 入口
-│   ├── package.json            # Node.js 依赖
-│   └── src/
-│       ├── main.js             # Vue 应用入口
-│       ├── App.vue             # 根组件（串联所有子组件）
-│       ├── style.css           # Tailwind 和自定义样式
-│       ├── components/         # Vue 组件
-│       │   ├── NavBar.vue          # 顶部导航栏（品牌 + 菜单 + 用户菜单 + 登录按钮）
-│       │   ├── LoginModal.vue      # 登录注册弹窗（深色主题，登录/注册切换）
-│       │   ├── HeroSection.vue     # Hero 区域（含输入框和解析按钮）
-│       │   ├── AiSummary.vue       # AI 总结（流式摘要+章节大纲+思维导图+AI 问答，Markdown 渲染，含 CJK 宽度修正）
-│       │   ├── VideoContextPanel.vue # 视频信息展示区（封面/标题/元数据/播放，sidebar 折叠模式）
-│       │   ├── DownloadTools.vue   # 下载工具区（格式/分P/字幕/进度，mobile/sidebar 双布局）
-│       │   ├── DownloadHistoryPanel.vue # 下载记录列表组件
-│       │   ├── VideoPlayerModal.vue # 视频播放弹窗（HTML5 原生播放器，stream_url 过期自动刷新）
-│       │   ├── FeaturesSection.vue # 特性展示（6 卡片 3 列）
-│       │   ├── FooterSection.vue   # 页脚
-│       │   ├── HistoryPage.vue     # 学习历史页（搜索+标签+收藏+删除+多P折叠+语义搜索+统计）
-│       │   ├── AdminSettings.vue   # AI 模型配置弹窗（管理员专用）
-│       │   ├── UrlInput.vue        # 备用（当前未使用）
-│       │   ├── VideoInfo.vue       # 备用（当前未使用）
-│       │   ├── FormatSelector.vue  # 备用（当前未使用）
-│       │   ├── DownloadProgress.vue # 备用（当前未使用）
-│       │   └── DownloadHistory.vue  # 备用（当前未使用）
-│       ├── composables/
-│       │   ├── useAuth.js      # 用户认证状态管理（登录/注册/退出/游客身份/用量查询）
-│       │   ├── useDownloader.js # 下载 API/WebSocket 对接（核心状态管理，含认证头和 blob 下载）
-│       │   ├── useSummary.js    # AI 总结状态管理（SSE 流式接收、Markdown 渲染、字幕文本获取）
-│       │   └── useChat.js       # AI 问答状态管理（流式对话、历史记录）
-│       └── utils/
-│           └── resultFormatters.js # 公共格式化工具（formatBytes/formatViewCount/formatDuration 等）
-├── docs/                       # 项目文档
-├── start.bat                   # Windows 一键启动脚本
-└── README.md
-```
+**Q: 为什么没有默认 admin？**
 
-## 调试技巧
+A: 只有 `.env` 中配置了 `ADMIN_PASSWORD` 时才会自动创建。密码为空则不创建。
 
-### 查看后台日志
+**Q: 登录后历史是空的？**
 
-后端使用 uvicorn 的 `--reload` 模式，代码修改后自动重启；启动终端会实时显示请求日志和错误信息。
+A: 本地历史保存在本机 `backend/db/knowledge.db`，不会从 GitHub 或服务器自动同步。新环境或新数据库本来就是空的。
 
-### 使用 API 文档调试接口
+**Q: AI / Whisper 不可用，网站还能开吗？**
 
-打开 http://localhost:8000/docs，可以直接在 Swagger UI 中测试所有 REST 端点。
+A: 可以。核心能力（认证、解析、下载、历史）只依赖 `requirements-core.txt`。
 
-### WebSocket 调试
+**Q: 更新代码会不会丢历史？**
 
-在浏览器开发者工具 → Network → WS 标签页可以查看 WebSocket 消息。
+A: 生产历史默认保存在代码目录外的 `/var/lib/videomind/db/knowledge.db`。正常 `git pull` / `deploy/update.sh` 不会删除它。危险操作包括删除数据目录、覆盖数据库、修改 `DB_PATH` 或执行 `git clean -fdx`。
 
-### 常见问题
+**Q: bcrypt / passlib 报错？**
 
-**Q: 提示 "No module named 'core.downloader'"**
+A: 使用 `requirements-core.txt` 中的 `bcrypt==4.0.1`。`bcrypt 5.x` 与当前 passlib 不兼容。
 
-A: 确保在 `backend/` 目录下启动服务（`cd backend && python -m uvicorn main:app`）。
+**Q: 端口 5173 被占用？**
 
-**Q: 下载时提示 ffmpeg 找不到**
-
-A: 安装 FFmpeg 并加入 PATH，或在 `downloader.py` 中通过 `ffmpeg_location` 参数指定路径。
-
-**Q: 前端页面无法访问后端 API**
-
-A: 检查 Vite 代理配置是否正确（`vite.config.js` 中的 proxy 配置）。确保后端在 8000 端口运行。
-
-**Q: B 站解析报 412 错误**
-
-A: 云服务器 IP 被 B 站封锁，`_patch_bilibili_extractor()` 会自动处理。如果仍然失败，检查 `api.bilibili.com` 是否可访问。
-
-**Q: 抖音解析报 "Fresh cookies needed"**
-
-A: `_patch_douyin_extractor()` 会自动降级到移动端 API。如果失败，检查 `api.amemv.com` 是否可访问。
-
-**Q: 某平台缩略图不显示**
-
-A: 两种可能：① CDN 防盗链——在 `proxy_thumbnail` 的 `_CDN_REFERER` 字典中添加该平台 CDN 域名和 Referer；② Mixed Content——确认前端使用的是 `/api/thumbnail?url=...` 代理而非直接 URL。
-
-**Q: 手机分享链接解析失败（带标题文字）**
-
-A: `extract_url()` 会自动从文本中提取 URL。如果短链无法解析，检查 `_resolve_short_url()` 是否覆盖了该短链域名。
-
-**Q: AI 总结报错 `'ThinkingBlock' object has no attribute 'text'`**
-
-A: 使用了 DeepSeek 思考模型（如 `deepseek-v4-pro`），其响应第一个 block 是 `ThinkingBlock`。`summarizer.py` 中的 `_extract_text()` 已处理此情况；如果仍报错，检查 `summarizer.py` 是否是最新版本。
-
-**Q: AI 总结提示"该视频无字幕"**
-
-A: 部分平台（如 Bilibili）不提供 yt-dlp 可获取的字幕，系统会自动降级为基于视频简介生成总结，并在结果顶部显示 `⚠️` 警告。这是预期行为，不是错误。
-
-**Q: 多P视频只总结了第1P，其他P怎么办？**
-
-A: 多P视频默认总结第1P。在 AI 总结区域顶部有分P选择器（水平滚动列表），点击其他分P即可触发该P的独立 AI 总结。每个分P的字幕、缓存、总结结果完全独立。如果分P选择器显示不全，可以左右滚动或使用箭头按钮。
-
-**Q: 多P视频的 AI 总结很慢**
-
-A: 多P视频每P都需要独立获取字幕+AI总结，这是预期行为。首次总结后结果会缓存到 `ai_cache` 表，再次访问同一分P时直接命中缓存，秒级返回。
-
-**Q: AI 总结速度很慢（超过 60 秒）**
-
-A: 检查 `backend/.env` 中的 `DEEPSEEK_MODEL`，如果是 `deepseek-v4-pro`（思考模型）则速度较慢。改为 `deepseek-v4-flash` 可将耗时降至约 11 秒。
-
-**Q: 思维导图文字超出方框**
-
-A: `AiSummary.vue` 的 `measureText()` 函数负责计算节点宽度。如果出现溢出，检查节点文本是否包含特殊字符或混合 CJK+ASCII 内容，可适当增大 `MINDMAP_CONFIG.fontSize` 或 `nodeGapX` 参数。
-
-**Q: 如何创建管理员账号？**
-
-A: 在 `backend/.env` 中设置 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD`，后端启动时会自动创建。密码留空则不创建 admin 用户。
-
-**Q: 游客和注册用户的区别？**
-
-A: 游客每日 3 次 AI 使用，无学习历史；注册用户每日 20 次，有个人学习历史和标签；管理员无限制，可查看全局数据。见 `backend/config.py` 中的 `GUEST_DAILY_LIMIT` 和 `USER_DAILY_LIMIT`。
-
-**Q: Session Cookie 有效期多长？**
-
-A: 7 天。Cookie 名为 `vm_session`，HttpOnly + SameSite=Lax。过期后自动清理。
-
-**Q: 前端在 HTTP 环境下报错 `crypto.randomUUID is not a function`？**
-
-A: `crypto.randomUUID()` 需要 HTTPS secure context。`useAuth.js` 已有 Math.random() 降级方案，确保使用最新前端代码。
-
-**Q: AI 总结 SSE 流式无实时输出（全部一次性返回）**
-
-A: 检查 `stream_routes.py` 中的 `_sse_generator` 是否被回退为 `list()` 缓冲方案。正确实现使用 `asyncio.Queue` + `loop.call_soon_threadsafe`，确保每个 SSE 事件即时推送。
-
-**Q: B 站视频有字幕但系统返回"无字幕"**
-
-A: 检查 `extract_bilibili_subtitle()` 是否正常调用。B 站的 CC 字幕通过 `api.bilibili.com/x/v2/dm/view?type=1` 获取，与 yt-dlp 的字幕机制完全不同。如果 `dm/view` API 返回空 `subtitles` 列表，则该视频确实没有 CC 字幕。
-
-**Q: AI 问答提示"字幕内容为空，无法进行问答"**
-
-A: `chat_stream` 端点要求前端先通过 `/api/subtitle/text` 获取字幕文本，然后在请求体中传入 `subtitle_text` 字段。不能直接传 URL。
-
-**Q: Whisper 转录提示"模型未就绪"**
-
-A: 检查 `backend/data/whisper_models/faster-whisper-small/` 目录下是否包含 4 个必需文件：`config.json`、`model.bin`、`tokenizer.json`、`vocabulary.txt`。缺失则转录功能自动禁用。
-
-**Q: Whisper 转录非常慢**
-
-A: Faster-Whisper small 在 CPU 上的实时率约为 3-5x，2 分钟视频约需 6-10 分钟。超过 `WHISPER_MAX_DURATION`（默认 120s）的视频会自动跳过。如需提升速度，可考虑：① 使用 GPU ② 换用 tiny 模型 ③ 调大 WHISPER_MAX_DURATION。
-
-**Q: 字幕校正后内容异常短**
-
-A: `correct_subtitle()` 有 30% 长度校验：如果校正后文本少于原始文本的 30%，判定为异常并降级使用原始文本。日志会输出 `[SubtitleCorrection] 校正失败` 提示。
-
-**Q: 抖音视频解析很慢（20s+）**
-
-A: yt-dlp 请求抖音页面获取视频信息较慢，这是正常现象。首次解析后结果缓存到 `video_info_cache` 表，二次访问毫秒级。超长视频在缓存命中后会直接拦截，不再调用 yt-dlp。
-
-**Q: 长视频点 AI 总结仍然提示"超过限制"**
-
-A: 这是预期行为。超过 `WHISPER_MAX_DURATION`（默认 120s）的无字幕视频不支持语音识别。如果视频有简介，会自动降级为基于简介的总结。
-
-**Q: 手机浏览器上 UI 显示不全**
-
-A: 前端已做响应式适配（768px 断点）。主要改动：
-- HeroSection：标题 `white-space: nowrap` 防止断行，输入框+按钮垂直堆叠，输入框 `font-size: 1rem`（16px）避免 iOS 自动缩放
-- AiSummary：子 Tab 按钮缩小，横向滚动显示细滚动条；内容区 `max-height: 50-60vh`
-- App.vue：视频卡片垂直布局，格式网格单列
-- 所有触控目标 ≥44px
-
-改动集中在 `HeroSection.vue`、`AiSummary.vue`、`App.vue` 的 `@media (max-width: 768px)` 块中。如果仍有显示问题，检查是否使用了最新前端代码并重新 `npm run build`。
+A: 前端可换端口，例如 `npm run dev -- --port 5174`。后端默认 8000。
