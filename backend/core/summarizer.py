@@ -6,6 +6,10 @@ AI 调用统一委托给 core.ai_client（prompt 文件化，结构化输出）�
 import json
 import os
 import re
+import time
+import uuid
+import urllib.error
+import urllib.parse
 import urllib.request
 from xml.etree import ElementTree
 
@@ -14,6 +18,10 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 
 from core.ai_client import summarize, generate_notes, generate_mindmap, stream_summarize, stream_generate_notes, stream_chat, _chunk_summarize
+from core.logging_config import get_logger
+
+
+logger = get_logger(__name__)
 
 
 # ──── 字幕清洗 ────
@@ -205,6 +213,50 @@ def summarize_from_description(title: str, description: str) -> dict:
 
 # ──── B 站 CC 字幕提取 ────
 
+_BILIBILI_HEADERS = {
+    'User-Agent': (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+    ),
+    'Accept': 'application/json, text/plain, */*',
+}
+_BILIBILI_COOKIE = os.getenv('BILIBILI_COOKIE', '').strip() or (
+    f"buvid3={str(uuid.uuid4()).upper()}infoc; b_nut={int(time.time())}"
+)
+_BILIBILI_HEADERS['Cookie'] = _BILIBILI_COOKIE
+
+
+def _fetch_bilibili_json(url: str, headers: dict = None, retries: int = 2) -> dict:
+    """Fetch a Bilibili JSON endpoint without converting failures into absence."""
+    request_headers = {**_BILIBILI_HEADERS, **(headers or {})}
+    last_error = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, headers=request_headers)
+            with urllib.request.urlopen(req, timeout=15) as response:
+                payload = json.loads(response.read())
+            if not isinstance(payload, dict):
+                raise RuntimeError('B站接口返回了无效数据')
+            code = payload.get('code', 0)
+            if code != 0:
+                raise RuntimeError(f"B站接口错误 {code}: {payload.get('message', '')}")
+            return payload
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < retries:
+                time.sleep(0.25 * (attempt + 1))
+    raise RuntimeError(f"B站接口请求失败: {last_error}") from last_error
+
+
+def _select_bilibili_track(subtitle_list: list[dict]) -> dict:
+    def rank(track):
+        language = (track.get('lan') or '').lower()
+        is_chinese = language.startswith('zh') or language.startswith('ai-zh')
+        is_auto = language.startswith('ai-') or track.get('type') == 1
+        return (0 if is_chinese else 1, 1 if is_auto else 0)
+
+    return min(subtitle_list, key=rank)
+
 def extract_bilibili_subtitle_by_cid(bvid: str, cid: int, aid: int = None) -> dict | None:
     """获取B站指定分P的CC字幕（人工字幕 > 自动字幕）。
 
@@ -215,42 +267,64 @@ def extract_bilibili_subtitle_by_cid(bvid: str, cid: int, aid: int = None) -> di
 
     返回格式同 extract_bilibili_subtitle。
     """
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': f'https://www.bilibili.com/video/{bvid}',
-        }
+    headers = {
+        'Referer': f'https://www.bilibili.com/video/{bvid}',
+    }
+    metadata = None
+    primary_confirmed_absent = False
+    fallback_confirmed_absent = False
 
-        if not aid:
-            view_req = urllib.request.Request(
-                f'https://api.bilibili.com/x/web-interface/view?bvid={bvid}',
+    query = urllib.parse.urlencode({'bvid': bvid, 'cid': cid})
+    primary_url = f'https://api.bilibili.com/x/player/v2?{query}'
+    try:
+        primary = _fetch_bilibili_json(primary_url, headers=headers)
+        primary_data = primary.get('data', {})
+        primary_tracks = primary_data.get('subtitle', {}).get('subtitles') or []
+        if primary_tracks:
+            metadata = primary
+        else:
+            aid = aid or primary_data.get('aid')
+            primary_confirmed_absent = not primary_data.get('need_login_subtitle', False)
+    except RuntimeError as exc:
+        logger.warning(f"B站字幕元数据请求失败 endpoint={primary_url.split('?')[0]}: {exc}")
+
+    if metadata is None and not aid:
+        try:
+            view_query = urllib.parse.urlencode({'bvid': bvid})
+            view_data = _fetch_bilibili_json(
+                f'https://api.bilibili.com/x/web-interface/view?{view_query}',
                 headers=headers,
             )
-            view_data = json.loads(urllib.request.urlopen(view_req, timeout=15).read())
             aid = view_data.get('data', {}).get('aid')
-            if not aid:
-                return None
+        except RuntimeError as exc:
+            logger.warning(f"B站视频 aid 请求失败 bvid={bvid}: {exc}")
 
-        dm_req = urllib.request.Request(
-            f'https://api.bilibili.com/x/v2/dm/view?aid={aid}&oid={cid}&type=1',
-            headers=headers,
-        )
-        dm_data = json.loads(urllib.request.urlopen(dm_req, timeout=15).read())
-        subtitle_list = dm_data.get('data', {}).get('subtitle', {}).get('subtitles') or []
+    if metadata is None and aid:
+        try:
+            dm_query = urllib.parse.urlencode({'type': 1, 'oid': cid, 'pid': aid})
+            fallback = _fetch_bilibili_json(
+                f'https://api.bilibili.com/x/v2/dm/view?{dm_query}',
+                headers=headers,
+            )
+            fallback_tracks = fallback.get('data', {}).get('subtitle', {}).get('subtitles') or []
+            if fallback_tracks:
+                metadata = fallback
+            else:
+                fallback_confirmed_absent = True
+        except RuntimeError as exc:
+            logger.warning(f"B站备用字幕元数据请求失败 bvid={bvid} cid={cid}: {exc}")
 
-        if not subtitle_list:
-            return None
+    if metadata is None:
+        if primary_confirmed_absent or fallback_confirmed_absent:
+            return {'has_subtitle': False, 'reason': 'absent'}
+        return None
 
-        best = subtitle_list[0]
-        for s in subtitle_list:
-            lan = s.get('lan', '')
-            if lan in ('zh', 'zh-Hans'):
-                if not lan.startswith('ai-'):
-                    best = s
-                    break
-                best = s
+    subtitle_list = metadata.get('data', {}).get('subtitle', {}).get('subtitles') or []
 
-        sub_type = 'auto' if (best.get('lan', '') or '').startswith('ai-') else 'manual'
+    best = _select_bilibili_track(subtitle_list)
+    language = best.get('lan', '') or ''
+    sub_type = 'auto' if language.startswith('ai-') or best.get('type') == 1 else 'manual'
+    try:
         sub_url = best.get('subtitle_url', '')
         if not sub_url:
             return None
@@ -260,8 +334,7 @@ def extract_bilibili_subtitle_by_cid(bvid: str, cid: int, aid: int = None) -> di
         if sub_url.startswith('http://'):
             sub_url = 'https://' + sub_url[7:]
 
-        sub_req = urllib.request.Request(sub_url, headers=headers)
-        sub_json = json.loads(urllib.request.urlopen(sub_req, timeout=15).read())
+        sub_json = _fetch_bilibili_json(sub_url, headers=headers)
         body = sub_json.get('body', [])
 
         segments = []
@@ -282,16 +355,20 @@ def extract_bilibili_subtitle_by_cid(bvid: str, cid: int, aid: int = None) -> di
             ss = int(seg['start'] % 60)
             formatted_lines.append(f"[{mm:02d}:{ss:02d}] {seg['text']}")
 
+        if not segments:
+            return None
+
         return {
             'has_subtitle': True,
-            'language': best.get('lan', 'zh'),
+            'language': language or 'zh',
             'subtitle_type': sub_type,
             'segments': segments,
             'full_text': full_text,
             'text': '\n'.join(formatted_lines),
         }
 
-    except Exception:
+    except Exception as exc:
+        logger.warning(f"B站字幕正文请求失败 bvid={bvid} cid={cid}: {exc}")
         return None
 
 
@@ -302,25 +379,34 @@ def extract_bilibili_subtitle(url: str) -> dict | None:
         return None
     bvid = m.group(1)
 
+    headers = {'Referer': f'https://www.bilibili.com/video/{bvid}'}
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': f'https://www.bilibili.com/video/{bvid}',
-        }
-        view_req = urllib.request.Request(
-            f'https://api.bilibili.com/x/web-interface/view?bvid={bvid}',
+        query = urllib.parse.urlencode({'bvid': bvid})
+        view_data = _fetch_bilibili_json(
+            f'https://api.bilibili.com/x/web-interface/view?{query}',
             headers=headers,
         )
-        view_data = json.loads(urllib.request.urlopen(view_req, timeout=15).read())
-        cid = view_data.get('data', {}).get('cid')
-        aid = view_data.get('data', {}).get('aid')
-        if not cid or not aid:
-            return None
+        video_data = view_data.get('data', {})
+        cid = video_data.get('cid')
+        aid = video_data.get('aid')
+        if cid:
+            return extract_bilibili_subtitle_by_cid(bvid, cid, aid)
+    except RuntimeError as exc:
+        logger.warning(f"B站视频信息请求失败 bvid={bvid}: {exc}")
 
-        return extract_bilibili_subtitle_by_cid(bvid, cid, aid)
+    try:
+        query = urllib.parse.urlencode({'bvid': bvid})
+        page_data = _fetch_bilibili_json(
+            f'https://api.bilibili.com/x/player/pagelist?{query}',
+            headers=headers,
+        )
+        pages = page_data.get('data') or []
+        if pages and pages[0].get('cid'):
+            return extract_bilibili_subtitle_by_cid(bvid, pages[0]['cid'])
+    except RuntimeError as exc:
+        logger.warning(f"B站分P信息请求失败 bvid={bvid}: {exc}")
 
-    except Exception:
-        return None
+    return None
 
 
 # ──── 别名（兼容旧 import） ────

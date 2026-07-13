@@ -9,6 +9,7 @@ from typing import Optional, Callable
 from asyncio import Queue
 
 from .models import VideoInfo, FormatOption, ProgressData, VideoPart, VideoChapter, SubtitleTrack
+from .video import selected_video_part_index, video_duration_for_url
 
 # 下载清理策略
 _MAX_DOWNLOADS = 20       # 最多保留 20 个下载
@@ -390,18 +391,19 @@ class VideoDownloader:
             import re as _re
             title = _re.sub(r'\s+p\d{2,}\s+.*$', '', title).strip()
 
-        # yt-dlp 用 noplaylist=True 只解析第一P，所以 info['duration'] 只是 P1 的时长
-        # 必须用分P列表的时长之和作为总时长
+        # 基础 URL 展示全集总时长；显式分 P 必须保留所选分 P 时长，供 Whisper 使用。
         video_duration = info.get('duration')
         if parts and len(parts) > 1:
-            total_parts_duration = sum(p.duration for p in parts if p.duration)
-            if total_parts_duration > 0:
-                video_duration = total_parts_duration
+            duration_info = {**info, 'parts': parts}
+            if selected_video_part_index(url, duration_info) is not None:
+                video_duration = video_duration_for_url(url, duration_info)
+            else:
+                total_parts_duration = sum(p.duration for p in parts if p.duration)
+                if total_parts_duration > 0:
+                    video_duration = total_parts_duration
 
         # ── 基于码率的统一文件大小估算 ──
-        # 核心问题：yt-dlp 返回的 filesize 只是第一P的大小，不是整个视频的
-        # 必须将 filesize 调整为整个视频的大小，前端比例计算才能正确
-        # 最可靠的方式：用码率(kbps) × 全视频时长(秒) 计算
+        # 用码率(kbps) × 当前请求范围时长(秒)统一估算，前端再按所选分 P 比例换算。
 
         # 找出最佳音频流的码率（视频流估算文件大小时需加上）
         best_audio_tbr = 0

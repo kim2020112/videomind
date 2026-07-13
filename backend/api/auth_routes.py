@@ -1,6 +1,7 @@
 """用户认证路由 — 注册/登录/退出/me/guest-sign。"""
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 
@@ -44,10 +45,41 @@ def _check_guest_sign_rate(ip: str) -> bool:
         return True
 
 
-# ── 依赖：从 cookie 获取当前用户 ──
+# ── 依赖：从窗口凭据或 cookie 获取当前用户 ──
+
+def get_request_session_id(request: Request) -> str | None:
+    """Resolve an explicit window session before the legacy shared cookie."""
+    authorization = request.headers.get("Authorization")
+    if authorization is not None:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() == "bearer" and token.strip():
+            return token.strip()
+        return None
+
+    query_session = request.query_params.get("session_id")
+    if query_session is not None:
+        return query_session or None
+
+    session_mode = (
+        request.headers.get("X-Session-Mode")
+        or request.query_params.get("session_mode")
+    )
+    if session_mode == "guest":
+        return None
+
+    return request.cookies.get(SESSION_COOKIE)
+
+
+def _has_explicit_session(request: Request) -> bool:
+    return (
+        request.headers.get("Authorization") is not None
+        or request.query_params.get("session_id") is not None
+        or request.headers.get("X-Session-Mode") == "guest"
+        or request.query_params.get("session_mode") == "guest"
+    )
 
 def get_current_user(request: Request) -> dict | None:
-    session_id = request.cookies.get(SESSION_COOKIE)
+    session_id = get_request_session_id(request)
     if not session_id:
         return None
     return get_user_by_session(session_id)
@@ -103,10 +135,7 @@ async def register(req: AuthRequest):
         raise HTTPException(409, "用户名已存在")
     user_id = create_user(req.username, req.password)
     session_id = create_session(user_id)
-    resp = Response(
-        content='{"status":"ok"}',
-        media_type="application/json",
-    )
+    resp = JSONResponse({"status": "ok", "session_id": session_id})
     resp.set_cookie(
         SESSION_COOKIE, session_id,
         httponly=True, samesite="lax", path="/", max_age=604800,
@@ -122,10 +151,7 @@ async def login(req: AuthRequest):
     if not user["is_active"] or user["is_deleted"]:
         raise HTTPException(403, "账号已禁用")
     session_id = create_session(user["id"])
-    resp = Response(
-        content='{"status":"ok"}',
-        media_type="application/json",
-    )
+    resp = JSONResponse({"status": "ok", "session_id": session_id})
     resp.set_cookie(
         SESSION_COOKIE, session_id,
         httponly=True, samesite="lax", path="/", max_age=604800,
@@ -135,19 +161,22 @@ async def login(req: AuthRequest):
 
 @router.post("/logout")
 async def logout(request: Request):
-    session_id = request.cookies.get(SESSION_COOKIE)
+    explicit_session = _has_explicit_session(request)
+    session_id = get_request_session_id(request)
     if session_id:
         delete_session(session_id)
     resp = Response(
         content='{"status":"ok"}',
         media_type="application/json",
     )
-    resp.delete_cookie(SESSION_COOKIE, path="/")
+    if not explicit_session:
+        resp.delete_cookie(SESSION_COOKIE, path="/")
     return resp
 
 
 @router.get("/me")
 async def me(request: Request):
+    session_id = get_request_session_id(request)
     identity = get_identity(request)
     from core.auth import check_usage_limit, get_today_usage
     allowed, used, limit = check_usage_limit(
@@ -157,6 +186,7 @@ async def me(request: Request):
         user = get_user_by_id(identity["user_id"])
         return {
             "logged_in": True,
+            "session_id": session_id,
             "user": {
                 "id": user["id"],
                 "username": user["username"],

@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 from fastapi import HTTPException, Request
 
-from api.auth_routes import get_current_user, get_identity
+from api.auth_routes import get_current_user, get_identity, get_request_session_id
 from config import DEFAULT_GUEST_SECRET, GUEST_SECRET
 from core.auth import check_usage_limit, get_user_by_session, verify_guest_id
 
@@ -49,7 +49,7 @@ def require_usage_allowed(request: Request, action: str = "summary") -> tuple[di
 
 
 def require_websocket_identity(websocket) -> dict:
-    session_id = websocket.cookies.get("vm_session")
+    session_id = get_request_session_id(websocket)
     if session_id:
         user = get_user_by_session(session_id)
         if user:

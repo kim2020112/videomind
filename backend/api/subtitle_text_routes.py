@@ -16,12 +16,13 @@ from core.features import is_whisper_available
 from core.auth import check_usage_limit
 from core.pipeline.subtitle import (
     _select_subtitle_lang, _download_subtitle_content,
-    extract_bvid, _build_part_info,
+    extract_bvid, _build_part_info, try_get_bilibili_cc_subtitle,
 )
 from core.background_pipeline import enqueue_whisper_job
 from core.cache import _url_hash
 from core.whisper import estimate_transcribe_time
 from core.logging_config import get_logger
+from core.video import canonical_video_url, is_bilibili_video, video_duration_for_url
 
 logger = get_logger(__name__)
 
@@ -69,7 +70,10 @@ async def get_subtitle_text(
 
         # 1. 优先尝试 Bilibili CC 字幕 API（多P视频按 cid 获取对应分P字幕）
         bilibili_sub = None
-        if 'bilibili' in url.lower():
+        bilibili_lookup_unavailable = False
+        bilibili_lookup_attempted = False
+        if is_bilibili_video(url) and extract_bvid(url):
+            bilibili_lookup_attempted = True
             p_match = _re.search(r'[?&]p=(\d+)', url)
             if p_match:
                 bvid = extract_bvid(url)
@@ -83,12 +87,11 @@ async def get_subtitle_text(
                         if part and part.cid:
                             bilibili_sub = extract_bilibili_subtitle_by_cid(bvid, part.cid)
                     except Exception:
-                        pass  # 下载器解析失败，降级到直接提取字幕
-            if not bilibili_sub and not p_match:
+                        pass
+            if not p_match:
                 bilibili_sub = extract_bilibili_subtitle(url)
-            elif bilibili_sub and bilibili_sub.get('has_subtitle') and len(bilibili_sub.get('text', '').strip()) < 100:
-                # 分P字幕内容过短，视为无效，不降级到P1
-                bilibili_sub = None
+            if bilibili_sub is None:
+                bilibili_lookup_unavailable = True
         if bilibili_sub and bilibili_sub['has_subtitle']:
             text = bilibili_sub['text']
             sub_lang = bilibili_sub['language']
@@ -103,22 +106,50 @@ async def get_subtitle_text(
 
         # 2. 降级：通过 yt-dlp 获取字幕
         cached_info = get_video_info_cache(url)
-        if WHISPER_MAX_DURATION > 0 and cached_info and cached_info.get("duration", 0) > WHISPER_MAX_DURATION:
-            raise HTTPException(status_code=400, detail=f"视频时长 {int(cached_info['duration'])} 秒超过 {WHISPER_MAX_DURATION} 秒限制，不支持语音识别。请尝试有字幕的视频")
+        cached_duration = video_duration_for_url(url, cached_info) if cached_info else 0
+        if WHISPER_MAX_DURATION > 0 and cached_duration > WHISPER_MAX_DURATION:
+            raise HTTPException(status_code=400, detail=f"视频时长 {int(cached_duration)} 秒超过 {WHISPER_MAX_DURATION} 秒限制，不支持语音识别。请尝试有字幕的视频")
 
         info = downloader.parse_info(url)
         fp = video_fingerprint(info.extractor, info.id) if info.extractor and info.id else None
-        canonical_url = info.webpage_url or url
+        canonical_url = canonical_video_url(url, info)
+        info.webpage_url = canonical_url
         save_video_info_cache(canonical_url, info, fingerprint=fp)
         platform = info.extractor or ""
         sub_error = None
+
+        if is_bilibili_video(canonical_url, info) and not bilibili_lookup_attempted:
+            bilibili_sub = try_get_bilibili_cc_subtitle(canonical_url, info)
+            bilibili_lookup_unavailable = bilibili_sub is None
+            if bilibili_sub and bilibili_sub.get("has_subtitle"):
+                text = bilibili_sub["text"]
+                sub_lang = bilibili_sub.get("language", "zh")
+                _pi = _build_part_info(canonical_url, info)
+                save_subtitle_to_db(
+                    canonical_url,
+                    "bilibili_cc",
+                    sub_lang,
+                    text,
+                    info.title,
+                    platform,
+                    part_info=_pi,
+                    segments=bilibili_sub.get("segments", []),
+                )
+                return _build_response(
+                    text,
+                    sub_lang,
+                    f"{sub_lang}（{'自动生成' if bilibili_sub.get('subtitle_type') == 'auto' else '人工字幕'}）",
+                    "json",
+                    bilibili_sub.get("subtitle_type") == "auto",
+                    bilibili_sub.get("segments", []),
+                )
 
         if info.subtitles:
             selected = _select_subtitle_lang(info.subtitles, lang if lang else None)
             if selected:
                 try:
                     raw_content, ext = await asyncio.get_event_loop().run_in_executor(
-                        None, _download_subtitle_content, url, selected.lang, selected.is_auto
+                        None, _download_subtitle_content, canonical_url, selected.lang, selected.is_auto
                     )
                     if ext == 'xml' or selected.lang == 'danmaku':
                         clean_text = _clean_danmaku_xml(raw_content)
@@ -129,11 +160,17 @@ async def get_subtitle_text(
 
                     if len(clean_text.strip()) >= 20:
                         source = "youtube_auto" if selected.is_auto else "ytdlp_native"
-                        _pi = _build_part_info(url, info)
+                        _pi = _build_part_info(canonical_url, info)
                         save_subtitle_to_db(canonical_url, source, selected.lang, clean_text, info.title, platform, part_info=_pi, segments=segments)
                         return _build_response(clean_text, selected.lang, selected.name, ext, selected.is_auto, segments)
                 except Exception as e:
                     sub_error = str(e)
+
+        if bilibili_lookup_unavailable:
+            raise HTTPException(
+                status_code=503,
+                detail="B站字幕接口暂时不可用，请稍后重试；未启动语音转录",
+            )
 
         # 3. 兜底：Whisper 转录（CPU 密集，需身份 + 次数校验，防匿名 DoS）
         if not is_whisper_available():
@@ -146,15 +183,16 @@ async def get_subtitle_text(
         if not allowed:
             raise HTTPException(status_code=429, detail=f"今日 AI 次数已用完或未登录（{used}/{limit}），无法使用语音识别")
 
-        if info.duration and WHISPER_MAX_DURATION > 0 and info.duration > WHISPER_MAX_DURATION:
-            raise HTTPException(status_code=400, detail=f"视频时长 {int(info.duration)} 秒超过 {WHISPER_MAX_DURATION} 秒限制，不支持语音识别。请尝试有字幕的视频")
+        selected_duration = video_duration_for_url(canonical_url, info)
+        if selected_duration and WHISPER_MAX_DURATION > 0 and selected_duration > WHISPER_MAX_DURATION:
+            raise HTTPException(status_code=400, detail=f"视频时长 {int(selected_duration)} 秒超过 {WHISPER_MAX_DURATION} 秒限制，不支持语音识别。请尝试有字幕的视频")
 
         job = enqueue_whisper_job(
             url_hash=_url_hash(canonical_url),
             url=canonical_url,
             identity=identity,
             lang=lang,
-            estimated_seconds=estimate_transcribe_time(info.duration or 0),
+            estimated_seconds=estimate_transcribe_time(selected_duration),
             info=info,
             fingerprint=fp,
             pipeline="subtitle_only",

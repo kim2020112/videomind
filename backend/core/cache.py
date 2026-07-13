@@ -24,9 +24,12 @@ def _url_hash(url: str) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()
 
 
+def _is_multipart_url(url: str) -> bool:
+    return bool(re.search(r"[?&]p=\d+", url or ""))
+
+
 def video_fingerprint(extractor: str, video_id: str) -> str:
-    """构建视频指纹: platform:id (如 bilibili:BV1cW9xB3Ec1)。
-    Bilibili 多P视频的 id 带 _pN 后缀，去掉以按视频聚合。"""
+    """构建视频分组指纹；分 P 的缓存身份始终使用精确 URL hash。"""
     import re as _re
     video_id = _re.sub(r'_p\d+$', '', video_id)
     return f"{extractor}:{video_id}"
@@ -109,41 +112,21 @@ def _max_prompt_version() -> int:
 
 
 def get_cached(url: str, fingerprint: str = None) -> dict | None:
-    """获取缓存的 AI 结果。先按指纹查，再按 URL hash。prompt_version 不匹配视为 miss。"""
+    """获取 AI 缓存；精确 URL 优先，指纹只兼容非分 P 链接。"""
     current_version = _max_prompt_version()
     h = _url_hash(url)
-    tz = timezone(timedelta(hours=8))
-    # 多P视频（URL 含 ?p=N）跳过指纹匹配，避免不同分P命中同一缓存
-    is_multipart = bool(re.search(r'[?&]p=\d+', url))
     with _conn() as conn:
-        row = None
-        # 指纹优先（多P视频跳过）
-        if fingerprint and not is_multipart:
-            row = conn.execute(
-                "SELECT url, video_title, subtitle_text, source, result_json, part_info, created_at, updated_at, prompt_version FROM ai_cache WHERE fingerprint = ?",
+        row = conn.execute(
+            "SELECT url, video_title, subtitle_text, source, result_json, part_info, created_at, updated_at, prompt_version, platform FROM ai_cache WHERE url_hash = ?",
+            (h,),
+        ).fetchone()
+        if not row and fingerprint and not _is_multipart_url(url):
+            candidates = conn.execute(
+                "SELECT url, video_title, subtitle_text, source, result_json, part_info, created_at, updated_at, prompt_version, platform "
+                "FROM ai_cache WHERE fingerprint = ? ORDER BY updated_at DESC",
                 (fingerprint,),
-            ).fetchone()
-            # 同视频但不同 URL：更新 url_hash 映射
-            if row:
-                old_url = row[0]
-                old_h = _url_hash(old_url)
-                if old_h != h:
-                    # 先删除与目标 url_hash 冲突的行
-                    conn.execute("DELETE FROM ai_cache WHERE url_hash = ? AND fingerprint != ?", (h, fingerprint))
-                    conn.execute(
-                        "UPDATE ai_cache SET url = ?, url_hash = ?, updated_at = ? WHERE fingerprint = ?",
-                        (url, h, datetime.now(tz).isoformat(), fingerprint),
-                    )
-                    conn.execute(
-                        "UPDATE user_history SET url_hash = ?, url = ? WHERE url_hash = ?",
-                        (h, url, old_h),
-                    )
-        # URL hash 兜底
-        if not row:
-            row = conn.execute(
-                "SELECT url, video_title, subtitle_text, source, result_json, part_info, created_at, updated_at, prompt_version FROM ai_cache WHERE url_hash = ?",
-                (h,),
-            ).fetchone()
+            ).fetchall()
+            row = next((candidate for candidate in candidates if not _is_multipart_url(candidate[0])), None)
     if not row:
         return None
     # prompt 版本不匹配视为 miss（但保留数据供部分重新生成用）
@@ -160,6 +143,7 @@ def get_cached(url: str, fingerprint: str = None) -> dict | None:
         "part_info": row[5] or "",
         "created_at": row[6],
         "updated_at": row[7],
+        "platform": row[9] or "",
     }
 
 
@@ -253,13 +237,13 @@ def _cleanup_old_cache(conn):
 
 
 def save_cache(url: str, video_title: str = "", subtitle_text: str = "", source: str = "", result_json: str = "", fingerprint: str = None, part_info: str = "", platform: str = "", prompt_version: int = 0):
-    """保存或更新 AI 结果缓存。有指纹时按指纹去重，避免同视频多 URL 产生多条记录。"""
+    """按精确 URL hash 保存或更新 AI 结果缓存。"""
     h = _url_hash(url)
     tz = timezone(timedelta(hours=8))
     now = datetime.now(tz).isoformat()
     nc = _compute_notes_chars(result_json)
     with _conn() as conn:
-        # 有指纹：先查是否已有同指纹且同 url_hash 的记录
+        # 指纹只用于分组；同一分 P 是否已存在由 URL hash 判断。
         if fingerprint:
             existing = conn.execute("SELECT url_hash FROM ai_cache WHERE url_hash = ?", (h,)).fetchone()
             if existing:
@@ -304,7 +288,7 @@ def list_history(limit: int = 20) -> list[dict]:
 
 
 def delete_cache(url: str, fingerprint: str = None):
-    """删除缓存：按指纹 + URL hash 双重清理，同时级联清理关联数据。"""
+    """按精确 URL hash 删除 AI 缓存，同时级联清理关联数据。"""
     h = _url_hash(url)
     # 清理 knowledge.db 中的关联数据（视频、字幕、标签）
     try:
@@ -318,17 +302,13 @@ def delete_cache(url: str, fingerprint: str = None):
     except Exception:
         pass
     with _conn() as conn:
-        if fingerprint:
-            conn.execute("DELETE FROM ai_cache WHERE fingerprint = ?", (fingerprint,))
         conn.execute("DELETE FROM ai_cache WHERE url_hash = ?", (h,))
 
 
 def delete_whisper_cache(url: str, fingerprint: str = None):
-    """删除 Whisper 缓存。"""
+    """按精确 URL hash 删除 Whisper 缓存。"""
     h = _url_hash(url)
     with _conn() as conn:
-        if fingerprint:
-            conn.execute("DELETE FROM whisper_cache WHERE fingerprint = ?", (fingerprint,))
         conn.execute("DELETE FROM whisper_cache WHERE url_hash = ?", (h,))
 
 
@@ -358,37 +338,30 @@ def _ensure_whisper_table():
 
 
 def get_whisper_cache(url: str, fingerprint: str = None) -> str | None:
-    """获取缓存的 Whisper 转录文本（校正后）。先指纹，再 URL。"""
+    """获取 Whisper 转录；精确 URL 优先，指纹只兼容非分 P 链接。"""
     h = _url_hash(url)
     with _conn() as conn:
-        if fingerprint:
-            row = conn.execute(
-                "SELECT subtitle_text FROM whisper_cache WHERE fingerprint = ?",
-                (fingerprint,),
-            ).fetchone()
-            if row:
-                return row[0]
         row = conn.execute(
             "SELECT subtitle_text FROM whisper_cache WHERE url_hash = ?",
             (h,),
         ).fetchone()
-    return row[0] if row else None
+        if row:
+            return row[0]
+        if fingerprint and not _is_multipart_url(url):
+            candidates = conn.execute(
+                "SELECT url, subtitle_text FROM whisper_cache WHERE fingerprint = ? ORDER BY created_at DESC",
+                (fingerprint,),
+            ).fetchall()
+            row = next((candidate for candidate in candidates if not _is_multipart_url(candidate[0])), None)
+    return row[1] if row else None
 
 
 def save_whisper_cache(url: str, subtitle_text: str, language: str = "", raw_text: str = "", fingerprint: str = None):
-    """保存 Whisper 转录文本。"""
+    """按精确 URL hash 保存 Whisper 转录文本。"""
     h = _url_hash(url)
     tz = timezone(timedelta(hours=8))
     now = datetime.now(tz).isoformat()
     with _conn() as conn:
-        if fingerprint:
-            existing = conn.execute("SELECT url_hash FROM whisper_cache WHERE fingerprint = ?", (fingerprint,)).fetchone()
-            if existing:
-                conn.execute(
-                    "UPDATE whisper_cache SET url=?, url_hash=?, subtitle_text=?, language=?, raw_text=?, created_at=? WHERE fingerprint=?",
-                    (url, h, subtitle_text, language, raw_text, now, fingerprint),
-                )
-                return
         conn.execute(
             "INSERT OR REPLACE INTO whisper_cache (url_hash, url, fingerprint, subtitle_text, language, raw_text, created_at) VALUES (?,?,?,?,?,?,?)",
             (h, url, fingerprint or '', subtitle_text, language, raw_text, now),
@@ -417,24 +390,25 @@ def _ensure_video_info_table():
 
 
 def get_video_info_cache(url: str, fingerprint: str = None) -> dict | None:
-    """获取缓存的视频基本信息。先指纹，再 URL。"""
+    """获取视频信息；精确 URL 优先，指纹只兼容非分 P 链接。"""
     h = _url_hash(url)
-    is_multipart = bool(re.search(r'[?&]p=\d+', url))
     with _conn() as conn:
-        if fingerprint and not is_multipart:
-            row = conn.execute(
-                "SELECT duration, title, info_json FROM video_info_cache WHERE fingerprint = ?",
-                (fingerprint,),
-            ).fetchone()
-            if row:
-                info = json.loads(row[2]) if row[2] else {}
-                info["duration"] = row[0]
-                info["title"] = row[1]
-                return info
         row = conn.execute(
             "SELECT duration, title, info_json FROM video_info_cache WHERE url_hash = ?",
             (h,),
         ).fetchone()
+        if not row and fingerprint and not _is_multipart_url(url):
+            candidates = conn.execute(
+                "SELECT url, duration, title, info_json FROM video_info_cache "
+                "WHERE fingerprint = ? ORDER BY created_at DESC",
+                (fingerprint,),
+            ).fetchall()
+            candidate = next(
+                (item for item in candidates if not _is_multipart_url(item[0])),
+                None,
+            )
+            if candidate:
+                row = (candidate[1], candidate[2], candidate[3])
     if not row:
         return None
     info = json.loads(row[2]) if row[2] else {}
@@ -461,11 +435,14 @@ def save_video_info_cache(url: str, info, fingerprint: str = None):
 
     with _conn() as conn:
         if fingerprint:
-            existing = conn.execute("SELECT url_hash FROM video_info_cache WHERE fingerprint = ?", (fingerprint,)).fetchone()
+            existing = conn.execute(
+                "SELECT url_hash FROM video_info_cache WHERE url_hash = ?",
+                (h,),
+            ).fetchone()
             if existing:
                 conn.execute(
-                    "UPDATE video_info_cache SET url=?, url_hash=?, duration=?, title=?, info_json=?, created_at=? WHERE fingerprint=?",
-                    (url, h, duration, title, json.dumps(info_dict, ensure_ascii=False), now, fingerprint),
+                    "UPDATE video_info_cache SET url=?, fingerprint=?, duration=?, title=?, info_json=?, created_at=? WHERE url_hash=?",
+                    (url, fingerprint, duration, title, json.dumps(info_dict, ensure_ascii=False), now, h),
                 )
                 return
         conn.execute(
@@ -587,6 +564,63 @@ def _extract_part_index(url: str) -> int:
     return int(m.group(1)) if m else 1
 
 
+def get_learned_part_indexes(url: str, user_id: int = None, guest_id: str = None,
+                             role: str = "guest") -> set[int]:
+    """Return cached, completed multipart indexes visible to this identity."""
+    conditions = [
+        "COALESCE(uh.status, 'done') = 'done'",
+        "ac.result_json IS NOT NULL",
+        "TRIM(ac.result_json) != ''",
+    ]
+    params = []
+
+    if role != "admin":
+        if user_id is not None:
+            conditions.append("uh.user_id = ?")
+            params.append(user_id)
+        elif guest_id:
+            conditions.append("uh.guest_id = ?")
+            params.append(guest_id)
+        else:
+            return set()
+
+    with _get_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT uh.url
+            FROM user_history uh
+            JOIN ai_cache ac ON ac.url_hash = uh.url_hash
+            WHERE {' AND '.join(conditions)}
+            """,
+            params,
+        ).fetchall()
+
+    video_key = _extract_video_key(url)
+    return {
+        _extract_part_index(row["url"])
+        for row in rows
+        if _extract_video_key(row["url"]) == video_key
+    }
+
+
+def _get_cached_multipart_parts(conn, urls: list[str]) -> list[dict]:
+    """返回同一 BV 任一 URL 中可用的完整分P元数据。"""
+    for url in urls:
+        row = conn.execute(
+            "SELECT info_json FROM video_info_cache WHERE url_hash = ?",
+            (_url_hash(url),),
+        ).fetchone()
+        if not row or not row[0]:
+            continue
+        try:
+            parts = json.loads(row[0]).get("parts") or []
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if parts:
+            return parts
+    return []
+
+
 def _get_total_parts_map(urls: list[str]) -> dict[str, int]:
     """批量查询多P视频的总分P数。返回 {url: total_parts}。"""
     # 按 BV 号分组，每组只需查一次 video_info_cache
@@ -600,21 +634,10 @@ def _get_total_parts_map(urls: list[str]) -> dict[str, int]:
     result: dict[str, int] = {}
     with _get_db() as conn:
         for bv, group_urls in bv_urls.items():
-            # 用任意一个分P的 URL 查 video_info_cache
-            h = _url_hash(group_urls[0])
-            row = conn.execute(
-                "SELECT info_json FROM video_info_cache WHERE url_hash = ?", (h,)
-            ).fetchone()
-            if row and row[0]:
-                try:
-                    info = json.loads(row[0])
-                    parts = info.get("parts") or []
-                    total = len(parts) if parts else 0
-                    if total > 0:
-                        for u in group_urls:
-                            result[u] = total
-                except (json.JSONDecodeError, TypeError):
-                    pass
+            parts = _get_cached_multipart_parts(conn, group_urls)
+            if parts:
+                for u in group_urls:
+                    result[u] = len(parts)
     return result
 
 
@@ -631,27 +654,18 @@ def _get_part_details_map(urls: list[str]) -> dict[str, dict[int, dict]]:
     result: dict[str, dict[int, dict]] = {}
     with _get_db() as conn:
         for bv, group_urls in bv_urls.items():
-            h = _url_hash(group_urls[0])
-            row = conn.execute(
-                "SELECT info_json FROM video_info_cache WHERE url_hash = ?", (h,)
-            ).fetchone()
-            if row and row[0]:
-                try:
-                    info = json.loads(row[0])
-                    parts = info.get("parts") or []
-                    details: dict[int, dict] = {}
-                    for p in parts:
-                        idx = p.get("index")
-                        if idx is not None:
-                            details[idx] = {
-                                "title": p.get("title", ""),
-                                "duration": p.get("duration") or 0,
-                            }
-                    if details:
-                        for u in group_urls:
-                            result[u] = details
-                except (json.JSONDecodeError, TypeError):
-                    pass
+            parts = _get_cached_multipart_parts(conn, group_urls)
+            details: dict[int, dict] = {}
+            for p in parts:
+                idx = p.get("index")
+                if idx is not None:
+                    details[idx] = {
+                        "title": p.get("title", ""),
+                        "duration": p.get("duration") or 0,
+                    }
+            if details:
+                for u in group_urls:
+                    result[u] = details
     return result
 
 
@@ -741,6 +755,15 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
             {base} {where}
             ORDER BY uh.created_at {order}
         """, params).fetchall()
+
+    # 管理员的全局视图可能同时包含访客和登录用户对同一分P的记录；
+    # 每个 url_hash 仅保留最新一条，避免在合并视频时重复显示同一分P。
+    unique_rows = {}
+    for row in rows:
+        existing = unique_rows.get(row["url_hash"])
+        if existing is None or row["created_at"] > existing["created_at"]:
+            unique_rows[row["url_hash"]] = row
+    rows = list(unique_rows.values())
 
     # 批量查询标签、分P信息
     all_urls = list(set(row["url"] for row in rows))

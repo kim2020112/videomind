@@ -8,14 +8,16 @@ import re
 import asyncio
 import time
 from asyncio import Queue
+from urllib.parse import urlsplit
 
 from api.security import ensure_public_http_url, owns_resource, require_identity, require_websocket_identity
 from core.pipeline.subtitle import _download_subtitle_content
 from core.logging_config import get_logger
+from core.video import canonical_video_url
 
 logger = get_logger(__name__)
 
-from core.cache import save_video_info_cache
+from core.cache import get_learned_part_indexes, save_video_info_cache
 
 
 def extract_url(text: str) -> str:
@@ -32,9 +34,14 @@ def extract_url(text: str) -> str:
 
 def _resolve_short_url(url: str) -> str:
     """将短链解析为真实 URL（只取 Location，不跟随重定向）。"""
+    parsed = urlsplit(url)
+    host = (parsed.hostname or '').lower()
+
     # b23.tv → bilibili.com
-    if re.match(r'https?://b23\.tv/', url):
-        path = '/' + url.split('b23.tv/', 1)[1]
+    if host == 'b23.tv':
+        path = parsed.path or '/'
+        if parsed.query:
+            path = f'{path}?{parsed.query}'
         conn = http.client.HTTPSConnection('b23.tv', timeout=10)
         try:
             conn.request('GET', path, headers={
@@ -42,10 +49,13 @@ def _resolve_short_url(url: str) -> str:
             })
             resp = conn.getresponse()
             location = resp.getheader('Location')
-            if location and 'bilibili.com' in location:
-                bv = re.search(r'(BV\w+)', location)
+            location_host = (urlsplit(location).hostname or '').lower() if location else ''
+            if location and (location_host == 'bilibili.com' or location_host.endswith('.bilibili.com')):
+                bv = re.search(r'(BV\w+)', location, re.IGNORECASE)
                 if bv:
-                    return f'https://www.bilibili.com/video/{bv.group(1)}'
+                    canonical = f'https://www.bilibili.com/video/{bv.group(1)}'
+                    part = re.search(r'[?&]p=(\d+)', location, re.IGNORECASE)
+                    return f'{canonical}?p={part.group(1)}' if part else canonical
                 return location
         except Exception:
             logger.warning(f"Bilibili短链接解析失败: {url[:80]}")
@@ -54,8 +64,10 @@ def _resolve_short_url(url: str) -> str:
         return url
 
     # v.douyin.com → douyin.com/video/{id}
-    if re.match(r'https?://v\.douyin\.com/', url):
-        path = '/' + url.split('v.douyin.com/', 1)[1]
+    if host == 'v.douyin.com':
+        path = parsed.path or '/'
+        if parsed.query:
+            path = f'{path}?{parsed.query}'
         conn = http.client.HTTPSConnection('v.douyin.com', timeout=10)
         try:
             conn.request('GET', path, headers={
@@ -73,8 +85,14 @@ def _resolve_short_url(url: str) -> str:
         return url
 
     # bilibili.com（无 www）→ www.bilibili.com，避免 yt-dlp 403
-    if re.match(r'https?://bilibili\.com/', url):
-        url = url.replace('://bilibili.com/', '://www.bilibili.com/', 1)
+    if host == 'bilibili.com':
+        url = re.sub(
+            r'^(https?://)bilibili\.com/',
+            r'\1www.bilibili.com/',
+            url,
+            count=1,
+            flags=re.IGNORECASE,
+        )
 
     return url
 
@@ -137,11 +155,24 @@ async def capabilities():
 async def parse_video(req: ParseRequest, request: Request):
     """解析视频链接，返回视频信息和可用格式列表。"""
     try:
-        require_identity(request)
+        identity = require_identity(request)
         url = extract_url(req.url)
         ensure_public_http_url(url)
         info = downloader.parse_info(url)
-        save_video_info_cache(url, info)
+        canonical_url = canonical_video_url(url, info)
+        info.webpage_url = canonical_url
+        save_video_info_cache(canonical_url, info)
+        try:
+            learned_parts = get_learned_part_indexes(
+                canonical_url,
+                user_id=identity.get("user_id"),
+                guest_id=identity.get("guest_id"),
+                role=identity.get("role", "guest"),
+            )
+            for part in info.parts:
+                part.is_cached = part.index in learned_parts
+        except Exception as exc:
+            logger.warning(f"读取分P学习状态失败: {exc}")
         return info
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"解析失败: {str(e)}")

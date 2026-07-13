@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import re
 
 from core import job_store
 from core.auth import add_user_history, log_usage
@@ -22,6 +21,7 @@ from core.pipeline.subtitle_postprocess import correct_subtitle_text
 from core.pipeline.summary import run_summary
 from core.pipeline.tags import run_tags
 from core.tag_extractor import detect_platform
+from core.video import canonical_video_url
 from database import get_db
 
 
@@ -79,7 +79,8 @@ async def finalize_whisper_job(job: dict, worker_result: dict) -> dict:
         raise RuntimeError("Whisper 转录结果为空或过短")
 
     info = await _load_video_info(job)
-    canonical_url = _canonical_url(job["url"], info)
+    canonical_url = canonical_video_url(job["url"], info)
+    info.webpage_url = canonical_url
     fingerprint = video_fingerprint(info.extractor, info.id) if info.extractor and info.id else None
     fingerprint = fingerprint or job.get("payload", {}).get("fingerprint")
     save_video_info_cache(canonical_url, info, fingerprint=fingerprint)
@@ -136,15 +137,6 @@ async def _load_video_info(job: dict):
     from api.routes import downloader
 
     return await asyncio.to_thread(downloader.parse_info, job["url"])
-
-
-def _canonical_url(original_url: str, info) -> str:
-    canonical = info.webpage_url or original_url
-    part = re.search(r"[?&]p=(\d+)", original_url)
-    if part and not re.search(r"[?&]p=\d+", canonical):
-        separator = "&" if "?" in canonical else "?"
-        canonical = f"{canonical}{separator}p={part.group(1)}"
-    return canonical
 
 
 def _generate_and_persist(job, info, canonical_url, subtitle_text, fingerprint) -> dict:

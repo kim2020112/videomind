@@ -47,6 +47,7 @@ class VideoPart(BaseModel):
     duration: Optional[int] = None
     filesize: Optional[int] = None
     filesize_str: Optional[str] = None
+    is_cached: bool = False
 
 
 class VideoChapter(BaseModel):

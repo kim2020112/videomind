@@ -11,13 +11,18 @@ from core.summary_models import SummarizeRequest, SummaryResult, ChapterItem
 from core.summarizer import summarize_subtitle, summarize_from_description
 from core.cache import get_video_info_cache, save_video_info_cache, video_fingerprint
 from config import WHISPER_MAX_DURATION
-from core.pipeline.subtitle import try_get_bilibili_cc_subtitle, fetch_subtitle
+from core.pipeline.subtitle import (
+    BilibiliSubtitleUnavailable,
+    try_get_bilibili_cc_subtitle,
+    fetch_subtitle,
+)
 
 # 复用已有模块中的工具函数和实例
 from api.routes import extract_url, downloader
 from api.security import ensure_public_http_url, require_identity
 from core.features import is_ai_available
 from core.logging_config import get_logger
+from core.video import canonical_video_url, is_bilibili_video, video_duration_for_url
 
 logger = get_logger(__name__)
 from core.auth import check_usage_limit, log_usage
@@ -43,30 +48,37 @@ async def summarize_video(req: SummarizeRequest, request: Request):
 
         # 视频信息缓存预检：已缓存的超长视频直接跳过
         cached_info = get_video_info_cache(url)
-        if WHISPER_MAX_DURATION > 0 and cached_info and cached_info.get("duration", 0) > WHISPER_MAX_DURATION:
+        cached_duration = video_duration_for_url(url, cached_info) if cached_info else 0
+        if WHISPER_MAX_DURATION > 0 and cached_duration > WHISPER_MAX_DURATION:
             bilibili_sub = try_get_bilibili_cc_subtitle(url, cached_info)
             if bilibili_sub and bilibili_sub.get('has_subtitle'):
                 pass  # 有 B站 CC 字幕，跳过快速路径，走正常 AI 管线
             else:
                 desc = cached_info.get("description", "")
                 title = cached_info.get("title", "")
-                _is_bili = 'bilibili' in url.lower()
+                _is_bili = is_bilibili_video(url, cached_info)
+                if _is_bili and bilibili_sub is None:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="B站字幕接口暂时不可用，请稍后重试；未生成简介总结，也未启动语音转录",
+                    )
                 _no_cc_msg = "该B站视频没有CC字幕，" if _is_bili else ""
                 if not desc or len(desc.strip()) < 20:
-                    raise HTTPException(status_code=400, detail=f"{_no_cc_msg}视频时长 {int(cached_info['duration'])} 秒超过 {WHISPER_MAX_DURATION} 秒限制，不支持语音识别。该视频也没有简介，无法生成 AI 总结")
+                    raise HTTPException(status_code=400, detail=f"{_no_cc_msg}视频时长 {int(cached_duration)} 秒超过 {WHISPER_MAX_DURATION} 秒限制，不支持语音识别。该视频也没有简介，无法生成 AI 总结")
                 result = await asyncio.get_event_loop().run_in_executor(
                     None, summarize_from_description, title, desc
                 )
                 log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
                           action="summary", status="SUCCESS")
                 return SummaryResult(
-                    summary=f"⚠️ {_no_cc_msg}视频时长 {int(cached_info['duration'])} 秒超过 {WHISPER_MAX_DURATION} 秒限制，以下总结基于视频简介生成，仅供参考。\n\n" + result.get("summary", ""),
+                    summary=f"⚠️ {_no_cc_msg}视频时长 {int(cached_duration)} 秒超过 {WHISPER_MAX_DURATION} 秒限制，以下总结基于视频简介生成，仅供参考。\n\n" + result.get("summary", ""),
                     chapters=[ChapterItem(**ch) for ch in result.get("chapters", [])],
                 )
 
         info = downloader.parse_info(url)
         fp = video_fingerprint(info.extractor, info.id) if info.extractor and info.id else None
-        canonical_url = info.webpage_url or url
+        canonical_url = canonical_video_url(url, info)
+        info.webpage_url = canonical_url
         save_video_info_cache(canonical_url, info, fingerprint=fp)
 
         # 统一字幕获取管线（DB 缓存 → B站 CC → yt-dlp → Whisper）
@@ -99,6 +111,8 @@ async def summarize_video(req: SummarizeRequest, request: Request):
 
         raise HTTPException(status_code=400, detail="该视频没有字幕也没有简介，无法生成 AI 总结")
 
+    except BilibiliSubtitleUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except HTTPException:
         raise
     except ValueError as e:

@@ -12,7 +12,13 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from core.pipeline import PipelineEvent
-from core.pipeline.subtitle import fetch_subtitle, save_subtitle, _build_part_info, extract_bvid
+from core.pipeline.subtitle import (
+    BilibiliSubtitleUnavailable,
+    fetch_subtitle,
+    save_subtitle,
+    _build_part_info,
+    extract_bvid,
+)
 from core.pipeline.subtitle_postprocess import correct_subtitle_text
 from core.pipeline.summary import run_summary
 from core.pipeline.mindmap import run_mindmap
@@ -33,6 +39,7 @@ from core.cache import (
     _get_cached_raw, get_whisper_cache,
 )
 from core.whisper import estimate_transcribe_time
+from core.video import canonical_video_url, is_bilibili_video, video_duration_for_url
 from core.background_pipeline import enqueue_whisper_job
 from core.job_store import find_active_job
 from core.tag_extractor import detect_platform
@@ -180,7 +187,8 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
 
         # ── 视频信息缓存预检（超长视频快速路径） ──
         cached_info = get_video_info_cache(url)
-        if WHISPER_MAX_DURATION > 0 and cached_info and cached_info.get("duration", 0) > WHISPER_MAX_DURATION:
+        cached_duration = video_duration_for_url(url, cached_info) if cached_info else 0
+        if WHISPER_MAX_DURATION > 0 and cached_duration > WHISPER_MAX_DURATION:
             fast_resp = _try_long_video_fast_path(url, cached_info, identity)
             if fast_resp:
                 return fast_resp
@@ -198,7 +206,7 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
         )
         if existing_job:
             existing_task = existing_job["task_id"]
-            dur = cached_info.get("duration", 0) if cached_info else 0
+            dur = cached_duration
             def _already_running():
                 yield PipelineEvent("background_started", {
                     "task_id": existing_task, "url_hash": fast_url_hash,
@@ -217,14 +225,21 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
                 fast_cached_sub = True
 
         # B站视频：CC API 只需 BV ID，无需 parse_info，先尝试获取
+        bilibili_lookup_unavailable = False
         if not fast_cached_sub:
             from core.pipeline.subtitle import try_get_bilibili_cc_subtitle
-            cc_result = try_get_bilibili_cc_subtitle(url)
+            cc_result = try_get_bilibili_cc_subtitle(url, cached_info)
             if cc_result and cc_result.get("has_subtitle"):
                 fast_cached_sub = True
+            elif is_bilibili_video(url, cached_info) and cc_result is None:
+                bilibili_lookup_unavailable = True
 
-        duration_from_cache = cached_info.get("duration", 0) if cached_info else 0
-        need_whisper = not fast_cached_sub and is_whisper_available()
+        duration_from_cache = cached_duration
+        need_whisper = (
+            not fast_cached_sub
+            and not bilibili_lookup_unavailable
+            and is_whisper_available()
+        )
 
         if need_whisper and cached_info:
             # 有缓存时长信息，立即走后台
@@ -252,11 +267,8 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
         # ── 解析视频信息（需要完整 info 的路径才走到这里） ──
         info = downloader.parse_info(url)
         fp = video_fingerprint(info.extractor, info.id) if info.extractor and info.id else None
-        canonical_url = info.webpage_url or url
-        p_match = re.search(r'[?&]p=(\d+)', url)
-        if p_match and not re.search(r'[?&]p=\d+', canonical_url):
-            sep = '&' if '?' in canonical_url else '?'
-            canonical_url = f"{canonical_url}{sep}p={p_match.group(1)}"
+        canonical_url = canonical_video_url(url, info)
+        info.webpage_url = canonical_url
         save_video_info_cache(canonical_url, info, fingerprint=fp)
 
         # ── 二次缓存检查（指纹命中） ──
@@ -287,7 +299,7 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
 
         # 快速检查是否有非 Whisper 字幕源（需要完整 info 的网络检查）
         has_quick_sub = _quick_subtitle_check(canonical_url, info, req.lang, fp)
-        if not has_quick_sub and is_whisper_available():
+        if has_quick_sub is False and is_whisper_available():
             est = estimate_transcribe_time(info.duration or 0)
             job = enqueue_whisper_job(
                 url_hash=url_hash,
@@ -411,6 +423,8 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
 
         return StreamingResponse(_sse_generator(_gen()), media_type="text/event-stream", headers=_sse_headers())
 
+    except BilibiliSubtitleUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -429,7 +443,7 @@ def _quick_db_subtitle_check(url: str) -> bool:
     return False
 
 
-def _quick_subtitle_check(url: str, info, lang: str = None, fingerprint: str = None) -> bool:
+def _quick_subtitle_check(url: str, info, lang: str = None, fingerprint: str = None) -> bool | None:
     """完整快速检查：DB 缓存 + B站 CC + yt-dlp 原生字幕（需要完整 info，含网络调用）。
 
     返回 True 表示有快速字幕源，False 表示需要 Whisper。
@@ -444,6 +458,7 @@ def _quick_subtitle_check(url: str, info, lang: str = None, fingerprint: str = N
         return True
 
     # 2. B站 CC 字幕（快速 API 调用，不下载音频）
+    bilibili_lookup_unavailable = False
     if 'bilibili' in (info.extractor or '').lower():
         p_match = re.search(r'[?&]p=(\d+)', url)
         parts = getattr(info, 'parts', []) or []
@@ -455,18 +470,24 @@ def _quick_subtitle_check(url: str, info, lang: str = None, fingerprint: str = N
                 if bvid:
                     try:
                         bilibili_sub = extract_bilibili_subtitle_by_cid(bvid, part.cid)
-                        if bilibili_sub and bilibili_sub.get('has_subtitle') and len(bilibili_sub.get('text', '').strip()) >= 100:
+                        if bilibili_sub and bilibili_sub.get('has_subtitle'):
                             return True
+                        if bilibili_sub is None:
+                            bilibili_lookup_unavailable = True
                     except Exception:
-                        pass
+                        bilibili_lookup_unavailable = True
+            else:
+                bilibili_lookup_unavailable = True
         else:
             from core.pipeline.subtitle import try_get_bilibili_cc_subtitle as _try_cc
             try:
                 bilibili_sub = _try_cc(url)
-                if bilibili_sub and bilibili_sub.get('has_subtitle') and len(bilibili_sub.get('text', '').strip()) >= 50:
+                if bilibili_sub and bilibili_sub.get('has_subtitle'):
                     return True
+                if bilibili_sub is None:
+                    bilibili_lookup_unavailable = True
             except Exception:
-                pass
+                bilibili_lookup_unavailable = True
 
     # 3. yt-dlp 原生字幕（只检查列表，不下载）
     if info.subtitles:
@@ -475,7 +496,7 @@ def _quick_subtitle_check(url: str, info, lang: str = None, fingerprint: str = N
         if selected and selected.lang != 'danmaku':
             return True
 
-    return False
+    return None if bilibili_lookup_unavailable else False
 
 
 def _try_long_video_fast_path(url: str, cached_info: dict, identity: dict):
@@ -485,12 +506,17 @@ def _try_long_video_fast_path(url: str, cached_info: dict, identity: dict):
     bilibili_sub = _try_cc(url, cached_info)
     if bilibili_sub and bilibili_sub.get('has_subtitle'):
         return None  # 有 CC 字幕，走正常管线
+    if is_bilibili_video(url, cached_info) and bilibili_sub is None:
+        raise HTTPException(
+            status_code=503,
+            detail="B站字幕接口暂时不可用，请稍后重试；未生成简介总结，也未启动语音转录",
+        )
 
     _long_video_msg = f"视频时长超过 {WHISPER_MAX_DURATION} 秒限制，不支持语音识别"
     desc = cached_info.get("description", "")
     title = cached_info.get("title", "")
-    duration = cached_info.get("duration", 0)
-    _is_bili = 'bilibili' in url.lower()
+    duration = video_duration_for_url(url, cached_info)
+    _is_bili = is_bilibili_video(url, cached_info)
     _no_cc_msg = "该B站视频没有CC字幕，" if _is_bili else ""
     if not desc or len(desc.strip()) < 20:
         raise HTTPException(status_code=400, detail=f"{_no_cc_msg}{_long_video_msg}。该视频也没有简介，无法生成 AI 总结")
@@ -549,7 +575,8 @@ async def _handle_partial(req, cached: dict, identity: dict, url: str, trace_id:
     else:
         try:
             info = downloader.parse_info(url)
-            cache_url = info.webpage_url or url
+            cache_url = canonical_video_url(url, info)
+            info.webpage_url = cache_url
             fp = video_fingerprint(info.extractor, info.id) if info.extractor and info.id else None
             save_video_info_cache(cache_url, info, fingerprint=fp)
             video_title = info.title or video_title
@@ -619,7 +646,8 @@ async def _partial_subtitle(req, cached: dict, identity: dict, url: str, trace_i
         try:
             info = downloader.parse_info(url)
             fp = video_fingerprint(info.extractor, info.id) if info.extractor and info.id else None
-            cache_url = info.webpage_url or url
+            cache_url = canonical_video_url(url, info)
+            info.webpage_url = cache_url
             save_video_info_cache(cache_url, info, fingerprint=fp)
             video_title = info.title or ""
             job_info = info
@@ -627,7 +655,7 @@ async def _partial_subtitle(req, cached: dict, identity: dict, url: str, trace_i
             pass  # parse_info 失败，继续使用已有缓存信息
 
     delete_whisper_cache(cache_url, fingerprint=fp)
-    duration = cached_info.get("duration", 0) if cached_info else getattr(job_info, "duration", 0) or 0
+    duration = video_duration_for_url(cache_url, cached_info or job_info)
     job = enqueue_whisper_job(
         url_hash=_url_hash(cache_url),
         url=cache_url,

@@ -184,8 +184,16 @@ def add_user_history(user_id: int = None, guest_id: str = None,
                 "INSERT OR IGNORE INTO user_history (user_id, url_hash, url, video_title, platform, status) VALUES (?, ?, ?, ?, ?, ?)",
                 (user_id, url_hash, url, title, platform, status),
             )
+            conn.execute(
+                "UPDATE user_history SET status = ? WHERE user_id = ? AND url_hash = ?",
+                (status, user_id, url_hash),
+            )
         elif guest_id:
             conn.execute(
                 "INSERT OR IGNORE INTO user_history (guest_id, url_hash, url, video_title, platform, status) VALUES (?, ?, ?, ?, ?, ?)",
                 (guest_id, url_hash, url, title, platform, status),
+            )
+            conn.execute(
+                "UPDATE user_history SET status = ? WHERE guest_id = ? AND url_hash = ?",
+                (status, guest_id, url_hash),
             )

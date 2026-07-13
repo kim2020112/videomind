@@ -21,8 +21,13 @@ from core.summarizer import (
 )
 from core.cache import get_video_info_cache
 from core.logging_config import get_logger
+from core.video import canonical_video_url, is_bilibili_video
 
 logger = get_logger(__name__)
+
+
+class BilibiliSubtitleUnavailable(RuntimeError):
+    """The platform could not confirm whether a Bilibili subtitle exists."""
 
 # ─── 共享工具函数 ───────────────────────────────────────────
 
@@ -113,24 +118,37 @@ def _build_part_info(url: str, info=None, parts: list = None) -> str:
     return f"P{p_index}"
 
 
-def try_get_bilibili_cc_subtitle(url: str, cached_info: dict = None) -> dict | None:
+def try_get_bilibili_cc_subtitle(url: str, cached_info=None) -> dict | None:
     """尝试获取 B站 CC 字幕（支持多P分P cid 精确获取）。
     返回字幕 dict（has_subtitle, text, language 等）或 None。
     多P视频指定分P无CC字幕时返回 None，不降级到P1。
     """
-    if 'bilibili' not in url.lower():
+    if cached_info is not None:
+        url = canonical_video_url(url, cached_info)
+    if not is_bilibili_video(url, cached_info):
         return None
 
     p_match = re.search(r'[?&]p=(\d+)', url)
     if p_match and cached_info:
-        parts = cached_info.get('parts', []) or []
+        parts = (
+            cached_info.get('parts', [])
+            if isinstance(cached_info, dict)
+            else getattr(cached_info, 'parts', [])
+        ) or []
         p_idx = int(p_match.group(1))
-        part = next((p for p in parts if p.get('index') == p_idx), None)
-        if part and part.get('cid'):
+        part = next((p for p in parts if (
+            p.get('index') if isinstance(p, dict) else getattr(p, 'index', None)
+        ) == p_idx), None)
+        cid = part.get('cid') if isinstance(part, dict) else getattr(part, 'cid', None)
+        if cid:
             bvid = extract_bvid(url)
             if bvid:
-                return extract_bilibili_subtitle_by_cid(bvid, part['cid'])
+                return extract_bilibili_subtitle_by_cid(bvid, cid)
         # 多P指定分P无法获取CC字幕，返回 None（不降级到P1）
+        return None
+
+    if p_match:
+        # 未知分P cid 时不能用 P1 字幕替代。
         return None
 
     return extract_bilibili_subtitle(url)
@@ -144,6 +162,7 @@ async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = No
 
     返回 (subtitle_text, source, language)。不含 AI 校正。
     """
+    url = canonical_video_url(url, info)
     platform = info.extractor or ""
 
     # ── DB 缓存检查 ──
@@ -157,31 +176,14 @@ async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = No
 
     # ── Pipeline 1: Bilibili CC 字幕 API ──
     bilibili_sub = None
+    bilibili_lookup_unavailable = False
     if 'bilibili' in (info.extractor or '').lower():
-        p_match = re.search(r'[?&]p=(\d+)', url)
-        parts = getattr(info, 'parts', []) or []
-        if p_match and len(parts) > 1:
-            p_index = int(p_match.group(1))
-            part = next((p for p in parts if p.index == p_index), None)
-            if part and part.cid:
-                bvid = extract_bvid(url)
-                if bvid:
-                    logger.info(f"尝试B站分P字幕 bvid={bvid} cid={part.cid}")
-                    bilibili_sub = extract_bilibili_subtitle_by_cid(bvid, part.cid)
-            # 分P无独立CC字幕时，不降级到P1（内容不同），继续后续管线
-            if bilibili_sub and bilibili_sub.get('has_subtitle') and len(bilibili_sub.get('text', '').strip()) < 100:
-                logger.info(f"分P字幕内容过短(len={len(bilibili_sub.get('text',''))}), 视为无效")
-                bilibili_sub = None
-            elif not bilibili_sub:
-                logger.info(f"分P无CC字幕，继续后续管线")
-        else:
-            bvid = extract_bvid(url)
-            logger.info(f"尝试B站CC字幕 bvid={bvid or 'N/A'}")
-            bilibili_sub = extract_bilibili_subtitle(url)
+        bilibili_sub = try_get_bilibili_cc_subtitle(url, info)
         if bilibili_sub:
             logger.info(f"B站CC字幕获取成功 has_subtitle={bilibili_sub.get('has_subtitle')} lang={bilibili_sub.get('language')}")
         else:
-            logger.info(f"B站CC字幕获取失败（返回 None），尝试下一降级")
+            bilibili_lookup_unavailable = True
+            logger.info("B站CC字幕接口暂时不可用，先尝试其他原生字幕")
     if bilibili_sub and bilibili_sub['has_subtitle']:
         text = bilibili_sub['text']
         sub_lang = bilibili_sub.get('language', 'zh')
@@ -205,6 +207,9 @@ async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = No
                     return subtitle_text, source, selected.lang
             except Exception as e:
                 logger.info(f"yt-dlp字幕获取失败: {e}")
+
+    if bilibili_lookup_unavailable:
+        raise BilibiliSubtitleUnavailable("B站字幕接口暂时不可用，请稍后重试；未启动语音转录")
 
     logger.info(f"没有可用的原生字幕，调用方可提交后台 Whisper 任务")
     return None, "", ""
