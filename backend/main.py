@@ -2,7 +2,6 @@ import os
 import sys
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -12,6 +11,7 @@ setup_logging()
 
 from config import DOWNLOAD_DIR, TEMP_DIR
 from core.features import get_capabilities
+from core.spa import SpaStaticFiles
 from core.storage import initialize_storage
 
 logger = get_logger(__name__)
@@ -87,7 +87,7 @@ app.include_router(health_router)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIST = os.path.join(os.path.dirname(BASE_DIR), "frontend", "dist")
 if os.path.exists(FRONTEND_DIST):
-    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
+    app.mount("/", SpaStaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
     logger.info(f"生产模式: 前端已挂载 ({FRONTEND_DIST})")
 else:
     logger.info(f"开发模式: 前端未构建，请单独启动 npm run dev")

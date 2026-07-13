@@ -7,6 +7,7 @@
 import os
 import shutil
 from functools import lru_cache
+from config import DEFAULT_GUEST_SECRET, GUEST_SECRET
 from core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -67,4 +68,5 @@ def get_capabilities() -> dict:
         "ai": is_ai_available(),
         "whisper": is_whisper_available(),
         "ffmpeg": is_ffmpeg_available(),
+        "guest_access_enabled": bool(GUEST_SECRET) and GUEST_SECRET != DEFAULT_GUEST_SECRET,
     }
