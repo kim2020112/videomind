@@ -1,187 +1,98 @@
 # VideoMind
 
-面向个人使用的 AI 视频学习网站。支持视频解析与下载、字幕提取、单视频 AI 总结、笔记、思维导图、问答和学习历史。
+VideoMind 是一个将在线视频转化为结构化学习资料的 Web 应用。它支持视频解析与下载、字幕获取、AI 总结、学习笔记、思维导图、关键问答和个人学习历史。
 
-## 设计目标
+## 主要能力
 
-- 适合 4C4G 单机云服务器和低并发个人使用
-- SQLite 是唯一数据库，同时保存业务数据和后台任务
-- 不依赖 Redis、PostgreSQL、ChromaDB、Docker 或独立 Worker 服务
-- FastAPI 单进程托管 API 和构建后的 Vue 前端
-- Whisper 一次只运行一个短生命周期子进程，结束后释放模型内存
-- 服务重启时，进行中的转录任务自动重新排队并从头执行
-- 历史搜索使用 SQLite 关键词搜索，不提供跨视频语义 RAG
-- 生产数据统一放在 `/var/lib/videomind`，与 Git 代码目录分离
+- 解析多平台视频信息并提供下载选项。
+- 优先使用平台原生字幕；没有字幕时可选用本地 Whisper 转录。
+- B 站字幕区分“可用、明确没有、暂时不可用”，接口限流或临时失败不会误启动 Whisper 或生成简介总结。
+- B 站多分 P 视频按用户所选分 P 的精确 `cid` 获取字幕。
+- B 站短链在解析后统一为规范视频 URL；转录限制与 ETA 使用所选分 P 时长，而不是整套视频总时长。
+- 基于字幕生成摘要、笔记、思维导图和关键问答。
+- 保存标签、收藏、历史状态，并按当前身份标记已经学习且有 AI 缓存的分 P。
+- 登录会话按浏览器窗口隔离，管理员和普通用户可以在不同窗口同时使用。
+- Whisper 任务持久化到 SQLite，由后端调度短生命周期子进程执行。
 
 ## 技术栈
 
-| 层 | 技术 |
-|---|---|
-| 前端 | Vue 3 + Vite |
-| 后端 | FastAPI + Uvicorn |
-| 数据与任务队列 | SQLite WAL |
-| AI | 外部 Anthropic 兼容 API |
-| 本地转录 | Faster-Whisper small / CPU int8 子进程 |
-| 视频处理 | yt-dlp + FFmpeg |
-| 生产运维 | systemd，可选 Caddy |
+- 前端：Vue 3、Vue Router、Vite、Tailwind CSS、Vitest。
+- 后端：FastAPI、Uvicorn、Python `unittest`。
+- 数据与后台任务：SQLite WAL。
+- 视频处理：yt-dlp、FFmpeg。
+- AI：Anthropic 兼容接口。
+- 本地转录：Faster-Whisper（可选）。
+
+## 环境要求
+
+- Python 3.10+
+- Node.js 20.19+（20 LTS）或 22.12+
+- FFmpeg（下载合并和 Whisper 需要）
+- Faster-Whisper 与本地模型（仅本地转录需要）
+
+缺少 AI、Whisper 或 FFmpeg 时，应用仍可启动；对应能力会通过 `/api/capabilities` 安全关闭。
 
 ## 本地开发
 
-环境要求：Python 3.12、Node.js 22、FFmpeg。
-
-Linux / macOS：
+从仓库根目录执行：
 
 ```bash
-python3.12 -m venv .venv
-.venv/bin/pip install -r backend/requirements-core.txt
-.venv/bin/pip install -r backend/requirements-ai.txt
-.venv/bin/pip install -r backend/requirements-whisper.txt
-npm --prefix frontend install
+python3 -m venv .venv
+.venv/bin/python -m pip install -r backend/requirements.txt
+npm --prefix frontend ci
 cp backend/.env.example backend/.env
 ```
 
-Windows PowerShell：
+编辑 `backend/.env`，至少配置有效的 AI API Key。公开提供访客能力时，还必须把 `GUEST_SECRET` 改为随机长字符串。
 
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python -m pip install -r backend\requirements-core.txt
-.\.venv\Scripts\python -m pip install -r backend\requirements-ai.txt
-.\.venv\Scripts\python -m pip install -r backend\requirements-whisper.txt
-npm --prefix frontend install
-Copy-Item backend\.env.example backend\.env
-```
-
-分别在两个终端启动后端和前端；以下命令都从仓库根目录执行：
+分别启动后端与前端：
 
 ```bash
-# 终端 1：后端（Linux / macOS）
-.venv/bin/python -m uvicorn main:app --app-dir backend --reload --host 127.0.0.1 --port 8000
+# 终端 1：后端 API
+.venv/bin/python -m uvicorn main:app --app-dir backend --reload --host 0.0.0.0 --port 8000
 
-# 终端 2：前端
-npm --prefix frontend run dev
+# 终端 2：前端开发服务器
+npm --prefix frontend run dev -- --host 0.0.0.0
 ```
 
-Windows 后端命令：
+开发页面为 `http://localhost:5173`，API 文档为 `http://localhost:8000/docs`。Vite 会把 `/api` 和 `/ws` 转发到后端。
 
-```powershell
-.\.venv\Scripts\python -m uvicorn main:app --app-dir backend --reload --host 127.0.0.1 --port 8000
-```
+## 生产运行
 
-开发地址：前端 `http://127.0.0.1:5173`，API `http://127.0.0.1:8000/docs`。
-
-## Whisper 模型
-
-模型目录默认为：
-
-```text
-backend/data/whisper_models/faster-whisper-small/
-  config.json
-  model.bin
-  tokenizer.json
-  vocabulary.txt
-```
-
-也可通过 `WHISPER_MODELS_DIR` 指定模型根目录。模型或 FFmpeg 缺失时，仅禁用 Whisper，核心网站仍可启动。
-
-## 生产部署
-
-推荐把代码放在 `/opt/videomind`，把持久化数据放在 `/var/lib/videomind`。首次安装执行：
+构建前端后，FastAPI 会自动挂载 `frontend/dist`，并为 `/workspace`、`/history` 和历史详情深链提供 SPA 回退：
 
 ```bash
-sudo APP_DIR=/opt/videomind \
-  APP_USER=videomind \
-  DATA_DIR=/var/lib/videomind \
-  bash deploy/install.sh
+npm --prefix frontend ci
+npm --prefix frontend run build
+.venv/bin/python -m uvicorn main:app --app-dir backend --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-若 `videomind` 用户不存在，安装脚本会自动创建。脚本还会创建 Python venv、安装三组依赖、构建前端、配置生产数据路径并安装：
+项目不提交环境专属的 systemd、反向代理和备份脚本。部署时应自行配置进程守护、HTTPS 与 SQLite 备份，并通过 `DB_PATH`、`AI_CONFIG_PATH`、`TEMP_DIR`、`DOWNLOAD_DIR` 和 `WHISPER_MODELS_DIR` 将运行数据放到持久化目录。后台调度器与 SQLite 状态位于同一进程，生产环境使用单个 Uvicorn worker。
 
-- `videomind.service`：单 Uvicorn worker，`MemoryMax=3G`
-- `videomind-maintenance.timer`：每日 SQLite 在线备份和文件清理
-
-安装后编辑 `/opt/videomind/backend/.env`，至少配置 `AI_API_KEY`、`ADMIN_PASSWORD` 和随机 `GUEST_SECRET`，然后执行 `sudo systemctl restart videomind`。生产进程只监听 `127.0.0.1:8000`，公网访问建议参考 `deploy/Caddyfile.example` 配置 Caddy 自动 HTTPS。4GB 内存服务器建议额外配置 2GB swap。
-
-旧版若仍使用 `/opt/videomind/backend/db/knowledge.db`，首次运行新版 `install.sh` 时会在不覆盖已有目标库的前提下，通过 SQLite Backup API 迁移历史数据库和 AI 配置。已有显式路径配置始终保留。
-
-更新：
+## 验证
 
 ```bash
-sudo APP_DIR=/opt/videomind bash deploy/update.sh
+# 后端测试
+python3 -B -m unittest discover -s backend/tests -v
+
+# 前端测试与生产构建
+npm --prefix frontend run test:run
+npm --prefix frontend run build
+
+# Python 编译和补丁格式
+python3 -m compileall -q backend
+git diff --check
 ```
 
-更新流程固定为：在线备份数据库、`git pull --ff-only`、安装依赖、构建前端、重启 systemd 服务。更新不会运行 Vite 常驻进程。
+健康与能力端点：
 
-日志与状态：
-
-```bash
-systemctl status videomind
-journalctl -u videomind -f
-curl http://127.0.0.1:8000/api/health/live
-curl http://127.0.0.1:8000/api/health/ready
-```
-
-## 关键 API
-
-| 端点 | 说明 |
-|---|---|
-| `GET /api/health/live` | 进程存活检查 |
-| `GET /api/health/ready` | SQLite 与目录可写检查 |
-| `GET /api/capabilities` | AI、Whisper、FFmpeg 能力状态 |
-| `POST /api/parse` | 解析视频 |
-| `POST /api/summarize/stream` | 单视频 AI 流水线 |
-| `GET /api/subtitle/text` | 获取字幕；需要 Whisper 时返回 202 后台任务 |
-| `GET /api/tasks/active` | 当前用户活跃任务 |
-| `GET /api/tasks/{task_id}` | 任务状态、阶段和进度 |
-| `POST /api/tasks/{task_id}/cancel` | 取消排队或运行中的任务 |
-| `GET /api/history?q=...` | SQLite 关键词历史搜索 |
-
-## 数据与备份
-
-本地开发默认数据库是 `backend/db/knowledge.db`，因此本机首次登录后历史为空是正常现象。本地数据库被 Git 忽略，不会上传到 GitHub，也不会自动与服务器数据库同步。
-
-生产环境默认使用：
-
-| 内容 | 路径 |
-|------|------|
-| 历史与业务数据库 | `/var/lib/videomind/db/knowledge.db` |
-| AI 服务商配置 | `/var/lib/videomind/ai_config.json` |
-| 临时文件 | `/var/lib/videomind/temp` |
-| 下载文件 | `/var/lib/videomind/downloads` |
-| Whisper 模型 | `/var/lib/videomind/whisper_models` |
-| 数据库备份 | `/var/lib/videomind/backups` |
-
-`deploy/backup.sh` 使用 Python SQLite Backup API 创建一致性备份，默认保留 14 天。`deploy/cleanup.sh` 默认清理 2 天前临时文件和 14 天前下载文件，保留时间均可通过环境变量配置。
-
-正常 `git pull` 或 `deploy/update.sh` 不会清空服务器历史。不要在生产目录执行 `git clean -fdx`，也不要删除 `/var/lib/videomind`。即使代码目录重新克隆，只要保留生产数据目录和 `.env` 中的路径，历史仍可恢复。
-
-手工恢复数据库前先停止服务：
-
-```bash
-sudo systemctl stop videomind
-sudo cp /var/lib/videomind/backups/knowledge-YYYYMMDD-HHMMSS.db \
-  /var/lib/videomind/db/knowledge.db
-sudo chown videomind:videomind /var/lib/videomind/db/knowledge.db
-sudo systemctl start videomind
-```
-
-仅处理有权访问的内容，并遵守视频平台规则和版权要求。
-
-## 默认管理员
-
-仅在 `backend/.env` 配置了非空 `ADMIN_PASSWORD` 时，启动才会自动创建管理员：
-
-```env
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=请设置强密码
-```
-
-若管理员用户已存在，不会覆盖其密码。
+- `GET /api/health/live`：进程存活检查。
+- `GET /api/health/ready`：SQLite 与运行目录可写检查。
+- `GET /api/capabilities`：AI、Whisper、FFmpeg 和访客能力状态。
 
 ## 文档
 
-| 文档 | 说明 |
-|------|------|
-| [docs/architecture.md](docs/architecture.md) | 当前架构、数据流和任务模型 |
-| [docs/development.md](docs/development.md) | 开发指南 |
+- [架构说明](docs/architecture.md)
+- [开发指南](docs/development.md)
 
-版本变化以 Git 提交和 GitHub Release 为准，不再维护重复的手工 changelog。
+请仅处理有权访问的视频内容，并遵守适用的平台规则与版权要求。
