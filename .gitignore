@@ -63,9 +63,15 @@ skills-lock.json
 faster-whisper-small/
 **/model.bin
 
-# Agent session planning files
-task_plan.md
-progress.md
-findings.md
+# Agent 会话与临时文档（不提交）
+/task_plan.md
+/progress.md
+/findings.md
+/handoff.md
+/AGENTS.md
 /docs/superpowers/
 /docs/p0-design.md
+
+# 旧向量索引与其他临时文件（运行时生成，不提交）
+/backend/data/chroma/
+tmp/
