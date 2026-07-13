@@ -1,4 +1,5 @@
 import { ref } from 'vue'
+import { useAuth } from './useAuth.js'
 
 const API_BASE = '/api/admin'
 
@@ -10,10 +11,23 @@ const saving = ref(false)
 const testResult = ref(null)
 
 export function useAdminConfig() {
+  const { getAuthHeaders } = useAuth()
+
+  function withAuth(options = {}) {
+    return {
+      ...options,
+      credentials: 'same-origin',
+      headers: {
+        ...getAuthHeaders(),
+        ...(options.headers || {}),
+      },
+    }
+  }
+
   async function fetchProviders() {
     loading.value = true
     try {
-      const res = await fetch(`${API_BASE}/ai-config`, { credentials: 'same-origin' })
+      const res = await fetch(`${API_BASE}/ai-config`, withAuth())
       if (!res.ok) throw new Error('获取配置失败')
       const data = await res.json()
       providers.value = data.providers || []
@@ -30,12 +44,10 @@ export function useAdminConfig() {
   async function addProvider(data) {
     saving.value = true
     try {
-      const res = await fetch(`${API_BASE}/ai-config/providers`, {
+      const res = await fetch(`${API_BASE}/ai-config/providers`, withAuth({
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
         body: JSON.stringify(data),
-      })
+      }))
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.detail || '添加失败')
@@ -50,12 +62,10 @@ export function useAdminConfig() {
   async function updateProvider(pid, data) {
     saving.value = true
     try {
-      const res = await fetch(`${API_BASE}/ai-config/providers/${pid}`, {
+      const res = await fetch(`${API_BASE}/ai-config/providers/${pid}`, withAuth({
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
         body: JSON.stringify(data),
-      })
+      }))
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.detail || '更新失败')
@@ -70,10 +80,9 @@ export function useAdminConfig() {
   async function deleteProvider(pid) {
     saving.value = true
     try {
-      const res = await fetch(`${API_BASE}/ai-config/providers/${pid}`, {
+      const res = await fetch(`${API_BASE}/ai-config/providers/${pid}`, withAuth({
         method: 'DELETE',
-        credentials: 'same-origin',
-      })
+      }))
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.detail || '删除失败')
@@ -89,10 +98,9 @@ export function useAdminConfig() {
     testResult.value = null
     loading.value = true
     try {
-      const res = await fetch(`${API_BASE}/ai-config/providers/${pid}/test`, {
+      const res = await fetch(`${API_BASE}/ai-config/providers/${pid}/test`, withAuth({
         method: 'POST',
-        credentials: 'same-origin',
-      })
+      }))
       testResult.value = await res.json()
     } catch (e) {
       testResult.value = { success: false, message: e.message, model: '' }
@@ -106,12 +114,10 @@ export function useAdminConfig() {
   async function addModel(pid, data) {
     saving.value = true
     try {
-      const res = await fetch(`${API_BASE}/ai-config/providers/${pid}/models`, {
+      const res = await fetch(`${API_BASE}/ai-config/providers/${pid}/models`, withAuth({
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
         body: JSON.stringify(data),
-      })
+      }))
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.detail || '添加失败')
@@ -126,12 +132,10 @@ export function useAdminConfig() {
   async function updateModel(pid, mid, data) {
     saving.value = true
     try {
-      const res = await fetch(`${API_BASE}/ai-config/providers/${pid}/models/${mid}`, {
+      const res = await fetch(`${API_BASE}/ai-config/providers/${pid}/models/${mid}`, withAuth({
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
         body: JSON.stringify(data),
-      })
+      }))
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.detail || '更新失败')
@@ -146,10 +150,9 @@ export function useAdminConfig() {
   async function deleteModel(pid, mid) {
     saving.value = true
     try {
-      const res = await fetch(`${API_BASE}/ai-config/providers/${pid}/models/${mid}`, {
+      const res = await fetch(`${API_BASE}/ai-config/providers/${pid}/models/${mid}`, withAuth({
         method: 'DELETE',
-        credentials: 'same-origin',
-      })
+      }))
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.detail || '删除失败')
@@ -163,12 +166,10 @@ export function useAdminConfig() {
 
   async function switchModel(pid, mid) {
     try {
-      const res = await fetch(`${API_BASE}/ai-config/switch`, {
+      const res = await fetch(`${API_BASE}/ai-config/switch`, withAuth({
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
         body: JSON.stringify({ provider_id: pid, model_id: mid }),
-      })
+      }))
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.detail || '切换失败')
@@ -184,12 +185,10 @@ export function useAdminConfig() {
     testResult.value = null
     loading.value = true
     try {
-      const res = await fetch(`${API_BASE}/ai-config/test`, {
+      const res = await fetch(`${API_BASE}/ai-config/test`, withAuth({
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
         body: JSON.stringify(data),
-      })
+      }))
       testResult.value = await res.json()
     } catch (e) {
       testResult.value = { success: false, message: e.message, model: '' }

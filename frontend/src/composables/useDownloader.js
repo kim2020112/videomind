@@ -4,7 +4,7 @@ import { useAuth } from './useAuth.js'
 const API_BASE = '/api'
 
 export function useDownloader() {
-  const { getAuthHeaders, guestId, guestSig } = useAuth()
+  const { getAuthHeaders, getAuthQueryParams } = useAuth()
   const videoInfo = ref(null)
   const formats = ref([])
   const selectedFormat = ref('best')
@@ -130,11 +130,7 @@ export function useDownloader() {
     }
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const params = new URLSearchParams()
-    if (guestId.value && guestSig.value) {
-      params.set('guest_id', guestId.value)
-      params.set('guest_sig', guestSig.value)
-    }
+    const params = getAuthQueryParams()
     const query = params.toString() ? `?${params}` : ''
     const wsUrl = `${protocol}//${window.location.host}/ws/download/${tid}${query}`
 

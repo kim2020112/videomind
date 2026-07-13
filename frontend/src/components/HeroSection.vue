@@ -1,51 +1,75 @@
 <script setup>
+import { computed } from 'vue'
+
 const props = defineProps({
-  url: String,
+  url: { type: String, default: '' },
   loading: Boolean,
-  onParse: Function
+  requiresLogin: Boolean,
+  serviceChecking: Boolean,
+  compact: Boolean,
+  serviceError: { type: String, default: '' },
 })
 
-const emit = defineEmits(['update:url'])
+const emit = defineEmits(['update:url', 'parse', 'request-login', 'retry-capabilities'])
+
+const buttonLabel = computed(() => {
+  if (props.loading) return '解析中…'
+  if (props.serviceChecking) return '检查服务中…'
+  if (props.requiresLogin) return '登录后开始'
+  return '开始学习'
+})
+
+function submit() {
+  if (!props.url.trim() || props.loading || props.serviceChecking) return
+  if (props.requiresLogin) {
+    emit('request-login')
+  } else {
+    emit('parse')
+  }
+}
 </script>
 
 <template>
-  <section class="hero-section">
+  <section class="hero-section" :class="{ 'hero-section--compact': compact }">
     <div class="hero-bg-glow"></div>
     <div class="hero-container">
-      <h1 class="hero-title">
-        <span class="hero-brand">VideoMind</span> AI 视频学习助手
-      </h1>
-
-      <p class="hero-subtitle">
-        粘贴视频链接，AI 自动总结、生成结构化笔记与思维导图
-      </p>
-
-      <!-- Input and Button -->
-      <div class="hero-input-section">
-        <div class="input-wrapper">
-          <svg class="input-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-          </svg>
-          <input
-            :value="url"
-            @input="emit('update:url', $event.target.value)"
-            @change="emit('update:url', $event.target.value)"
-            type="text"
-            placeholder="粘贴视频链接，支持 B站、YouTube、抖音、小红书、TikTok"
-            class="hero-input"
-            @keyup.enter="onParse"
-          />
-        </div>
-        <button
-          @click="onParse"
-          :disabled="!url || loading"
-          class="hero-parse-button"
-        >
-          {{ loading ? '解析中...' : '开始学习' }}
-        </button>
+      <div v-if="!compact" class="hero-copy">
+        <h1 class="hero-title">
+          <span class="hero-brand">VideoMind</span> AI 视频学习助手
+        </h1>
+        <p class="hero-subtitle">粘贴视频链接，AI 自动总结、生成结构化笔记与思维导图</p>
       </div>
 
+      <form class="hero-input-section" @submit.prevent="submit">
+        <div class="input-wrapper">
+          <label class="sr-only" for="video-url-input">视频链接</label>
+          <svg class="input-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+          </svg>
+          <input
+            id="video-url-input"
+            :value="url"
+            name="video-url"
+            type="url"
+            inputmode="url"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="粘贴视频链接，例如 https://www.bilibili.com/video/…"
+            class="hero-input"
+            @input="emit('update:url', $event.target.value)"
+            @change="emit('update:url', $event.target.value)"
+            @keydown.enter.prevent="submit"
+          />
+        </div>
+        <button type="button" :disabled="!url.trim() || loading || serviceChecking" class="hero-parse-button" @click="submit">
+          {{ buttonLabel }}
+        </button>
+      </form>
+
+      <div v-if="serviceError" class="hero-service-error" role="status">
+        <span>{{ serviceError }}</span>
+        <button type="button" @click="emit('retry-capabilities')">重新检测</button>
+      </div>
     </div>
   </section>
 </template>
@@ -53,91 +77,122 @@ const emit = defineEmits(['update:url'])
 <style scoped>
 .hero-section {
   position: relative;
-  background: var(--bg-primary);
-  padding: 5rem 2rem 4rem;
-  text-align: center;
   overflow: hidden;
+  padding: 5rem 2rem 4rem;
+  background: var(--bg-primary);
+  text-align: center;
+  transition: padding 0.2s ease, border-color 0.2s ease;
+}
+
+.hero-section--compact {
+  padding: 1rem clamp(0.75rem, 3vw, 3rem);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
 }
 
 .hero-bg-glow {
   position: absolute;
   top: -40%;
   left: 50%;
-  transform: translateX(-50%);
   width: 800px;
   height: 600px;
+  transform: translateX(-50%);
   background: radial-gradient(ellipse, rgba(59, 130, 246, 0.12) 0%, rgba(6, 182, 212, 0.06) 40%, transparent 70%);
   pointer-events: none;
 }
 
+.hero-section--compact .hero-bg-glow {
+  width: 520px;
+  height: 220px;
+}
+
 .hero-container {
   position: relative;
+  z-index: 1;
   max-width: 900px;
   margin: 0 auto;
-  z-index: 1;
+}
+
+.hero-section--compact .hero-container {
+  max-width: 1480px;
 }
 
 .hero-title {
+  margin-bottom: 1rem;
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   font-size: 3rem;
   font-weight: 800;
-  color: var(--text-primary);
   line-height: 1.2;
-  margin-bottom: 1rem;
-  font-family: 'Plus Jakarta Sans', 'Noto Sans SC', sans-serif;
+  text-wrap: balance;
 }
 
 .hero-brand {
   background: linear-gradient(135deg, var(--accent-blue) 0%, var(--accent-cyan) 100%);
+  background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  background-clip: text;
 }
 
 .hero-subtitle {
-  font-size: 1.125rem;
+  margin: 0 auto 2.5rem;
   color: var(--text-secondary);
+  font-size: 1.125rem;
   line-height: 1.6;
-  margin-bottom: 2.5rem;
+  text-wrap: pretty;
 }
 
 .hero-input-section {
   display: flex;
-  gap: 1rem;
-  max-width: 700px;
-  margin: 0 auto 1.5rem;
+  gap: 0.75rem;
+  width: 100%;
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.hero-section--compact .hero-input-section {
+  max-width: none;
 }
 
 .input-wrapper {
-  flex: 1;
   position: relative;
+  flex: 1;
 }
 
 .input-icon {
   position: absolute;
-  left: 1.25rem;
   top: 50%;
-  transform: translateY(-50%);
+  left: 1.25rem;
   width: 20px;
   height: 20px;
+  transform: translateY(-50%);
   color: var(--text-muted);
+  pointer-events: none;
 }
 
 .hero-input {
   width: 100%;
+  min-height: 54px;
   padding: 1rem 1.25rem 1rem 3.25rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  font-size: 0.9375rem;
-  outline: none;
-  transition: all 0.2s;
-  background: var(--bg-card);
+  border: 1px solid var(--border-hover);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
   color: var(--text-primary);
-  backdrop-filter: blur(12px);
+  font-size: 1rem;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
 }
 
-.hero-input:focus {
+.hero-section--compact .hero-input {
+  min-height: 48px;
+  padding-top: 0.75rem;
+  padding-bottom: 0.75rem;
+}
+
+.hero-input:focus-visible {
   border-color: var(--accent-blue);
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
 }
 
 .hero-input::placeholder {
@@ -145,16 +200,22 @@ const emit = defineEmits(['update:url'])
 }
 
 .hero-parse-button {
+  min-height: 54px;
   padding: 1rem 2.5rem;
+  border: 0;
+  border-radius: 12px;
   background: linear-gradient(135deg, var(--accent-blue) 0%, var(--accent-cyan) 100%);
   color: white;
-  border: none;
-  border-radius: var(--radius);
   font-size: 1rem;
   font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
   white-space: nowrap;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.hero-section--compact .hero-parse-button {
+  min-height: 48px;
+  padding: 0.75rem 1.5rem;
 }
 
 .hero-parse-button:hover:not(:disabled) {
@@ -163,46 +224,88 @@ const emit = defineEmits(['update:url'])
 }
 
 .hero-parse-button:disabled {
-  opacity: 0.5;
   cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.hero-service-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  color: #fca5a5;
+  font-size: 0.8125rem;
+}
+
+.hero-service-error button {
+  min-height: 36px;
+  padding: 0.375rem 0.75rem;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.08);
+  color: #fecaca;
+  cursor: pointer;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 @media (max-width: 768px) {
   .hero-section {
-    padding: 2rem 1rem 1.5rem;
+    padding: 3.25rem 1rem 2.75rem;
+  }
+
+  .hero-section--compact {
+    padding: 0.75rem;
   }
 
   .hero-title {
-    font-size: 1.5rem;
+    font-size: 2rem;
   }
 
   .hero-subtitle {
-    font-size: 0.875rem;
-    margin-bottom: 1.25rem;
-    line-height: 1.6;
+    margin-bottom: 2rem;
+    font-size: 1rem;
   }
 
   .hero-input-section {
     flex-direction: column;
-    gap: 0.75rem;
-  }
-
-  .hero-input {
-    padding: 0.75rem 0.875rem 0.75rem 2.5rem;
-    font-size: 1rem;
-  }
-
-  .input-icon {
-    left: 0.75rem;
-    width: 18px;
-    height: 18px;
   }
 
   .hero-parse-button {
     width: 100%;
+    min-height: 50px;
     padding: 0.875rem 1.5rem;
-    font-size: 0.9375rem;
   }
 
+  .hero-section--compact .hero-input-section {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .hero-section--compact .hero-parse-button {
+    width: auto;
+    min-width: 112px;
+  }
+}
+
+@media (max-width: 520px) {
+  .hero-section--compact .hero-input-section {
+    grid-template-columns: 1fr;
+  }
+
+  .hero-section--compact .hero-parse-button {
+    width: 100%;
+  }
 }
 </style>

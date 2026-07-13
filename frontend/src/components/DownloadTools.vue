@@ -38,6 +38,19 @@ const emit = defineEmits([
 const manualSubtitles = computed(() => props.subtitles.filter((s) => !s.is_auto))
 const autoSubtitles = computed(() => props.subtitles.filter((s) => s.is_auto))
 const isSidebar = computed(() => props.variant === 'sidebar')
+const selectedQualityLabel = computed(() => {
+  const format = props.selectedFormatDetail
+  if (!format) return ''
+  if (format.height) return `${format.height}P`
+  return stripSizeFromLabel(format.label) || format.ext?.toUpperCase() || ''
+})
+const downloadActionLabel = computed(() => {
+  if (props.progress?.status === 'downloading') return '下载中…'
+  const quality = selectedQualityLabel.value ? ` · ${selectedQualityLabel.value}` : ''
+  if (props.selectedPartIndices.length > 0) return `合并下载已选 ${props.selectedPartIndices.length}P${quality}`
+  if (props.videoInfo?.parts?.length > 1) return `下载当前 P${props.currentPart}${quality}`
+  return `下载视频${quality}`
+})
 </script>
 
 <template>
@@ -85,30 +98,32 @@ const isSidebar = computed(() => props.variant === 'sidebar')
         </div>
 
         <div class="parts-list" :class="{ 'parts-list--sidebar': isSidebar }">
-          <div
+          <button
             v-for="part in videoInfo.parts"
             :key="part.index"
+            type="button"
             class="part-row"
             :class="{ active: currentPart === part.index, selected: selectedPartIndices.includes(part.index) }"
+            :aria-pressed="selectedPartIndices.includes(part.index)"
+            :aria-label="`${selectedPartIndices.includes(part.index) ? '取消选择' : '选择'} P${part.index}：${part.title}`"
+            @click="emit('toggle-part', part.index)"
           >
-            <button
-              type="button"
+            <span
               class="part-checkbox"
               :class="{ checked: selectedPartIndices.includes(part.index) }"
-              :aria-label="`${selectedPartIndices.includes(part.index) ? '取消选择' : '选择'} P${part.index}`"
-              @click="emit('toggle-part', part.index)"
+              aria-hidden="true"
             >
               <svg v-if="selectedPartIndices.includes(part.index)" viewBox="0 0 12 10" fill="none">
                 <path d="M1 5l3 3.5L11 1" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
-            </button>
-            <div class="part-info">
+            </span>
+            <span class="part-info">
               <span class="part-index">P{{ part.index }}</span>
               <span class="part-title">{{ part.title }}</span>
               <span v-if="!isSidebar && part.filesize_str" class="part-filesize">{{ part.filesize_str }}</span>
               <span v-if="part.duration" class="part-duration">{{ formatDuration(part.duration) }}</span>
-            </div>
-          </div>
+            </span>
+          </button>
         </div>
       </div>
 
@@ -227,7 +242,7 @@ const isSidebar = computed(() => props.variant === 'sidebar')
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
               d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
           </svg>
-          {{ progress && progress.status === 'downloading' ? '下载中...' : '下载' }}
+          {{ downloadActionLabel }}
         </button>
       </div>
 
@@ -414,10 +429,18 @@ const isSidebar = computed(() => props.variant === 'sidebar')
 }
 
 .part-row {
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 0.375rem;
+  padding: 0;
+  border: 0;
   border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
   transition: background 0.15s;
   min-height: 44px;
 }
@@ -434,7 +457,6 @@ const isSidebar = computed(() => props.variant === 'sidebar')
   border: 2px solid rgba(255, 255, 255, 0.2);
   border-radius: 5px;
   flex-shrink: 0;
-  cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -935,6 +957,13 @@ const isSidebar = computed(() => props.variant === 'sidebar')
 }
 
 @media (max-width: 768px) {
+  .parts-list,
+  .parts-list--sidebar,
+  .subtitle-list {
+    max-height: none;
+    overflow-y: visible;
+  }
+
   .format-grid {
     grid-template-columns: 1fr;
   }

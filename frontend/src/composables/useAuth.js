@@ -9,6 +9,39 @@ const guestId = ref('')
 const guestSig = ref('')
 const loading = ref(false)
 const initialized = ref(false)
+const sessionId = ref(_readSessionValue('vm_session_id'))
+const sessionMode = ref(_readSessionValue('vm_session_mode'))
+
+function _readSessionValue(key) {
+  try {
+    return sessionStorage.getItem(key) || ''
+  } catch {
+    return ''
+  }
+}
+
+function _setSessionValue(key, value) {
+  try {
+    if (value) sessionStorage.setItem(key, value)
+    else sessionStorage.removeItem(key)
+  } catch { /* ignore */ }
+}
+
+function _clearWindowUser() {
+  user.value = null
+  sessionId.value = ''
+  sessionMode.value = 'guest'
+  _setSessionValue('vm_session_id', '')
+  _setSessionValue('vm_session_mode', 'guest')
+  _setSessionValue('vm_user', '')
+}
+
+function _setWindowSession(value) {
+  sessionId.value = value
+  sessionMode.value = ''
+  _setSessionValue('vm_session_id', value)
+  _setSessionValue('vm_session_mode', '')
+}
 
 export function useAuth() {
   // 生成兼容 HTTP/HTTPS 的 UUID
@@ -26,10 +59,11 @@ export function useAuth() {
   async function init() {
     if (initialized.value) return
     initialized.value = true
+    const startedWithWindowSession = Boolean(sessionId.value)
     await ensureGuestId()
     await fetchMe()
     // 如果没拿到用户信息，延迟重试一次（处理 session cookie 时序问题）
-    if (!user.value) {
+    if (!user.value && !startedWithWindowSession) {
       await new Promise(r => setTimeout(r, 300))
       await fetchMe()
     }
@@ -77,29 +111,25 @@ export function useAuth() {
   // 拉取当前用户信息
   async function fetchMe() {
     try {
-      const headers = {}
-      // 游客也带上身份 header，否则服务端无法识别 → usage 返回 0
-      if (!user.value && guestId.value) {
-        headers['X-Guest-Id'] = guestId.value
-        if (guestSig.value) headers['X-Guest-Sig'] = guestSig.value
-      }
+      const headers = getAuthHeaders()
       const res = await fetch(`${API_BASE}/auth/me`, {
         credentials: 'same-origin',
         headers,
       })
       if (!res.ok) {
         // 服务端明确拒绝（401/403），清除本地状态
-        user.value = null
-        localStorage.removeItem('vm_user')
+        _clearWindowUser()
         return
       }
       const data = await res.json()
       if (data.logged_in) {
+        if (data.session_id) {
+          _setWindowSession(data.session_id)
+        }
         user.value = data.user
-        localStorage.setItem('vm_user', JSON.stringify(data.user))
+        _setSessionValue('vm_user', JSON.stringify(data.user))
       } else {
-        user.value = null
-        localStorage.removeItem('vm_user')
+        _clearWindowUser()
       }
       usage.value = data.usage || { used: 0, limit: 0, allowed: true }
     } catch {
@@ -107,10 +137,10 @@ export function useAuth() {
     }
   }
 
-  // 从 localStorage 恢复用户信息（降级方案）
+  // 从当前窗口恢复用户信息（网络异常时的降级方案）
   function _restoreFromStorage() {
     try {
-      const stored = localStorage.getItem('vm_user')
+      const stored = sessionStorage.getItem('vm_user')
       if (stored) {
         user.value = JSON.parse(stored)
       }
@@ -130,6 +160,13 @@ export function useAuth() {
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.detail || '注册失败')
+      }
+      const data = await res.json().catch(() => ({}))
+      if (data.session_id) {
+        _setWindowSession(data.session_id)
+      } else {
+        sessionMode.value = ''
+        _setSessionValue('vm_session_mode', '')
       }
       await fetchMe()
       return true
@@ -152,6 +189,13 @@ export function useAuth() {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.detail || '登录失败')
       }
+      const data = await res.json().catch(() => ({}))
+      if (data.session_id) {
+        _setWindowSession(data.session_id)
+      } else {
+        sessionMode.value = ''
+        _setSessionValue('vm_session_mode', '')
+      }
       await fetchMe()
       return true
     } finally {
@@ -164,9 +208,9 @@ export function useAuth() {
     await fetch(`${API_BASE}/auth/logout`, {
       method: 'POST',
       credentials: 'same-origin',
+      headers: getAuthHeaders(),
     })
-    user.value = null
-    localStorage.removeItem('vm_user')
+    _clearWindowUser()
     usage.value = { used: 0, limit: 0, allowed: true }
   }
 
@@ -180,11 +224,7 @@ export function useAuth() {
   // 刷新使用次数（AI 调用后调用，轻量接口不返回用户信息）
   async function refreshUsage() {
     try {
-      const headers = {}
-      if (!user.value && guestId.value) {
-        headers['X-Guest-Id'] = guestId.value
-        if (guestSig.value) headers['X-Guest-Sig'] = guestSig.value
-      }
+      const headers = getAuthHeaders()
       const res = await fetch(`${API_BASE}/auth/usage`, {
         credentials: 'same-origin',
         headers,
@@ -198,7 +238,12 @@ export function useAuth() {
   // 构建请求 headers（供其他 composable 使用）
   function getAuthHeaders() {
     const headers = { 'Content-Type': 'application/json' }
-    if (!user.value && guestId.value) {
+    if (sessionId.value) {
+      headers.Authorization = `Bearer ${sessionId.value}`
+    } else if (!user.value && guestId.value) {
+      if (sessionMode.value === 'guest') {
+        headers['X-Session-Mode'] = 'guest'
+      }
       headers['X-Guest-Id'] = guestId.value
       if (guestSig.value) {
         headers['X-Guest-Sig'] = guestSig.value
@@ -207,11 +252,25 @@ export function useAuth() {
     return headers
   }
 
+  // WebSocket、video src 等不能设置普通请求头，改用同一窗口凭据的查询参数。
+  function getAuthQueryParams() {
+    const params = new URLSearchParams()
+    if (sessionId.value) {
+      params.set('session_id', sessionId.value)
+    } else if (!user.value && guestId.value) {
+      if (sessionMode.value === 'guest') params.set('session_mode', 'guest')
+      params.set('guest_id', guestId.value)
+      if (guestSig.value) params.set('guest_sig', guestSig.value)
+    }
+    return params
+  }
+
   return {
     user,
     usage,
     guestId,
     guestSig,
+    sessionId,
     loading,
     isLoggedIn,
     isAdmin,
@@ -223,5 +282,6 @@ export function useAuth() {
     login,
     logout,
     getAuthHeaders,
+    getAuthQueryParams,
   }
 }

@@ -2,8 +2,6 @@
 import { computed, ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import { Transformer } from 'markmap-lib'
-import { Markmap } from 'markmap-view'
 
 marked.setOptions({ gfm: true, breaks: true })
 
@@ -32,7 +30,7 @@ function cachedMarkdown(text) {
 function renderNotesMarkdown(text) {
   if (!text) return ''
   let html = DOMPurify.sanitize(marked.parse(text), { ADD_ATTR: ['data-seconds'] })
-  // 替换 [MM:SS] 或 空格+MM:SS 为可点击 span（跳过 <code>/<pre>/<a> 块内的）
+  // 替换 [MM:SS] 或 空格+MM:SS 为键盘可操作的时间戳按钮（跳过 <code>/<pre>/<a> 块内的）
   html = html.replace(
     /(<code[\s\S]*?<\/code>|<pre[\s\S]*?<\/pre>|<a[\s\S]*?<\/a>)|\[(\d{1,2}:\d{2}(?::\d{2})?)\]|(\s)(\d{1,2}:\d{2}(?::\d{2})?)(?=\s|<|$)/g,
     (match, skipBlock, brTs, spaceTs, bareTs) => {
@@ -41,7 +39,7 @@ function renderNotesMarkdown(text) {
       const parts = ts.split(':').map(Number)
       const sec = parts.length === 3 ? parts[0]*3600+parts[1]*60+parts[2] : parts[0]*60+parts[1]
       const prefix = brTs ? '' : (spaceTs || '')
-      return `${prefix}<span class="notes-timestamp" data-seconds="${sec}">${ts}</span>`
+      return `${prefix}<button type="button" class="notes-timestamp" data-seconds="${sec}" aria-label="跳转到 ${ts}">${ts}</button>`
     }
   )
   return html
@@ -277,6 +275,17 @@ const mindmapSvg = ref(null)
 const mindmapContainer = ref(null)
 const isFullscreen = ref(false)
 let markmapInstance = null
+let markmapModulesPromise = null
+
+function loadMarkmap() {
+  if (!markmapModulesPromise) {
+    markmapModulesPromise = Promise.all([
+      import('markmap-lib'),
+      import('markmap-view'),
+    ]).then(([lib, view]) => ({ Transformer: lib.Transformer, Markmap: view.Markmap }))
+  }
+  return markmapModulesPromise
+}
 
 const MINDMAP_SVG_STYLE = `
   .markmap-foreign { display: inline-block !important; }
@@ -318,13 +327,15 @@ function injectMindmapStyle(svgEl) {
 watch(() => props.mindmapMarkdown, async (val) => {
   if (val) {
     await nextTick()
-    renderMindmap(val)
+    await renderMindmap(val)
   }
 })
 
-function renderMindmap(md) {
+async function renderMindmap(md) {
   if (!mindmapSvg.value) return
   try {
+    const { Transformer, Markmap } = await loadMarkmap()
+    if (!mindmapSvg.value || md !== props.mindmapMarkdown) return
     if (markmapInstance) {
       markmapInstance.destroy?.()
       markmapInstance = null
@@ -394,6 +405,8 @@ function waitForRenderFrames(count = 2) {
 
 async function createExportStage() {
   if (!props.mindmapMarkdown) return null
+
+  const { Transformer, Markmap } = await loadMarkmap()
 
   const mount = document.createElement('div')
   mount.style.position = 'fixed'
@@ -790,8 +803,7 @@ function downloadNotes() {
             <svg class="limit-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
             <span class="limit-title">今日免费次数已用完</span>
           </div>
-          <p class="limit-desc">每日 3 次免费 AI 总结已用尽，升级 Pro 解锁无限次使用</p>
-          <button class="pro-btn">升级 Pro</button>
+          <p class="limit-desc">每日 3 次免费 AI 总结已用尽，请明天再试或联系管理员调整额度。</p>
         </div>
       </template>
       <template v-else>
@@ -831,20 +843,30 @@ function downloadNotes() {
     <div v-if="multiParts.length > 1" class="parts-section">
       <p class="parts-label">分P列表（共 {{ multiParts.length }} P）</p>
       <div class="parts-list" ref="partsListRef">
-        <div
+        <button
           v-for="part in multiParts"
           :key="part.index"
+          type="button"
           class="part-row"
-          :class="{ active: currentSummarizePart === part.index }"
+          :class="{
+            active: currentSummarizePart === part.index,
+            learned: part.is_cached,
+          }"
+          :aria-current="currentSummarizePart === part.index ? 'true' : undefined"
+          :aria-label="`${part.is_cached ? '已学习，' : ''}切换到 P${part.index} ${part.title}`"
           @click="onSwitchPart && onSwitchPart(part.index)"
         >
           <div class="part-info">
             <span class="part-index">P{{ part.index }}</span>
             <span class="part-title">{{ part.title }}</span>
+            <span v-if="part.is_cached" class="part-learned" title="已有学习缓存">
+              <span class="part-learned-icon" aria-hidden="true">✓</span>
+              <span>已学习</span>
+            </span>
             <span v-if="loading && currentSummarizePart === part.index" class="parts-spinner"></span>
             <span v-if="part.duration" class="part-duration">{{ formatDuration(part.duration) }}</span>
           </div>
-        </div>
+        </button>
       </div>
     </div>
 
@@ -963,7 +985,8 @@ function downloadNotes() {
           <div class="subtitle-text-wrapper" ref="subtitleWrapperRef">
             <div class="subtitle-segments">
               <div v-for="(seg, i) in subtitleSegments" :key="i" class="subtitle-segment" :class="{ active: isActiveSegment(seg) }">
-                <span v-if="seg.time" class="subtitle-time" :class="{ clickable: seg.seconds != null, active: isActiveSegment(seg) }" @click="seg.seconds != null && onSeekVideo?.(seg.seconds)">{{ seg.time }}</span>
+                <button v-if="seg.time && seg.seconds != null" type="button" class="subtitle-time clickable" :class="{ active: isActiveSegment(seg) }" @click="onSeekVideo?.(seg.seconds)" :aria-label="`跳转到 ${seg.time}`">{{ seg.time }}</button>
+                <span v-else-if="seg.time" class="subtitle-time">{{ seg.time }}</span>
                 <span class="subtitle-line">{{ seg.text }}</span>
               </div>
             </div>
@@ -1104,13 +1127,13 @@ function downloadNotes() {
                   class="qa-pair-card"
                   :class="{ expanded: pair.expanded }"
                 >
-                  <div class="qa-pair-header" @click="onToggleQaExpand(i)">
+                  <button type="button" class="qa-pair-header" @click="onToggleQaExpand(i)" :aria-expanded="Boolean(pair.expanded)">
                     <span class="qa-pair-index">Q{{ i + 1 }}</span>
                     <span class="qa-pair-question">{{ pair.question }}</span>
                     <svg class="qa-pair-chevron" :class="{ rotated: pair.expanded }" viewBox="0 0 20 20" fill="currentColor">
                       <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/>
                     </svg>
-                  </div>
+                  </button>
                   <div v-show="pair.expanded" class="qa-pair-answer">
                     <span class="qa-pair-answer-label">A</span>
                     <div class="qa-pair-answer-content prose prose-invert prose-sm max-w-none" v-html="cachedMarkdown(pair.answer)"></div>
@@ -1166,7 +1189,7 @@ function downloadNotes() {
 </template>
 
 <style scoped>
-.ai-summary { padding: 0; }
+.ai-summary { --tab-reading-height: 560px; padding: 0; }
 
 /* 触发按钮 */
 .summary-trigger { display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 2rem 1rem; }
@@ -1215,13 +1238,17 @@ function downloadNotes() {
 .parts-section { margin-bottom: 1.5rem; }
 .parts-section .parts-label { font-size: 0.9375rem; font-weight: 600; color: var(--text-primary); margin: 0 0 0.75rem 0; }
 .parts-section .parts-list { display: flex; flex-direction: column; gap: 0.125rem; max-height: 200px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.12) transparent; }
-.parts-section .part-row { display: flex; align-items: center; border-radius: 8px; transition: background 0.15s; cursor: pointer; min-height: 44px; }
+.parts-section .part-row { display: flex; align-items: center; width: 100%; padding: 0; border: 0; border-radius: 8px; appearance: none; background: transparent; color: inherit; font: inherit; text-align: left; transition: background 0.15s; cursor: pointer; min-height: 44px; }
 .parts-section .part-row:hover { background: rgba(255,255,255,0.05); }
 .parts-section .part-row.active { background: rgba(59,130,246,0.1); }
+.parts-section .part-row.learned:not(.active) { background: rgba(16,185,129,0.045); }
 .parts-section .part-info { display: flex; align-items: center; gap: 0.625rem; flex: 1; padding: 0.5rem 0.625rem; min-width: 0; }
 .parts-section .part-index { font-weight: 700; color: var(--accent-blue); min-width: 2rem; flex-shrink: 0; font-size: 0.8125rem; }
+.parts-section .part-row.learned .part-index { color: #6EE7B7; }
 .parts-section .part-title { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.8125rem; flex: 1; min-width: 0; }
 .parts-section .part-row.active .part-title { color: var(--text-primary); }
+.parts-section .part-learned { display: inline-flex; align-items: center; gap: 0.25rem; flex-shrink: 0; min-height: 24px; padding: 0.125rem 0.375rem; border: 1px solid rgba(52,211,153,0.28); border-radius: 6px; background: rgba(16,185,129,0.1); color: #6EE7B7; font-size: 0.6875rem; font-weight: 700; white-space: nowrap; }
+.parts-section .part-learned-icon { font-size: 0.75rem; line-height: 1; }
 .parts-section .part-duration { font-size: 0.75rem; color: var(--text-muted); flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .parts-spinner { width: 12px; height: 12px; border: 2px solid rgba(99,102,241,0.3); border-top-color: var(--accent-blue); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
 
@@ -1238,7 +1265,8 @@ function downloadNotes() {
 
 /* 统一可滚动内容面板 */
 .summary-scroll {
-  max-height: 500px;
+  height: var(--tab-reading-height);
+  max-height: var(--tab-reading-height);
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: rgba(255,255,255,0.12) transparent;
@@ -1326,7 +1354,8 @@ function downloadNotes() {
 }
 .download-menu-item:hover { background: rgba(255, 255, 255, 0.08); }
 .subtitle-text-wrapper {
-  max-height: 500px;
+  height: var(--tab-reading-height);
+  max-height: var(--tab-reading-height);
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1348,6 +1377,9 @@ function downloadNotes() {
   line-height: 1.6;
 }
 .subtitle-time {
+  border: 0;
+  background: transparent;
+  font-family: inherit;
   flex-shrink: 0;
   width: 3.5rem;
   font-size: 0.75rem;
@@ -1437,7 +1469,7 @@ function downloadNotes() {
 .mindmap-container:fullscreen .mindmap-svg { max-width: 100vw; max-height: 100vh; }
 
 /* 问答 */
-.qa-container { display: flex; flex-direction: column; height: 400px; }
+.qa-container { display: flex; flex-direction: column; height: var(--tab-reading-height); }
 .qa-mode-bar { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 1rem; }
 .qa-mode-btn { padding: 0.5rem 0.875rem; background: transparent; border: none; border-bottom: 2px solid transparent; color: var(--text-muted); font-size: 0.8125rem; font-weight: 500; cursor: pointer; transition: all 0.15s; }
 .qa-mode-btn:hover { color: var(--text-secondary); }
@@ -1458,7 +1490,7 @@ function downloadNotes() {
 .qa-pair-card { border: 1px solid var(--border); border-radius: 10px; transition: border-color 0.2s; background: rgba(255,255,255,0.02); }
 .qa-pair-card.expanded { border-color: rgba(59,130,246,0.35); }
 
-.qa-pair-header { display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 0.875rem; cursor: pointer; transition: background 0.15s; border-radius: 9px; }
+.qa-pair-header { width: 100%; display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 0.875rem; cursor: pointer; transition: background 0.15s; border: 0; background: transparent; color: inherit; text-align: left; border-radius: 9px; }
 .qa-pair-header:hover { background: rgba(255,255,255,0.04); }
 .qa-pair-card.expanded .qa-pair-header { border-radius: 9px 9px 0 0; }
 
@@ -1480,7 +1512,7 @@ function downloadNotes() {
 .qa-pair-answer-content :deep(code::after) { content: none; }
 .qa-pair-answer-content :deep(a) { color: var(--accent-blue); }
 
-.chat-container { display: flex; flex-direction: column; height: 400px; }
+.chat-container { display: flex; flex: 1; flex-direction: column; min-height: 0; }
 .chat-need-subtitle { padding: 2rem; text-align: center; color: var(--text-muted); }
 .chat-messages { flex: 1; overflow-y: auto; padding: 0.5rem 0; display: flex; flex-direction: column; gap: 0.75rem; }
 .chat-empty { text-align: center; color: var(--text-muted); font-size: 0.8125rem; padding: 2rem 1rem; }
@@ -1639,7 +1671,7 @@ function downloadNotes() {
 }
 .notes-action-btn:hover { background: rgba(255,255,255,0.1); color: var(--text-primary); }
 .notes-content {
-  max-height: 600px; overflow-y: auto;
+  height: var(--tab-reading-height); max-height: var(--tab-reading-height); overflow-y: auto;
   padding: 1.25rem;
   background: linear-gradient(135deg, rgba(15, 23, 42, 0.6) 0%, rgba(30, 41, 59, 0.3) 100%);
   border: 1px solid var(--border);
@@ -1677,6 +1709,7 @@ function downloadNotes() {
   font-size: 0.8125rem;
   font-variant-numeric: tabular-nums;
   color: #93C5FD;
+  font-family: inherit;
   cursor: pointer;
   transition: background 0.15s;
 }
@@ -1749,11 +1782,6 @@ function downloadNotes() {
     height: 16px;
   }
 
-  .summary-scroll {
-    max-height: none;
-    overflow: visible;
-    padding-right: 0;
-  }
 }
 
 @media (max-width: 768px) {
@@ -1764,12 +1792,24 @@ function downloadNotes() {
   .sub-tab-bar::-webkit-scrollbar { display: block; height: 3px; }
   .sub-tab-bar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
 
-  /* 内容区高度限制 */
-  .summary-scroll { max-height: 60vh; }
+  /* 移动端使用自然页面滚动，避免内容区与页面形成嵌套滚动。 */
+  .ai-summary { --tab-reading-height: auto; }
+  .summary-scroll,
+  .subtitle-text-wrapper,
+  .qa-container,
+  .chat-container,
+  .notes-content {
+    height: auto;
+    max-height: none;
+    overflow: visible;
+  }
+  .qa-pairs-list,
+  .chat-messages {
+    overflow-y: visible;
+    flex: none;
+  }
   .mindmap-container { padding: 0.5rem; }
-  .chat-container { height: 50vh; }
-  .qa-container { height: 50vh; }
-  .notes-content { max-height: 50vh; padding: 0.875rem; }
+  .notes-content { padding: 0.875rem; }
 
   /* 笔记字体缩小 */
   .notes-content :deep(h1) { font-size: 1.1rem; }

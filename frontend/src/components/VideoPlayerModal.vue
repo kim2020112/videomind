@@ -1,6 +1,7 @@
 <script setup>
-import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth.js'
+import BaseDialog from './BaseDialog.vue'
 
 const props = defineProps({
   streamUrl: String,
@@ -10,58 +11,38 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['close', 'seek'])
-
 const videoRef = ref(null)
 const currentUrl = ref('')
 const isRefreshing = ref(false)
 const loadError = ref(false)
-const { getAuthHeaders, guestId, guestSig } = useAuth()
+const { getAuthHeaders, getAuthQueryParams } = useAuth()
 
 function toProxyUrl(rawUrl) {
   if (!rawUrl) return ''
   let proxy = `/api/video/stream?url=${encodeURIComponent(rawUrl)}`
-  if (props.videoUrl) {
-    proxy += `&video_url=${encodeURIComponent(props.videoUrl)}`
-  }
-  if (guestId.value && guestSig.value) {
-    proxy += `&guest_id=${encodeURIComponent(guestId.value)}&guest_sig=${encodeURIComponent(guestSig.value)}`
+  if (props.videoUrl) proxy += `&video_url=${encodeURIComponent(props.videoUrl)}`
+  for (const [key, value] of getAuthQueryParams()) {
+    proxy += `&${encodeURIComponent(key)}=${encodeURIComponent(value)}`
   }
   return proxy
 }
 
-watch(() => props.visible, (v) => {
-  if (v) {
+watch(() => props.visible, (visible) => {
+  if (visible) {
     currentUrl.value = toProxyUrl(props.streamUrl)
     loadError.value = false
-    document.body.style.overflow = 'hidden'
-  } else {
-    document.body.style.overflow = ''
   }
 })
 
-watch(() => props.streamUrl, (v) => {
-  if (v && props.visible) {
-    currentUrl.value = toProxyUrl(v)
+watch(() => props.streamUrl, (value) => {
+  if (value && props.visible) {
+    currentUrl.value = toProxyUrl(value)
     loadError.value = false
   }
-})
-
-function onKeydown(e) {
-  if (e.key === 'Escape' && props.visible) {
-    emit('close')
-  }
-}
-
-onMounted(() => document.addEventListener('keydown', onKeydown))
-onUnmounted(() => {
-  document.removeEventListener('keydown', onKeydown)
-  document.body.style.overflow = ''
 })
 
 function onTimeUpdate() {
-  if (videoRef.value) {
-    emit('seek', videoRef.value.currentTime)
-  }
+  if (videoRef.value) emit('seek', videoRef.value.currentTime)
 }
 
 async function onVideoError() {
@@ -70,14 +51,13 @@ async function onVideoError() {
   loadError.value = false
   try {
     const params = new URLSearchParams({ url: props.videoUrl })
-    const resp = await fetch(`/api/video/refresh?${params}`, {
+    const response = await fetch(`/api/video/refresh?${params}`, {
       headers: getAuthHeaders(),
       credentials: 'same-origin',
     })
-    const data = await resp.json()
+    const data = await response.json()
     if (data.stream_url) {
       currentUrl.value = toProxyUrl(data.stream_url)
-      loadError.value = false
     } else {
       loadError.value = true
     }
@@ -89,85 +69,61 @@ async function onVideoError() {
 }
 
 function seekTo(seconds) {
-  if (videoRef.value) {
-    videoRef.value.currentTime = seconds
-    if (videoRef.value.paused) videoRef.value.play().catch(() => {})
-  }
+  if (!videoRef.value) return
+  videoRef.value.currentTime = seconds
+  if (videoRef.value.paused) videoRef.value.play().catch(() => {})
 }
 
 defineExpose({ seekTo })
 </script>
 
 <template>
-  <Teleport to="body">
-    <div v-if="visible" class="video-modal-overlay" @click.self="$emit('close')">
-      <div class="video-modal">
-        <button class="video-modal-close" @click="$emit('close')" title="关闭 (ESC)">&times;</button>
-        <div v-if="isRefreshing" class="video-modal-status">刷新播放链接...</div>
-        <div v-else-if="loadError" class="video-modal-status error">
-          <p>播放链接已失效</p>
-          <button @click="onVideoError" class="video-modal-retry">重试</button>
-        </div>
-        <video
-          v-else
-          ref="videoRef"
-          :src="currentUrl"
-          controls
-          autoplay
-          class="video-modal-player"
-          @timeupdate="onTimeUpdate"
-          @error="onVideoError"
-        />
-      </div>
+  <BaseDialog
+    :visible="visible"
+    :title-id="'video-player-title'"
+    :close-label="`关闭视频播放器${videoTitle ? `：${videoTitle}` : ''}`"
+    size="video"
+    :close-on-overlay="false"
+    @close="emit('close')"
+  >
+    <h2 id="video-player-title" class="sr-only">{{ videoTitle || '视频播放器' }}</h2>
+    <div v-if="isRefreshing" class="video-modal-status" aria-live="polite">刷新播放链接…</div>
+    <div v-else-if="loadError" class="video-modal-status error" role="alert">
+      <p>播放链接已失效</p>
+      <button type="button" class="video-modal-retry" @click="onVideoError">重试</button>
     </div>
-  </Teleport>
+    <video
+      v-else
+      ref="videoRef"
+      :src="currentUrl"
+      controls
+      autoplay
+      class="video-modal-player"
+      @timeupdate="onTimeUpdate"
+      @error="onVideoError"
+    />
+  </BaseDialog>
 </template>
 
 <style scoped>
-.video-modal-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 9999;
-  background: rgba(0, 0, 0, 0.85);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 1rem;
-}
-.video-modal {
-  position: relative;
-  width: min(80vw, 1200px);
-  aspect-ratio: 16 / 9;
-  border-radius: 12px;
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
   overflow: hidden;
-  background: #000;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
+
 .video-modal-player {
   width: 100%;
   height: 100%;
   object-fit: contain;
 }
-.video-modal-close {
-  position: absolute;
-  top: 0.5rem;
-  right: 0.5rem;
-  z-index: 10;
-  width: 2rem;
-  height: 2rem;
-  border: none;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.6);
-  color: #fff;
-  font-size: 1.25rem;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 1;
-}
-.video-modal-close:hover {
-  background: rgba(0, 0, 0, 0.8);
-}
+
 .video-modal-status {
   width: 100%;
   height: 100%;
@@ -175,28 +131,26 @@ defineExpose({ seekTo })
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: #94a3b8;
   gap: 0.75rem;
+  color: var(--text-secondary);
 }
+
 .video-modal-status.error {
   color: #fca5a5;
 }
+
 .video-modal-retry {
-  padding: 0.375rem 1rem;
+  min-width: 88px;
+  min-height: 44px;
+  padding: 0.5rem 1rem;
   border: 1px solid rgba(148, 163, 184, 0.3);
-  border-radius: 6px;
+  border-radius: 8px;
   background: rgba(148, 163, 184, 0.1);
-  color: #94a3b8;
+  color: var(--text-secondary);
   cursor: pointer;
-  font-size: 0.875rem;
 }
+
 .video-modal-retry:hover {
   background: rgba(148, 163, 184, 0.2);
-}
-@media (max-width: 768px) {
-  .video-modal {
-    width: 100vw;
-    border-radius: 0;
-  }
 }
 </style>

@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest",
+    "test:run": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "@tailwindcss/typography": "^0.5.19",
@@ -14,15 +16,19 @@
     "marked": "^18.0.3",
     "markmap-lib": "^0.18.12",
     "markmap-view": "^0.18.12",
-    "vue": "^3.5.32"
+    "vue": "^3.5.32",
+    "vue-router": "^4.6.4"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.0",
     "@vitejs/plugin-vue": "^6.0.6",
+    "@vue/test-utils": "^2.4.11",
+    "jsdom": "^26.1.0",
     "tailwindcss": "^4.3.0",
-    "vite": "^8.0.10"
+    "vite": "^8.0.10",
+    "vitest": "^3.2.7"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": "^20.19.0 || >=22.12.0"
   }
 }

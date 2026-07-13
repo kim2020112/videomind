@@ -27,6 +27,7 @@ export function useSummary() {
   const backgroundTask = ref(null)
 
   let abortController = null
+  let activeRequestId = 0
 
   async function fetchSubtitleText(url, lang) {
     isFetchingSubtitle.value = true
@@ -65,13 +66,17 @@ export function useSummary() {
     if (abortController) {
       abortController.abort()
     }
-    abortController = new AbortController()
+    const requestId = ++activeRequestId
+    const controller = new AbortController()
+    abortController = controller
 
     isSummarizing.value = true
     regeneratingMode.value = mode === 'full' ? '' : mode
     summarizeError.value = ''
     if (mode === 'full') {
       summaryResult.value = { summary: '', chapters: [], mindmap: { title: '', children: [] } }
+      generationStage.value = ''
+      subtitleSource.value = ''
       streamingText.value = ''
       notesMarkdown.value = ''
       mindmapMarkdown.value = ''
@@ -100,7 +105,7 @@ export function useSummary() {
         method: 'POST',
         headers: getAuthHeaders(),
         body: JSON.stringify(body),
-        signal: abortController.signal,
+        signal: controller.signal,
       })
 
       if (!response.ok) {
@@ -121,6 +126,7 @@ export function useSummary() {
         buffer = lines.pop() || ''
 
         for (const line of lines) {
+          if (requestId !== activeRequestId) return
           if (!line.startsWith('data: ')) continue
           try {
             const event = JSON.parse(line.slice(6))
@@ -190,13 +196,16 @@ export function useSummary() {
         }
       }
     } catch (e) {
-      if (e.name !== 'AbortError') {
+      if (requestId === activeRequestId && e.name !== 'AbortError') {
         summarizeError.value = e.message || 'AI 总结失败'
       }
     } finally {
-      isSummarizing.value = false
-      regeneratingMode.value = ''
-      refreshUsage()
+      if (requestId === activeRequestId) {
+        isSummarizing.value = false
+        regeneratingMode.value = ''
+        abortController = null
+        refreshUsage()
+      }
     }
   }
 
@@ -206,6 +215,10 @@ export function useSummary() {
   }
 
   function resetSummary() {
+    activeRequestId += 1
+    abortController?.abort()
+    abortController = null
+    isSummarizing.value = false
     summaryResult.value = null
     summarizeError.value = ''
     streamingText.value = ''

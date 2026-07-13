@@ -1,5 +1,5 @@
 <template>
-  <section class="features-section">
+  <section id="features" class="features-section">
     <div class="features-container">
       <div class="features-header">
         <h2 class="features-title">让视频成为你的知识库</h2>

@@ -1,4 +1,5 @@
 <script setup>
+import { ref, watch } from 'vue'
 import { formatDuration, formatViewCount } from '../utils/resultFormatters.js'
 
 const props = defineProps({
@@ -7,9 +8,15 @@ const props = defineProps({
   collapsed: { type: Boolean, default: false },
   showFullDescription: { type: Boolean, default: false },
   variant: { type: String, default: 'mobile' },
+  collapsible: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['open-video', 'update:collapsed', 'update:showFullDescription'])
+const mobileExpanded = ref(!props.collapsible)
+
+watch(() => props.videoInfo?.webpage_url || props.videoInfo?.title, () => {
+  mobileExpanded.value = !props.collapsible
+})
 
 function openVideo() {
   if (props.videoInfo.stream_url) emit('open-video')
@@ -72,14 +79,30 @@ function openVideo() {
       </svg>
     </button>
 
-    <div class="video-info" :class="{ 'video-info--sidebar': variant === 'sidebar' }">
-      <div
+    <button
+      v-if="variant === 'mobile' && collapsible"
+      type="button"
+      class="mobile-context-toggle"
+      :aria-expanded="mobileExpanded"
+      @click="mobileExpanded = !mobileExpanded"
+    >
+      <span class="mobile-context-toggle__copy">
+        <strong>{{ videoInfo.title }}</strong>
+        <span>{{ currentPartInfo?.index ? `P${currentPartInfo.index} · ` : '' }}{{ videoInfo.extractor }}</span>
+      </span>
+      <svg :class="{ rotated: mobileExpanded }" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/>
+      </svg>
+    </button>
+
+    <div v-if="!collapsible || mobileExpanded" class="video-info" :class="{ 'video-info--sidebar': variant === 'sidebar' }">
+      <button
+        type="button"
         class="video-thumbnail-wrapper"
         :class="{ clickable: videoInfo.stream_url, 'video-thumbnail-wrapper--sidebar': variant === 'sidebar' }"
-        tabindex="0"
-        role="button"
+        :disabled="!videoInfo.stream_url"
+        :aria-label="videoInfo.stream_url ? `播放 ${videoInfo.title}` : undefined"
         @click="openVideo"
-        @keydown.enter="openVideo"
       >
         <img v-if="videoInfo.thumbnail" :src="videoInfo.thumbnail" :alt="videoInfo.title || '视频缩略图'" class="video-thumbnail" />
         <div v-if="videoInfo.stream_url" class="video-thumbnail-play">
@@ -88,7 +111,7 @@ function openVideo() {
         <span v-if="videoInfo.duration_string" class="video-thumbnail-duration">
           {{ currentPartInfo?.duration ? formatDuration(currentPartInfo.duration) : videoInfo.duration_string }}
         </span>
-      </div>
+      </button>
 
       <div class="video-details">
         <h3 class="video-title">
@@ -107,7 +130,7 @@ function openVideo() {
       </div>
     </div>
 
-    <div v-if="videoInfo.description" class="video-description" :class="{ expanded: showFullDescription }">
+    <div v-if="videoInfo.description && (!collapsible || mobileExpanded)" class="video-description" :class="{ expanded: showFullDescription }">
       <p class="video-description-text">{{ videoInfo.description }}</p>
       <button
         v-if="videoInfo.description.length > 150"
@@ -138,6 +161,55 @@ function openVideo() {
   overflow: visible;
   padding: 1rem;
   border-radius: 12px;
+}
+
+.mobile-context-toggle {
+  width: 100%;
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mobile-context-toggle__copy {
+  min-width: 0;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.mobile-context-toggle__copy strong,
+.mobile-context-toggle__copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-context-toggle__copy strong {
+  font-size: 0.9375rem;
+}
+
+.mobile-context-toggle__copy span {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.mobile-context-toggle svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: transform 0.2s ease;
+}
+
+.mobile-context-toggle svg.rotated {
+  transform: rotate(180deg);
 }
 
 .desktop-sidebar-toggle {
@@ -296,6 +368,14 @@ function openVideo() {
   flex-shrink: 0;
   border-radius: var(--radius);
   overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.video-thumbnail-wrapper:disabled {
+  cursor: default;
 }
 
 .video-thumbnail-wrapper--sidebar {

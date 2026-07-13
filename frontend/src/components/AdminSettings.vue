@@ -1,6 +1,8 @@
 <script setup>
 import { ref, watch } from 'vue'
 import { useAdminConfig } from '../composables/useAdminConfig.js'
+import BaseDialog from './BaseDialog.vue'
+import ConfirmDialog from './ConfirmDialog.vue'
 
 const emit = defineEmits(['close'])
 const props = defineProps({ visible: Boolean })
@@ -28,6 +30,19 @@ const modelForm = ref({ name: '', model: '' })
 const formError = ref('')
 const formSuccess = ref('')
 const switchSuccess = ref('')
+const confirmation = ref(null)
+let confirmationResolve = null
+
+function requestConfirmation(message, title) {
+  confirmation.value = { message, title }
+  return new Promise(resolve => { confirmationResolve = resolve })
+}
+
+function closeConfirmation(confirmed = false) {
+  confirmation.value = null
+  confirmationResolve?.(confirmed)
+  confirmationResolve = null
+}
 
 const providersList = [
   { value: 'deepseek', label: 'DeepSeek' },
@@ -103,7 +118,7 @@ async function handleSaveProvider() {
 }
 
 async function handleDeleteProvider(p) {
-  if (!confirm(`确定删除服务商「${p.name}」及其所有模型？`)) return
+  if (!await requestConfirmation(`确定删除服务商「${p.name}」及其所有模型？`, '删除服务商')) return
   try {
     await deleteProvider(p.id)
   } catch (e) {
@@ -162,7 +177,7 @@ async function handleSaveModel() {
 }
 
 async function handleDeleteModel(pid, m) {
-  if (!confirm(`确定删除模型「${m.name}」？`)) return
+  if (!await requestConfirmation(`确定删除模型「${m.name}」？`, '删除模型')) return
   try {
     await deleteModel(pid, m.id)
   } catch (e) {
@@ -193,14 +208,23 @@ async function handleTestNewProvider() {
 </script>
 
 <template>
-  <Teleport to="body">
-    <div v-if="visible" class="modal-overlay" @click.self="$emit('close')">
-      <div class="modal-card">
-        <button class="modal-close" @click="$emit('close')">
-          <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
-        </button>
-
-        <h2 class="modal-title">AI 模型配置</h2>
+  <ConfirmDialog
+    :visible="Boolean(confirmation)"
+    :title="confirmation?.title"
+    :message="confirmation?.message || ''"
+    confirm-label="删除"
+    danger
+    @confirm="closeConfirmation(true)"
+    @close="closeConfirmation(false)"
+  />
+  <BaseDialog
+    :visible="visible"
+    title-id="admin-settings-title"
+    close-label="关闭模型配置"
+    size="wide"
+    @close="$emit('close')"
+  >
+        <h2 id="admin-settings-title" class="modal-title">AI 模型配置</h2>
         <p class="modal-desc">管理服务商和模型，API Key 按服务商配置，模型可添加多个</p>
 
         <!-- 切换成功提示 -->
@@ -210,7 +234,7 @@ async function handleTestNewProvider() {
         <div class="provider-list">
           <div v-for="p in providers" :key="p.id" class="provider-group">
             <!-- 服务商头部 -->
-            <div class="provider-header" @click="toggleExpand(p.id)">
+            <div class="provider-header" role="button" tabindex="0" :aria-expanded="Boolean(expanded[p.id])" @click="toggleExpand(p.id)" @keydown.enter.prevent="toggleExpand(p.id)" @keydown.space.prevent="toggleExpand(p.id)">
               <div class="provider-expand">
                 <svg :class="{ rotated: expanded[p.id] }" viewBox="0 0 20 20" fill="currentColor">
                   <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/>
@@ -228,13 +252,13 @@ async function handleTestNewProvider() {
                 </div>
               </div>
               <div class="provider-actions" @click.stop>
-                <button class="btn-icon" title="测试连接" @click="handleTestProvider(p)">
+                <button class="btn-icon" title="测试连接" aria-label="测试服务商连接" @click="handleTestProvider(p)">
                   <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd"/></svg>
                 </button>
-                <button class="btn-icon" title="编辑" @click="openEditProvider(p)">
+                <button class="btn-icon" title="编辑" aria-label="编辑服务商" @click="openEditProvider(p)">
                   <svg viewBox="0 0 20 20" fill="currentColor"><path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z"/></svg>
                 </button>
-                <button class="btn-icon btn-icon-danger" title="删除" @click="handleDeleteProvider(p)">
+                <button class="btn-icon btn-icon-danger" title="删除" aria-label="删除服务商" @click="handleDeleteProvider(p)">
                   <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>
                 </button>
               </div>
@@ -257,7 +281,11 @@ async function handleTestNewProvider() {
                 :key="m.id"
                 class="model-item"
                 :class="{ active: isActiveModel(p.id, m.id) }"
+                role="button"
+                tabindex="0"
                 @click="handleSwitch(p.id, m.id)"
+                @keydown.enter.prevent="handleSwitch(p.id, m.id)"
+                @keydown.space.prevent="handleSwitch(p.id, m.id)"
               >
                 <div class="model-info">
                   <span class="model-name">{{ m.name }}</span>
@@ -265,10 +293,10 @@ async function handleTestNewProvider() {
                 </div>
                 <span class="model-active-badge" v-if="isActiveModel(p.id, m.id)">当前</span>
                 <div class="model-actions" @click.stop>
-                  <button class="btn-icon" title="编辑" @click="openEditModel(p.id, m)">
+                  <button class="btn-icon" title="编辑" aria-label="编辑模型" @click="openEditModel(p.id, m)">
                     <svg viewBox="0 0 20 20" fill="currentColor"><path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z"/></svg>
                   </button>
-                  <button class="btn-icon btn-icon-danger" title="删除" @click="handleDeleteModel(p.id, m)">
+                  <button class="btn-icon btn-icon-danger" title="删除" aria-label="删除模型" @click="handleDeleteModel(p.id, m)">
                     <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>
                   </button>
                 </div>
@@ -300,7 +328,7 @@ async function handleTestNewProvider() {
         <div v-if="showProviderForm" class="form-panel">
           <div class="form-panel-header">
             <span>{{ editingProviderId ? '编辑服务商' : '添加服务商' }}</span>
-            <button class="btn-icon" @click="closeProviderForm">
+            <button class="btn-icon" aria-label="关闭服务商表单" @click="closeProviderForm">
               <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
             </button>
           </div>
@@ -353,7 +381,7 @@ async function handleTestNewProvider() {
         <div v-if="showModelForm" class="form-panel">
           <div class="form-panel-header">
             <span>{{ editingModelId ? '编辑模型' : '添加模型' }}</span>
-            <button class="btn-icon" @click="closeModelForm">
+            <button class="btn-icon" aria-label="关闭模型表单" @click="closeModelForm">
               <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
             </button>
           </div>
@@ -379,9 +407,7 @@ async function handleTestNewProvider() {
             </div>
           </form>
         </div>
-      </div>
-    </div>
-  </Teleport>
+  </BaseDialog>
 </template>
 
 <style scoped>

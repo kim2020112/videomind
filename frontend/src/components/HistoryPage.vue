@@ -1,8 +1,12 @@
 <script setup>
 import { ref, watch, onUnmounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth.js'
+import ConfirmDialog from './ConfirmDialog.vue'
 
 const { getAuthHeaders } = useAuth()
+const route = useRoute()
+const router = useRouter()
 const props = defineProps({
   activeTasks: { type: Array, default: () => [] }
 })
@@ -76,11 +80,11 @@ function taskStageLabel(task, item) {
   }[status] || '后台处理中'
 }
 
-const historySearchQuery = ref('')
+const historySearchQuery = ref(String(route.query.q || ''))
 const historyTags = ref([])
-const historyActiveTag = ref('')
-const historyPlatform = ref('')
-const historySort = ref('newest')
+const historyActiveTag = ref(String(route.query.tag || ''))
+const historyPlatform = ref(String(route.query.platform || ''))
+const historySort = ref(route.query.sort === 'oldest' ? 'oldest' : 'newest')
 const historyItems = ref([])
 const historyTotal = ref(0)
 const historyStats = ref(null)
@@ -101,6 +105,46 @@ function showError(msg) {
 const expandedGroups = ref({}) // { groupKey: true/false }
 const expandedTaskItem = ref(null) // url_hash of expanded transcribing item
 const cancelingTaskId = ref(null)
+const confirmation = ref(null)
+let confirmationResolve = null
+
+function requestConfirmation(message, title = '确认操作') {
+  confirmation.value = { message, title }
+  return new Promise(resolve => { confirmationResolve = resolve })
+}
+
+function closeConfirmation(confirmed = false) {
+  confirmation.value = null
+  confirmationResolve?.(confirmed)
+  confirmationResolve = null
+}
+
+function syncRouteQuery() {
+  const query = {}
+  if (historySearchQuery.value) query.q = historySearchQuery.value
+  if (historyActiveTag.value) query.tag = historyActiveTag.value
+  if (historyPlatform.value) query.platform = historyPlatform.value
+  if (historySort.value !== 'newest') query.sort = historySort.value
+  router.replace({ name: 'history', query })
+}
+
+watch(() => route.query, query => {
+  const nextSearch = String(query.q || '')
+  const nextTag = String(query.tag || '')
+  const nextPlatform = String(query.platform || '')
+  const nextSort = query.sort === 'oldest' ? 'oldest' : 'newest'
+  if (
+    nextSearch === historySearchQuery.value &&
+    nextTag === historyActiveTag.value &&
+    nextPlatform === historyPlatform.value &&
+    nextSort === historySort.value
+  ) return
+  historySearchQuery.value = nextSearch
+  historyActiveTag.value = nextTag
+  historyPlatform.value = nextPlatform
+  historySort.value = nextSort
+  fetchHistoryPage()
+})
 
 function toggleTaskDetail(item) {
   if (isActiveItem(item)) {
@@ -109,7 +153,7 @@ function toggleTaskDetail(item) {
 }
 
 async function cancelTask(taskId) {
-  if (!confirm('确定要取消此转录任务？')) return
+  if (!await requestConfirmation('确定要取消此转录任务？', '停止转录')) return
   cancelingTaskId.value = taskId
   try {
     const res = await fetch(`/api/tasks/${taskId}/cancel`, { method: 'POST', headers: getAuthHeaders() })
@@ -126,7 +170,7 @@ async function cancelTask(taskId) {
 }
 
 async function deleteTranscribingItem(item) {
-  if (!confirm(`确定删除「${item.video_title || '未标题'}」？`)) return
+  if (!await requestConfirmation(`确定删除「${item.video_title || '未标题'}」？`, '删除历史记录')) return
   // 先取消关联的后台任务
   const task = getTaskForUrl(item.url_hash)
   if (task) {
@@ -199,21 +243,25 @@ async function loadMoreHistory() {
 }
 
 function handleHistorySearch() {
+  syncRouteQuery()
   fetchHistoryPage()
 }
 
 function setHistoryTag(tag) {
   historyActiveTag.value = historyActiveTag.value === tag ? '' : tag
+  syncRouteQuery()
   fetchHistoryPage()
 }
 
 function setHistorySort(sort) {
   historySort.value = sort
+  syncRouteQuery()
   fetchHistoryPage()
 }
 
 function setHistoryPlatform(platform) {
   historyPlatform.value = historyPlatform.value === platform ? '' : platform
+  syncRouteQuery()
   fetchHistoryPage()
 }
 
@@ -235,7 +283,7 @@ async function deleteHistoryItem(item) {
     return deleteTranscribingItem(item)
   }
   if (item.is_multipart) {
-    if (!confirm(`确定删除「${item.video_title}」的全部 ${item.parts_count} 个分P？`)) return
+    if (!await requestConfirmation(`确定删除「${item.video_title}」的全部 ${item.parts_count} 个分P？`, '删除全部分 P')) return
     try {
       deletingHistoryId.value = item.id
       const authH = getAuthHeaders()
@@ -246,7 +294,7 @@ async function deleteHistoryItem(item) {
     }
     return
   }
-  if (!confirm(`确定删除「${item.video_title}」？`)) return
+  if (!await requestConfirmation(`确定删除「${item.video_title}」？`, '删除历史记录')) return
   try {
     deletingHistoryId.value = item.id
     await fetch(`/api/history/${item.id}`, { method: 'DELETE', headers: getAuthHeaders() })
@@ -310,7 +358,7 @@ function toggleSelectAll() {
 async function batchDeleteSelected() {
   const count = selectedIds.value.size
   if (count === 0) return
-  if (!confirm(`确定删除选中的 ${count} 条记录？`)) return
+  if (!await requestConfirmation(`确定删除选中的 ${count} 条记录？`, '批量删除')) return
 
   batchDeleting.value = true
   try {
@@ -369,6 +417,15 @@ fetchHistoryPage()
 
 <template>
   <section class="history-page">
+    <ConfirmDialog
+      :visible="Boolean(confirmation)"
+      :title="confirmation?.title"
+      :message="confirmation?.message || ''"
+      confirm-label="确认"
+      danger
+      @confirm="closeConfirmation(true)"
+      @close="closeConfirmation(false)"
+    />
     <Transition name="error-toast">
       <div v-if="errorMessage" class="error-toast" @click="errorMessage = ''">
         <svg viewBox="0 0 20 20" fill="currentColor" class="error-toast-icon"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/></svg>
@@ -403,6 +460,7 @@ fetchHistoryPage()
           <input
             v-model="historySearchQuery"
             class="search-input"
+            aria-label="搜索学习历史"
             placeholder="搜索标题或摘要..."
             @keyup.enter="handleHistorySearch"
           />
@@ -490,12 +548,12 @@ fetchHistoryPage()
               <input type="checkbox" :checked="isItemSelected(item)" />
             </div>
             <div class="hp-card-header">
-              <h3 class="hp-card-title" @click="selectHistory(item)">{{ item.video_title || '未知标题' }}</h3>
+              <h3 class="hp-card-heading"><button type="button" class="hp-card-title" @click="selectHistory(item)">{{ item.video_title || '未知标题' }}</button></h3>
               <span v-if="item.platform" class="hp-platform-tag">{{ item.platform }}</span>
             </div>
             <!-- 转录状态 -->
-            <div v-if="isActiveItem(item)"
-                 class="hp-transcribing-badge" @click.stop="toggleTaskDetail(item)">
+            <button v-if="isActiveItem(item)" type="button"
+                 class="hp-transcribing-badge" @click.stop="toggleTaskDetail(item)" :aria-expanded="expandedTaskItem === item.url_hash">
               <template v-if="getTaskForUrl(item.url_hash)">
                 <span class="hp-pulse-dot"></span>
                 <span>{{ taskStageLabel(getTaskForUrl(item.url_hash), item) }}</span>
@@ -507,7 +565,7 @@ fetchHistoryPage()
               <template v-else>
                 <span>正在同步任务状态</span>
               </template>
-            </div>
+            </button>
             <!-- 转录任务详情面板 -->
             <div v-if="isActiveItem(item) && expandedTaskItem === item.url_hash" class="hp-task-detail">
               <div class="hp-task-info">
@@ -529,17 +587,17 @@ fetchHistoryPage()
               <span>转录失败</span>
             </div>
             <!-- 多P标识 -->
-            <div v-if="item.is_multipart" class="hp-multipart-badge" @click="toggleGroup(item.id)" @keydown.enter="toggleGroup(item.id)" tabindex="0" role="button">
+            <button v-if="item.is_multipart" type="button" class="hp-multipart-badge" @click="toggleGroup(item.id)" :aria-expanded="Boolean(expandedGroups[item.id])">
               <svg :class="['hp-expand-icon', { expanded: expandedGroups[item.id] }]" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/></svg>
               已学习 {{ item.total_parts ? `${item.parts_count}/${item.total_parts}` : item.parts_count }}P · {{ expandedGroups[item.id] ? '点击关闭' : '点击展开' }}
-            </div>
+            </button>
             <!-- 多P分P列表 -->
             <div v-if="item.is_multipart && expandedGroups[item.id]" class="hp-parts-list">
-              <div v-for="part in item.parts" :key="part.id" class="hp-part-item" @click="selectHistory(part)" @keydown.enter="selectHistory(part)" tabindex="0" role="button">
+              <button v-for="part in item.parts" :key="part.id" type="button" class="hp-part-item" @click="selectHistory(part)">
                 <span class="hp-part-index">P{{ part.part_index ?? '?' }}</span>
                 <span class="hp-part-title">{{ part.part_title || part.part_info || '未知分P' }}</span>
                 <span v-if="part.part_duration" class="hp-part-time">{{ formatDuration(part.part_duration) }}</span>
-              </div>
+              </button>
             </div>
             <p v-if="!item.is_multipart && item.summary_preview" class="hp-card-summary">{{ item.summary_preview }}</p>
             <div class="hp-card-footer">
@@ -548,10 +606,10 @@ fetchHistoryPage()
               </div>
               <div class="hp-card-meta">
                 <span class="hp-card-time">{{ item.created_at?.slice(0, 10) }}</span>
-                <button class="hp-action-btn" @click="toggleFavorite(item)" :title="item.is_favorite ? '取消收藏' : '收藏'">
+                <button class="hp-action-btn" @click="toggleFavorite(item)" :title="item.is_favorite ? '取消收藏' : '收藏'" :aria-label="item.is_favorite ? '取消收藏' : '收藏'">
                   <svg viewBox="0 0 20 20" :fill="item.is_favorite ? '#EC4899' : 'none'" :stroke="item.is_favorite ? '#EC4899' : 'currentColor'" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3.172 5.172a4 4 0 015.656 0L10 6.343l1.172-1.171a4 4 0 115.656 5.656L10 17.657l-6.828-6.829a4 4 0 010-5.656z"/></svg>
                 </button>
-                <button class="hp-action-btn hp-delete-btn" @click="deleteHistoryItem(item)" :disabled="deletingHistoryId === item.id" title="删除">
+                <button class="hp-action-btn hp-delete-btn" @click="deleteHistoryItem(item)" :disabled="deletingHistoryId === item.id" title="删除" aria-label="删除历史记录">
                   <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8.75 2.5A1.75 1.75 0 006 4.25H3.75a.75.75 0 000 1.5h.372l.94 10.838A2 2 0 007.045 18.5h5.91a2 2 0 001.984-1.912l.94-10.838h.371a.75.75 0 000-1.5H14A1.75 1.75 0 0011.25 2.5h-2.5zm3.098 3.5H8.152l.912 10.5h1.872l.912-10.5z" clip-rule="evenodd"/></svg>
                 </button>
               </div>
@@ -882,6 +940,11 @@ fetchHistoryPage()
   gap: 0.75rem;
 }
 .hp-card-title {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
   font-size: 1rem;
   font-weight: 600;
   color: var(--text-primary);
@@ -889,6 +952,7 @@ fetchHistoryPage()
   margin: 0;
   line-height: 1.4;
 }
+.hp-card-heading { margin: 0; }
 .hp-card-title:hover { color: var(--accent-blue); }
 .hp-platform-tag {
   flex-shrink: 0;
@@ -918,6 +982,7 @@ fetchHistoryPage()
   opacity: 0.7;
 }
 .hp-transcribing-badge {
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -930,6 +995,7 @@ fetchHistoryPage()
   color: #f59e0b;
   margin: 0.5rem 0;
   cursor: pointer;
+  text-align: left;
 }
 .hp-pulse-dot {
   width: 6px;
@@ -1090,6 +1156,11 @@ fetchHistoryPage()
   overflow: hidden;
 }
 .hp-part-item {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
   display: flex;
   align-items: center;
   gap: 0.75rem;
@@ -1131,6 +1202,13 @@ fetchHistoryPage()
   .stats-dashboard { grid-template-columns: repeat(2, 1fr); }
   .stat-value { font-size: 1.25rem; }
   .search-controls { flex-wrap: wrap; }
+  .sort-select,
+  .search-mode-btn,
+  .btn-batch-delete,
+  .btn-load-more,
+  .hp-transcribing-badge,
+  .hp-multipart-badge,
+  .hp-part-item { min-height: 44px; }
   .hp-card-header { flex-direction: column; gap: 0.375rem; }
   .hp-card-footer { flex-direction: column; align-items: flex-start; gap: 0.5rem; }
 

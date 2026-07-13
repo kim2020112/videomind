@@ -1,13 +1,12 @@
 <script setup>
-import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useDownloader } from './composables/useDownloader.js'
 import NavBar from './components/NavBar.vue'
 import HeroSection from './components/HeroSection.vue'
 import FeaturesSection from './components/FeaturesSection.vue'
 import FooterSection from './components/FooterSection.vue'
 import AiSummary from './components/AiSummary.vue'
-import HistoryPage from './components/HistoryPage.vue'
-import VideoPlayerModal from './components/VideoPlayerModal.vue'
 import ResultWorkspace from './components/ResultWorkspace.vue'
 import DesktopWorkspace from './components/DesktopWorkspace.vue'
 import VideoSidebar from './components/VideoSidebar.vue'
@@ -15,6 +14,7 @@ import AiWorkspace from './components/AiWorkspace.vue'
 import VideoContextPanel from './components/VideoContextPanel.vue'
 import DownloadTools from './components/DownloadTools.vue'
 import DownloadHistoryPanel from './components/DownloadHistoryPanel.vue'
+import TaskProgressDock from './components/TaskProgressDock.vue'
 import { useSummary } from './composables/useSummary.js'
 import { useChat } from './composables/useChat.js'
 import { useQa } from './composables/useQa.js'
@@ -22,15 +22,28 @@ import { useAuth } from './composables/useAuth.js'
 import { useTaskPoller } from './composables/useTaskPoller.js'
 import { useCapabilities } from './composables/useCapabilities.js'
 import { formatBytes } from './utils/resultFormatters.js'
+import { canMarkPartCached, markPartCached } from './utils/multipartState.js'
 
-const { init: initAuth, isLoggedIn } = useAuth()
+const HistoryPage = defineAsyncComponent(() => import('./components/HistoryPage.vue'))
+const VideoPlayerModal = defineAsyncComponent(() => import('./components/VideoPlayerModal.vue'))
+const LoginModal = defineAsyncComponent(() => import('./components/LoginModal.vue'))
+
+const route = useRoute()
+const router = useRouter()
+
+const { init: initAuth, isLoggedIn, guestSig } = useAuth()
 const { activeTasks, activeTaskCount, startPolling, stopPolling } = useTaskPoller()
-const { capabilities, fetchCapabilities } = useCapabilities()
+const {
+  capabilities,
+  loaded: capabilitiesLoaded,
+  error: capabilitiesError,
+  fetchCapabilities,
+} = useCapabilities()
 
-onMounted(() => {
-  initAuth()
-  startPolling()
-  fetchCapabilities()
+onMounted(async () => {
+  await Promise.all([initAuth(), fetchCapabilities()])
+  if (isLoggedIn.value || guestSig.value) startPolling()
+  await restoreRouteState()
 })
 onUnmounted(() => stopPolling())
 
@@ -58,6 +71,9 @@ const selectedPartIndices = ref([])
 const translateTargetLang = ref('zh-Hans')
 const activeTab = ref('summary')
 const currentSummarizePart = ref(1)
+const showLogin = ref(false)
+const pendingParse = ref(false)
+const resultAnchor = ref(null)
 
 // 多P视频：当前总结的分P URL（保留 ?p=N）
 const summarizeUrl = computed(() => {
@@ -72,7 +88,13 @@ const summarizeUrl = computed(() => {
 })
 const showSubtitles = ref(false)
 const showFullDescription = ref(false)
-const currentView = ref('home') // 'home' | 'history'
+const isHomeRoute = computed(() => route.name === 'home')
+const isHistoryRoute = computed(() => route.name === 'history')
+const isWorkspaceRoute = computed(() => route.name === 'workspace' || route.name === 'history-detail')
+const currentView = computed(() => isHistoryRoute.value ? 'history' : 'home')
+const canStart = computed(() => isLoggedIn.value || capabilities.value.guest_access_enabled)
+const requiresLogin = computed(() => capabilitiesLoaded.value && !canStart.value)
+const serviceChecking = computed(() => !capabilitiesLoaded.value)
 const desktopSidebarCollapsed = ref(false)
 
 // 视频播放 Modal
@@ -103,22 +125,72 @@ function onVideoSeek(time) {
   videoCurrentTime.value = time
 }
 
-function toggleHistory() {
-  if (currentView.value === 'history') {
-    currentView.value = 'home'
-  } else {
-    currentView.value = 'history'
-  }
-  window.scrollTo(0, 0)
+async function goHome() {
+  await router.push({ name: 'home' })
+}
+
+async function toggleHistory() {
+  await router.push({ name: isHistoryRoute.value ? 'home' : 'history' })
+}
+
+function requestLogin({ continueParse = false } = {}) {
+  pendingParse.value = continueParse
+  showLogin.value = true
+}
+
+async function handleAuthenticated() {
+  showLogin.value = false
+  startPolling()
+  if (!pendingParse.value) return
+  pendingParse.value = false
+  await nextTick()
+  await handleParse()
 }
 
 async function handleSelectHistory(item) {
   url.value = item.url
-  currentView.value = 'home'
-  await handleParse()
+  await router.push({
+    name: 'history-detail',
+    params: { urlHash: item.url_hash || item.id },
+    query: { url: item.url, tab: 'summary', part: '1' },
+  })
+  await handleParse({ syncRoute: false })
   if (videoInfo.value && !error.value) {
     handleSummarize(false)
   }
+}
+
+async function restoreRouteState() {
+  const queryUrl = typeof route.query.url === 'string' ? route.query.url : ''
+  if (queryUrl) url.value = queryUrl
+  if (route.query.tab === 'download' || route.query.tab === 'summary') {
+    activeTab.value = route.query.tab
+  }
+  const part = Number.parseInt(route.query.part, 10)
+  if (Number.isInteger(part) && part > 0) currentSummarizePart.value = part
+  if (isWorkspaceRoute.value && queryUrl && canStart.value) {
+    await handleParse({ syncRoute: false })
+  }
+}
+
+async function syncWorkspaceRoute({ replace = false } = {}) {
+  if (!url.value.trim()) return
+  const target = {
+    name: route.name === 'history-detail' ? 'history-detail' : 'workspace',
+    params: route.name === 'history-detail' ? route.params : undefined,
+    query: {
+      ...route.query,
+      url: url.value.trim(),
+      tab: activeTab.value,
+      part: String(currentSummarizePart.value),
+    },
+  }
+  await (replace ? router.replace(target) : router.push(target))
+}
+
+async function scrollToResult() {
+  await nextTick()
+  resultAnchor.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 
@@ -190,10 +262,50 @@ watch(activeTasks, tasks => {
   }
 })
 
+watch([isLoggedIn, guestSig], ([loggedIn, signature]) => {
+  if (loggedIn || signature) startPolling()
+  else stopPolling()
+})
+
+watch(activeTab, (tab) => {
+  if (!isWorkspaceRoute.value || route.query.tab === tab) return
+  syncWorkspaceRoute({ replace: true })
+})
+
+watch(currentSummarizePart, (part) => {
+  if (!isWorkspaceRoute.value || route.query.part === String(part)) return
+  syncWorkspaceRoute({ replace: true })
+})
+
+watch(() => route.query.tab, (tab) => {
+  if (tab === 'summary' || tab === 'download') activeTab.value = tab
+})
+
+watch(() => route.query.part, (partValue) => {
+  const part = Number.parseInt(partValue, 10)
+  if (Number.isInteger(part) && part > 0) currentSummarizePart.value = part
+})
+
+watch(() => route.query.url, async (routeUrl) => {
+  if (!isWorkspaceRoute.value || typeof routeUrl !== 'string' || !routeUrl) return
+  if (routeUrl === url.value) return
+  await restoreRouteState()
+})
+
 async function handleSummarize(force = false) {
   if (!videoInfo.value) return
   try {
     await summarizeVideoStream(summarizeUrl.value, null, force, 'full')
+    if (canMarkPartCached({
+      summaryResult: summaryResult.value,
+      backgroundTask: backgroundTask.value,
+      summaryError: summarizeError.value,
+    }) && videoInfo.value?.parts?.length) {
+      videoInfo.value = {
+        ...videoInfo.value,
+        parts: markPartCached(videoInfo.value.parts, currentSummarizePart.value),
+      }
+    }
   } catch (e) { /* handled by useSummary */ }
 }
 
@@ -359,12 +471,18 @@ function handleLogout() {
   showSubtitles.value = false
   showFullDescription.value = false
   selectedPartIndices.value = []
-  currentView.value = 'home'
-  window.scrollTo(0, 0)
+  pendingParse.value = false
+  stopPolling()
+  router.push({ name: 'home' })
 }
 
-async function handleParse() {
+async function handleParse({ syncRoute = true } = {}) {
   if (!url.value.trim()) return
+  if (!canStart.value) {
+    requestLogin({ continueParse: true })
+    return
+  }
+  if (syncRoute) await syncWorkspaceRoute()
   error.value = ''
   loading.value = true
   selectedPartIndices.value = []
@@ -383,10 +501,12 @@ async function handleParse() {
     if (pMatch) {
       currentSummarizePart.value = parseInt(pMatch[1])
     }
+    await syncWorkspaceRoute({ replace: true })
   } catch (e) {
     error.value = e.message || '解析失败，请检查链接是否有效'
   } finally {
     loading.value = false
+    await scrollToResult()
   }
 }
 
@@ -456,22 +576,36 @@ function handleUrlChange(value) {
 
 <template>
   <div class="app-container">
-    <NavBar :currentView="currentView" :activeTaskCount="activeTaskCount" @toggle-history="toggleHistory" @logout="handleLogout" @go-home="currentView = 'home'; $nextTick(() => window.scrollTo(0, 0))" />
+    <NavBar
+      :currentView="currentView"
+      :activeTaskCount="activeTaskCount"
+      @toggle-history="toggleHistory"
+      @logout="handleLogout"
+      @go-home="goHome"
+      @request-login="requestLogin()"
+    />
 
     <!-- 学习历史页 -->
-    <HistoryPage v-if="currentView === 'history'" :activeTasks="activeTasks" @select-item="handleSelectHistory" />
+    <HistoryPage v-if="isHistoryRoute" :activeTasks="activeTasks" @select-item="handleSelectHistory" />
 
     <!-- 首页内容 -->
-    <template v-if="currentView === 'home'">
+    <template v-if="!isHistoryRoute">
 
     <HeroSection
       v-model:url="url"
       :loading="loading"
-      :onParse="handleParse"
+      :compact="isWorkspaceRoute"
+      :requiresLogin="requiresLogin"
+      :serviceChecking="serviceChecking"
+      :serviceError="capabilitiesError"
+      @parse="handleParse()"
+      @request-login="requestLogin({ continueParse: true })"
+      @retry-capabilities="fetchCapabilities"
     />
 
     <!-- Results Section -->
-    <ResultWorkspace v-if="videoInfo || error">
+    <div ref="resultAnchor">
+    <ResultWorkspace v-if="isWorkspaceRoute && (videoInfo || error)">
       <template #desktop>
         <div class="desktop-results-container">
           <div v-if="error" class="error-card">
@@ -594,6 +728,7 @@ function handleUrlChange(value) {
           v-if="videoInfo"
           :videoInfo="videoInfo"
           :currentPartInfo="currentSummarizePartInfo"
+          collapsible
           :showFullDescription="showFullDescription"
           @open-video="openVideoModal"
           @update:show-full-description="showFullDescription = $event"
@@ -692,11 +827,17 @@ function handleUrlChange(value) {
       </div>
       </template>
     </ResultWorkspace>
+    </div>
 
     </template>
 
-    <FeaturesSection />
-    <FooterSection />
+    <FeaturesSection v-if="isHomeRoute" />
+    <FooterSection v-if="isHomeRoute" />
+    <LoginModal
+      :visible="showLogin"
+      @close="showLogin = false"
+      @authenticated="handleAuthenticated"
+    />
     <VideoPlayerModal
       ref="videoPlayerRef"
       :visible="showVideoModal"
@@ -706,6 +847,7 @@ function handleUrlChange(value) {
       @close="showVideoModal = false"
       @seek="onVideoSeek"
     />
+    <TaskProgressDock :tasks="activeTasks" @open-history="router.push({ name: 'history' })" />
   </div>
 </template>
 
@@ -737,12 +879,6 @@ function handleUrlChange(value) {
 
 .desktop-ai-card {
   padding: 1.75rem;
-}
-
-.desktop-ai-card :deep(.summary-scroll) {
-  max-height: none;
-  overflow: visible;
-  padding-right: 0;
 }
 
 .error-card {

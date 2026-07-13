@@ -16,7 +16,7 @@
   --border-hover: rgba(255, 255, 255, 0.15);
   --text-primary: #F1F5F9;
   --text-secondary: #94A3B8;
-  --text-muted: #64748B;
+  --text-muted: #8797AD;
   --accent-blue: #3B82F6;
   --accent-cyan: #06B6D4;
   --accent-pink: #EC4899;
@@ -26,7 +26,7 @@
 }
 
 body {
-  font-family: 'Noto Sans SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
   background: var(--bg-primary);
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
@@ -40,10 +40,18 @@ body {
 
 html {
   scroll-behavior: smooth;
+  color-scheme: dark;
 }
 
-button {
+button,
+[role="button"] {
   font-family: inherit;
+  touch-action: manipulation;
+}
+
+:focus-visible {
+  outline: 3px solid rgba(96, 165, 250, 0.9);
+  outline-offset: 3px;
 }
 
 a {
@@ -100,6 +108,15 @@ select option {
 
 .fade-in {
   animation: fadeIn 0.3s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 @keyframes shimmer {

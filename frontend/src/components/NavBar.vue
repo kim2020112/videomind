@@ -1,17 +1,16 @@
 <script setup>
-import { ref } from 'vue'
+import { defineAsyncComponent, ref } from 'vue'
 import { useAuth } from '../composables/useAuth.js'
-import LoginModal from './LoginModal.vue'
-import AdminSettings from './AdminSettings.vue'
+
+const AdminSettings = defineAsyncComponent(() => import('./AdminSettings.vue'))
 
 defineProps({
   currentView: { type: String, default: 'home' },
   activeTaskCount: { type: Number, default: 0 }
 })
-const emit = defineEmits(['toggle-history', 'go-home', 'logout'])
+const emit = defineEmits(['toggle-history', 'go-home', 'logout', 'request-login'])
 
 const { user, usage, isLoggedIn, isAdmin, displayName, logout } = useAuth()
-const showLogin = ref(false)
 const showSettings = ref(false)
 const showMobileMenu = ref(false)
 
@@ -36,14 +35,14 @@ function handleMobileAction(action) {
   <nav class="navbar">
     <div class="navbar-container">
       <!-- Logo -->
-      <div class="navbar-logo" @click="$emit('go-home')" @keydown.enter="$emit('go-home')" tabindex="0" role="button">
+      <button type="button" class="navbar-logo" aria-label="返回 VideoMind 首页" @click="$emit('go-home')">
         <div class="logo-icon">
           <svg viewBox="0 0 24 24" fill="currentColor">
             <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-8 12H9.5v-2H11v-2H9.5V9H11V7H9.5v2H8V7H6.5v2H5v2h1.5v2H5v2h1.5v2H8v-2h1.5v2H11v-2zm2.5 2H12v-2h1.5v2zm0-4H12v-2h1.5v2zm0-4H12V7h1.5v2zm4 8H16v-2h1.5v2zm0-4H16v-2h1.5v2zm0-4H16V7h1.5v2z"/>
           </svg>
         </div>
         <span class="logo-text">VideoMind</span>
-      </div>
+      </button>
 
 
       <!-- Actions -->
@@ -73,17 +72,24 @@ function handleMobileAction(action) {
         <template v-if="isLoggedIn">
           <div class="user-menu">
             <span class="user-name">{{ displayName }}</span>
-            <button class="btn-logout" @click="handleLogout" title="退出登录">
+            <button class="btn-logout" aria-label="退出登录" @click="handleLogout" title="退出登录">
               <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 102 0V4a1 1 0 00-1-1zm10.293 9.293a1 1 0 001.414 1.414l3-3a1 1 0 000-1.414l-3-3a1 1 0 10-1.414 1.414L14.586 9H7a1 1 0 100 2h7.586l-1.293 1.293z" clip-rule="evenodd"/></svg>
             </button>
           </div>
         </template>
         <template v-else>
-          <button class="btn-login" @click="showLogin = true">登录</button>
+          <button class="btn-login" @click="$emit('request-login')">登录</button>
         </template>
 
         <!-- 手机端汉堡菜单按钮 -->
-        <button v-if="isLoggedIn" class="btn-hamburger" @click="toggleMobileMenu" :class="{ open: showMobileMenu }">
+        <button
+          v-if="isLoggedIn"
+          class="btn-hamburger"
+          :class="{ open: showMobileMenu }"
+          :aria-label="showMobileMenu ? '关闭导航菜单' : '打开导航菜单'"
+          :aria-expanded="showMobileMenu"
+          @click="toggleMobileMenu"
+        >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path v-if="!showMobileMenu" stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16"/>
             <path v-else stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
@@ -118,7 +124,6 @@ function handleMobileAction(action) {
     </div>
   </nav>
 
-  <LoginModal :visible="showLogin" @close="showLogin = false" />
   <AdminSettings :visible="showSettings" @close="showSettings = false" />
 </template>
 
@@ -147,6 +152,9 @@ function handleMobileAction(action) {
   align-items: center;
   gap: 0.75rem;
   cursor: pointer;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
 .logo-icon {
