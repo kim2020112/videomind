@@ -23,8 +23,6 @@ from config import (
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-SESSION_COOKIE = "vm_session"
-
 # ── 简易内存 IP 限流（防 guest-sign 被刷新 device_id 绕过限额）──
 _GUEST_SIGN_WINDOW = 3600          # 窗口 1 小时
 _GUEST_SIGN_MAX = 20               # 每 IP 每小时最多签发次数
@@ -45,38 +43,16 @@ def _check_guest_sign_rate(ip: str) -> bool:
         return True
 
 
-# ── 依赖：从窗口凭据或 cookie 获取当前用户 ──
+# ── 依赖：从 Bearer 凭据获取当前用户 ──
 
 def get_request_session_id(request: Request) -> str | None:
-    """Resolve an explicit window session before the legacy shared cookie."""
+    """Resolve a session only from an explicit Bearer authorization header."""
     authorization = request.headers.get("Authorization")
     if authorization is not None:
         scheme, _, token = authorization.partition(" ")
         if scheme.lower() == "bearer" and token.strip():
             return token.strip()
-        return None
-
-    query_session = request.query_params.get("session_id")
-    if query_session is not None:
-        return query_session or None
-
-    session_mode = (
-        request.headers.get("X-Session-Mode")
-        or request.query_params.get("session_mode")
-    )
-    if session_mode == "guest":
-        return None
-
-    return request.cookies.get(SESSION_COOKIE)
-
-
-def _has_explicit_session(request: Request) -> bool:
-    return (
-        request.headers.get("Authorization") is not None
-        or request.query_params.get("session_id") is not None
-        or request.headers.get("X-Session-Mode") == "guest"
-        or request.query_params.get("session_mode") == "guest"
-    )
+    return None
 
 def get_current_user(request: Request) -> dict | None:
     session_id = get_request_session_id(request)
@@ -87,6 +63,7 @@ def get_current_user(request: Request) -> dict | None:
 
 def get_identity(request: Request) -> dict:
     """返回 {user_id, guest_id, guest_sig, role, daily_limit}。优先用户，降级游客。"""
+    has_authorization = request.headers.get("Authorization") is not None
     user = get_current_user(request)
     if user:
         limit = user.get("daily_limit", USER_DAILY_LIMIT)
@@ -99,9 +76,9 @@ def get_identity(request: Request) -> dict:
             "role": user["role"],
             "daily_limit": limit,
         }
-    # 游客
-    guest_id = request.headers.get("X-Guest-Id", "")
-    guest_sig = request.headers.get("X-Guest-Sig", "")
+    # 显式 Authorization 一旦出现就必须独立验证成功，不能降级到其他身份。
+    guest_id = "" if has_authorization else request.headers.get("X-Guest-Id", "")
+    guest_sig = "" if has_authorization else request.headers.get("X-Guest-Sig", "")
     return {
         "user_id": None,
         "guest_id": guest_id or None,
@@ -135,12 +112,7 @@ async def register(req: AuthRequest):
         raise HTTPException(409, "用户名已存在")
     user_id = create_user(req.username, req.password)
     session_id = create_session(user_id)
-    resp = JSONResponse({"status": "ok", "session_id": session_id})
-    resp.set_cookie(
-        SESSION_COOKIE, session_id,
-        httponly=True, samesite="lax", path="/", max_age=604800,
-    )
-    return resp
+    return JSONResponse({"status": "ok", "session_id": session_id})
 
 
 @router.post("/login")
@@ -151,32 +123,22 @@ async def login(req: AuthRequest):
     if not user["is_active"] or user["is_deleted"]:
         raise HTTPException(403, "账号已禁用")
     session_id = create_session(user["id"])
-    resp = JSONResponse({"status": "ok", "session_id": session_id})
-    resp.set_cookie(
-        SESSION_COOKIE, session_id,
-        httponly=True, samesite="lax", path="/", max_age=604800,
-    )
-    return resp
+    return JSONResponse({"status": "ok", "session_id": session_id})
 
 
 @router.post("/logout")
 async def logout(request: Request):
-    explicit_session = _has_explicit_session(request)
     session_id = get_request_session_id(request)
     if session_id:
         delete_session(session_id)
-    resp = Response(
+    return Response(
         content='{"status":"ok"}',
         media_type="application/json",
     )
-    if not explicit_session:
-        resp.delete_cookie(SESSION_COOKIE, path="/")
-    return resp
 
 
 @router.get("/me")
 async def me(request: Request):
-    session_id = get_request_session_id(request)
     identity = get_identity(request)
     from core.auth import check_usage_limit, get_today_usage
     allowed, used, limit = check_usage_limit(
@@ -186,7 +148,6 @@ async def me(request: Request):
         user = get_user_by_id(identity["user_id"])
         return {
             "logged_in": True,
-            "session_id": session_id,
             "user": {
                 "id": user["id"],
                 "username": user["username"],

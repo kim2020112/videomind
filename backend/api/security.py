@@ -27,14 +27,66 @@ def require_identity(request: Request) -> dict:
     if identity.get("user_id"):
         return identity
 
-    guest_id = identity.get("guest_id") or request.query_params.get("guest_id")
-    guest_sig = identity.get("guest_sig") or request.query_params.get("guest_sig")
+    guest_id = identity.get("guest_id")
+    guest_sig = identity.get("guest_sig")
     if not guest_signing_enabled():
         raise HTTPException(status_code=403, detail="游客模式未安全配置，请登录后使用")
     if guest_id and verify_guest_id(guest_id, guest_sig or ""):
         identity["guest_id"] = guest_id
         identity["guest_sig"] = guest_sig
         return identity
+    raise HTTPException(status_code=403, detail="需要登录或有效游客身份")
+
+
+def _identity_for_user(user: dict) -> dict:
+    limit = user.get("daily_limit")
+    if user.get("role") == "admin":
+        limit = 999999
+    return {
+        "user_id": user["id"],
+        "guest_id": None,
+        "guest_sig": None,
+        "role": user["role"],
+        "daily_limit": limit,
+    }
+
+
+def _get_scoped_session_id(request) -> tuple[bool, str | None]:
+    """Return whether an explicit session credential was supplied and its token."""
+    if request.headers.get("Authorization") is not None:
+        return True, get_request_session_id(request)
+    if "session_id" in request.query_params:
+        return True, request.query_params.get("session_id") or None
+    return False, None
+
+
+def _resolve_scoped_session_identity(request) -> dict | None:
+    has_explicit_session, session_id = _get_scoped_session_id(request)
+    if not has_explicit_session:
+        return None
+    if session_id:
+        user = get_user_by_session(session_id)
+        if user:
+            return _identity_for_user(user)
+    raise HTTPException(status_code=403, detail="Session 无效或已过期")
+
+
+def require_media_identity(request: Request) -> dict:
+    """Resolve identity for media elements that cannot send custom headers."""
+    session_identity = _resolve_scoped_session_identity(request)
+    if session_identity:
+        return session_identity
+
+    guest_id = request.headers.get("X-Guest-Id") or request.query_params.get("guest_id")
+    guest_sig = request.headers.get("X-Guest-Sig") or request.query_params.get("guest_sig")
+    if guest_signing_enabled() and guest_id and verify_guest_id(guest_id, guest_sig or ""):
+        return {
+            "user_id": None,
+            "guest_id": guest_id,
+            "guest_sig": guest_sig,
+            "role": "guest",
+            "daily_limit": None,
+        }
     raise HTTPException(status_code=403, detail="需要登录或有效游客身份")
 
 
@@ -49,20 +101,9 @@ def require_usage_allowed(request: Request, action: str = "summary") -> tuple[di
 
 
 def require_websocket_identity(websocket) -> dict:
-    session_id = get_request_session_id(websocket)
-    if session_id:
-        user = get_user_by_session(session_id)
-        if user:
-            limit = user.get("daily_limit")
-            if user.get("role") == "admin":
-                limit = 999999
-            return {
-                "user_id": user["id"],
-                "guest_id": None,
-                "guest_sig": None,
-                "role": user["role"],
-                "daily_limit": limit,
-            }
+    session_identity = _resolve_scoped_session_identity(websocket)
+    if session_identity:
+        return session_identity
 
     guest_id = websocket.query_params.get("guest_id") or websocket.headers.get("X-Guest-Id")
     guest_sig = websocket.query_params.get("guest_sig") or websocket.headers.get("X-Guest-Sig")

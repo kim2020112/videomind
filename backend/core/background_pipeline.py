@@ -1,22 +1,23 @@
 """Application pipeline executed after a Whisper subprocess returns text."""
 
 import asyncio
-import json
 
 from core import job_store
-from core.auth import add_user_history, log_usage
+from core.auth import add_user_history
 from core.cache import (
     _max_prompt_version,
     _url_hash,
-    save_cache,
-    save_video_info_cache,
-    save_whisper_cache,
     video_fingerprint,
+)
+from core.generation_commit import (
+    commit_full_generation,
+    commit_subtitle_generation,
+    validate_summary_result,
 )
 from core.pipeline.mindmap import run_mindmap
 from core.pipeline.notes import run_notes
 from core.pipeline.qanda import run_qanda
-from core.pipeline.subtitle import _build_part_info, save_subtitle
+from core.pipeline.subtitle import _build_part_info
 from core.pipeline.subtitle_postprocess import correct_subtitle_text
 from core.pipeline.summary import run_summary
 from core.pipeline.tags import run_tags
@@ -83,7 +84,6 @@ async def finalize_whisper_job(job: dict, worker_result: dict) -> dict:
     info.webpage_url = canonical_url
     fingerprint = video_fingerprint(info.extractor, info.id) if info.extractor and info.id else None
     fingerprint = fingerprint or job.get("payload", {}).get("fingerprint")
-    save_video_info_cache(canonical_url, info, fingerprint=fingerprint)
 
     job_store.update_job(job["task_id"], message="正在校正字幕", progress=95)
     corrected = await correct_subtitle_text(
@@ -93,8 +93,6 @@ async def finalize_whisper_job(job: dict, worker_result: dict) -> dict:
         trace_id=job["task_id"][:8],
     )
     language = job.get("lang") or worker_result.get("language") or "auto"
-    save_whisper_cache(canonical_url, corrected, language, raw_text, fingerprint=fingerprint)
-    save_subtitle(canonical_url, info, corrected, "whisper", language)
 
     pipeline = job.get("payload", {}).get("pipeline", "full")
     if pipeline == "full":
@@ -105,8 +103,22 @@ async def finalize_whisper_job(job: dict, worker_result: dict) -> dict:
             canonical_url,
             corrected,
             fingerprint,
+            raw_text,
+            language,
         )
     else:
+        platform = detect_platform(canonical_url, info.extractor or "")
+        commit_subtitle_generation(
+            url=canonical_url,
+            info=info,
+            fingerprint=fingerprint,
+            subtitle_text=corrected,
+            subtitle_source="whisper",
+            subtitle_language=language,
+            part_info=_build_part_info(canonical_url, info=info),
+            platform=platform,
+            whisper_raw_text=raw_text,
+        )
         result = {
             "subtitle_text": corrected,
             "language": language,
@@ -139,12 +151,21 @@ async def _load_video_info(job: dict):
     return await asyncio.to_thread(downloader.parse_info, job["url"])
 
 
-def _generate_and_persist(job, info, canonical_url, subtitle_text, fingerprint) -> dict:
+def _generate_and_persist(
+    job,
+    info,
+    canonical_url,
+    subtitle_text,
+    fingerprint,
+    raw_text,
+    language,
+) -> dict:
     trace_id = job["task_id"][:8]
     result_data = {}
     for event in run_summary(subtitle_text, info.title, trace_id):
         if event.type == "result":
             result_data = event.data
+    validate_summary_result(result_data)
 
     mindmap_markdown = run_mindmap(subtitle_text, info.title, trace_id)
     notes_text = ""
@@ -164,24 +185,22 @@ def _generate_and_persist(job, info, canonical_url, subtitle_text, fingerprint) 
         "qa_pairs": qa_pairs,
     }
     platform = detect_platform(canonical_url, info.extractor or "")
-    save_cache(
-        canonical_url,
-        info.title,
-        subtitle_text,
-        "whisper",
-        json.dumps(result, ensure_ascii=False),
+    commit_full_generation(
+        url=canonical_url,
+        info=info,
         fingerprint=fingerprint,
+        subtitle_text=subtitle_text,
+        subtitle_source="whisper",
+        subtitle_language=language,
         part_info=_build_part_info(canonical_url, info=info),
         platform=platform,
+        result=result,
         prompt_version=_max_prompt_version(),
-    )
-    run_tags(canonical_url, info.title, result_data.get("summary", ""), trace_id)
-    log_usage(
         user_id=job.get("user_id"),
         guest_id=job.get("guest_id"),
-        action="summary",
-        status="SUCCESS",
+        whisper_raw_text=raw_text,
     )
+    run_tags(canonical_url, info.title, result_data.get("summary", ""), trace_id)
     return result
 
 

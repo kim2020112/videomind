@@ -59,14 +59,8 @@ export function useAuth() {
   async function init() {
     if (initialized.value) return
     initialized.value = true
-    const startedWithWindowSession = Boolean(sessionId.value)
     await ensureGuestId()
     await fetchMe()
-    // 如果没拿到用户信息，延迟重试一次（处理 session cookie 时序问题）
-    if (!user.value && !startedWithWindowSession) {
-      await new Promise(r => setTimeout(r, 300))
-      await fetchMe()
-    }
   }
 
   // 确保游客 device_id 和签名存在
@@ -113,7 +107,6 @@ export function useAuth() {
     try {
       const headers = getAuthHeaders()
       const res = await fetch(`${API_BASE}/auth/me`, {
-        credentials: 'same-origin',
         headers,
       })
       if (!res.ok) {
@@ -123,9 +116,6 @@ export function useAuth() {
       }
       const data = await res.json()
       if (data.logged_in) {
-        if (data.session_id) {
-          _setWindowSession(data.session_id)
-        }
         user.value = data.user
         _setSessionValue('vm_user', JSON.stringify(data.user))
       } else {
@@ -154,7 +144,6 @@ export function useAuth() {
       const res = await fetch(`${API_BASE}/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
         body: JSON.stringify({ username, password }),
       })
       if (!res.ok) {
@@ -162,12 +151,10 @@ export function useAuth() {
         throw new Error(err.detail || '注册失败')
       }
       const data = await res.json().catch(() => ({}))
-      if (data.session_id) {
-        _setWindowSession(data.session_id)
-      } else {
-        sessionMode.value = ''
-        _setSessionValue('vm_session_mode', '')
+      if (typeof data.session_id !== 'string' || !data.session_id.trim()) {
+        throw new Error('注册响应缺少 Session')
       }
+      _setWindowSession(data.session_id.trim())
       await fetchMe()
       return true
     } finally {
@@ -182,7 +169,6 @@ export function useAuth() {
       const res = await fetch(`${API_BASE}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
         body: JSON.stringify({ username, password }),
       })
       if (!res.ok) {
@@ -190,12 +176,10 @@ export function useAuth() {
         throw new Error(err.detail || '登录失败')
       }
       const data = await res.json().catch(() => ({}))
-      if (data.session_id) {
-        _setWindowSession(data.session_id)
-      } else {
-        sessionMode.value = ''
-        _setSessionValue('vm_session_mode', '')
+      if (typeof data.session_id !== 'string' || !data.session_id.trim()) {
+        throw new Error('登录响应缺少 Session')
       }
+      _setWindowSession(data.session_id.trim())
       await fetchMe()
       return true
     } finally {
@@ -205,13 +189,15 @@ export function useAuth() {
 
   // 退出
   async function logout() {
-    await fetch(`${API_BASE}/auth/logout`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: getAuthHeaders(),
-    })
-    _clearWindowUser()
-    usage.value = { used: 0, limit: 0, allowed: true }
+    try {
+      await fetch(`${API_BASE}/auth/logout`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+      })
+    } finally {
+      _clearWindowUser()
+      usage.value = { used: 0, limit: 0, allowed: true }
+    }
   }
 
   const isLoggedIn = computed(() => !!user.value)
@@ -226,7 +212,6 @@ export function useAuth() {
     try {
       const headers = getAuthHeaders()
       const res = await fetch(`${API_BASE}/auth/usage`, {
-        credentials: 'same-origin',
         headers,
       })
       if (res.ok) {

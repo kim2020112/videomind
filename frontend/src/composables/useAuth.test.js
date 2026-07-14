@@ -36,6 +36,27 @@ describe('useAuth window sessions', () => {
     expect(global.fetch.mock.calls[1][1].headers).toMatchObject({
       Authorization: 'Bearer window-session-a',
     })
+    expect(global.fetch.mock.calls[0][1]).not.toHaveProperty('credentials')
+    expect(global.fetch.mock.calls[1][1]).not.toHaveProperty('credentials')
+  })
+
+  it('stores the register session then loads the user with bearer auth', async () => {
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ status: 'ok', session_id: 'registered-session' }))
+      .mockResolvedValueOnce(jsonResponse({
+        logged_in: true,
+        user: { id: 2, username: 'new-user', role: 'user' },
+        usage: { used: 0, limit: 20, allowed: true },
+      }))
+
+    const { useAuth } = await import('./useAuth.js')
+    await useAuth().register('new-user', 'secret')
+
+    expect(sessionStorage.getItem('vm_session_id')).toBe('registered-session')
+    expect(global.fetch.mock.calls[1][1].headers).toMatchObject({
+      Authorization: 'Bearer registered-session',
+    })
+    expect(global.fetch.mock.calls[0][1]).not.toHaveProperty('credentials')
   })
 
   it('restores a window session after a module reload', async () => {
@@ -50,7 +71,7 @@ describe('useAuth window sessions', () => {
     expect(auth.getAuthQueryParams().get('session_id')).toBe('restored-window-session')
   })
 
-  it('captures a legacy cookie session into the current window', async () => {
+  it('does not capture session credentials returned by me', async () => {
     localStorage.setItem('vm_guest_id', 'guest-device-id')
     localStorage.setItem('vm_guest_sig', 'guest-signature')
     global.fetch = vi.fn().mockResolvedValue(jsonResponse({
@@ -64,11 +85,10 @@ describe('useAuth window sessions', () => {
     const auth = useAuth()
     await auth.init()
 
-    expect(sessionStorage.getItem('vm_session_id')).toBe('legacy-cookie-session')
-    expect(auth.getAuthHeaders()).toMatchObject({
-      Authorization: 'Bearer legacy-cookie-session',
-    })
+    expect(sessionStorage.getItem('vm_session_id')).toBeNull()
+    expect(auth.getAuthHeaders()).not.toHaveProperty('Authorization')
     expect(global.fetch).toHaveBeenCalledTimes(1)
+    expect(global.fetch.mock.calls[0][1]).not.toHaveProperty('credentials')
   })
 
   it('logs out only the current window session', async () => {
@@ -82,6 +102,35 @@ describe('useAuth window sessions', () => {
     expect(global.fetch).toHaveBeenCalledWith('/api/auth/logout', expect.objectContaining({
       headers: expect.objectContaining({ Authorization: 'Bearer window-session-a' }),
     }))
+    expect(sessionStorage.getItem('vm_session_id')).toBeNull()
+  })
+
+  it('clears the current window session even when logout cannot reach the server', async () => {
+    sessionStorage.setItem('vm_session_id', 'window-session-a')
+    sessionStorage.setItem('vm_user', JSON.stringify({ id: 1, username: 'admin', role: 'admin' }))
+    global.fetch = vi.fn().mockRejectedValue(new Error('network unavailable'))
+
+    const { useAuth } = await import('./useAuth.js')
+    const auth = useAuth()
+
+    await expect(auth.logout()).rejects.toThrow('network unavailable')
+    expect(sessionStorage.getItem('vm_session_id')).toBeNull()
+    expect(sessionStorage.getItem('vm_user')).toBeNull()
+    expect(auth.getAuthHeaders()).not.toHaveProperty('Authorization')
+    expect(auth.usage.value).toEqual({ used: 0, limit: 0, allowed: true })
+  })
+
+  it.each([
+    ['login', '登录'],
+    ['register', '注册'],
+  ])('rejects a successful %s response without a session id', async (method, label) => {
+    global.fetch = vi.fn().mockResolvedValue(jsonResponse({ status: 'ok' }))
+
+    const { useAuth } = await import('./useAuth.js')
+    const auth = useAuth()
+
+    await expect(auth[method]('user', 'secret')).rejects.toThrow(`${label}响应缺少 Session`)
+    expect(global.fetch).toHaveBeenCalledTimes(1)
     expect(sessionStorage.getItem('vm_session_id')).toBeNull()
   })
 
@@ -113,11 +162,9 @@ describe('useAuth window sessions', () => {
     expect(auth.user.value).toBeNull()
   })
 
-  it('does not retry through a shared cookie after a window session expires', async () => {
-    vi.useFakeTimers()
+  it('does not retry a logged-out startup for cookie timing', async () => {
     localStorage.setItem('vm_guest_id', 'guest-device-id')
     localStorage.setItem('vm_guest_sig', 'guest-signature')
-    sessionStorage.setItem('vm_session_id', 'expired-window-session')
     global.fetch = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ logged_in: false, user: null }))
       .mockResolvedValueOnce(jsonResponse({
@@ -127,12 +174,9 @@ describe('useAuth window sessions', () => {
 
     const { useAuth } = await import('./useAuth.js')
     const auth = useAuth()
-    const initializing = auth.init()
-    await vi.runAllTimersAsync()
-    await initializing
+    await auth.init()
 
     expect(global.fetch).toHaveBeenCalledTimes(1)
     expect(auth.user.value).toBeNull()
-    vi.useRealTimers()
   })
 })

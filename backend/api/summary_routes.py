@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from core.summary_models import SummarizeRequest, SummaryResult, ChapterItem
 from core.summarizer import summarize_subtitle, summarize_from_description
-from core.cache import get_video_info_cache, save_video_info_cache, video_fingerprint
+from core.cache import get_video_info_cache, video_fingerprint
 from config import WHISPER_MAX_DURATION
 from core.pipeline.subtitle import (
     BilibiliSubtitleUnavailable,
@@ -21,6 +21,7 @@ from core.pipeline.subtitle import (
 from api.routes import extract_url, downloader
 from api.security import ensure_public_http_url, require_identity
 from core.features import is_ai_available
+from core.generation_commit import validate_summary_result
 from core.logging_config import get_logger
 from core.video import canonical_video_url, is_bilibili_video, video_duration_for_url
 
@@ -68,18 +69,19 @@ async def summarize_video(req: SummarizeRequest, request: Request):
                 result = await asyncio.get_event_loop().run_in_executor(
                     None, summarize_from_description, title, desc
                 )
-                log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
-                          action="summary", status="SUCCESS")
-                return SummaryResult(
+                validate_summary_result(result)
+                response = SummaryResult(
                     summary=f"⚠️ {_no_cc_msg}视频时长 {int(cached_duration)} 秒超过 {WHISPER_MAX_DURATION} 秒限制，以下总结基于视频简介生成，仅供参考。\n\n" + result.get("summary", ""),
                     chapters=[ChapterItem(**ch) for ch in result.get("chapters", [])],
                 )
+                log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                          action="summary", status="SUCCESS")
+                return response
 
         info = downloader.parse_info(url)
         fp = video_fingerprint(info.extractor, info.id) if info.extractor and info.id else None
         canonical_url = canonical_video_url(url, info)
         info.webpage_url = canonical_url
-        save_video_info_cache(canonical_url, info, fingerprint=fp)
 
         # 统一字幕获取管线（DB 缓存 → B站 CC → yt-dlp → Whisper）
         subtitle_text, sub_source, sub_lang = await fetch_subtitle(
@@ -90,24 +92,28 @@ async def summarize_video(req: SummarizeRequest, request: Request):
             result = await asyncio.get_event_loop().run_in_executor(
                 None, summarize_subtitle, subtitle_text, info.title
             )
-            log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
-                      action="summary", status="SUCCESS")
-            return SummaryResult(
+            validate_summary_result(result)
+            response = SummaryResult(
                 summary=result.get("summary", ""),
                 chapters=[ChapterItem(**ch) for ch in result.get("chapters", [])],
             )
+            log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                      action="summary", status="SUCCESS")
+            return response
 
         # 全部字幕获取方式失败，降级到视频简介总结
         if info.description and len(info.description.strip()) >= 20:
             result = await asyncio.get_event_loop().run_in_executor(
                 None, summarize_from_description, info.title, info.description
             )
-            log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
-                      action="summary", status="SUCCESS")
-            return SummaryResult(
+            validate_summary_result(result)
+            response = SummaryResult(
                 summary="⚠️ 该视频无可用字幕，以下总结基于视频简介生成，仅供参考。\n\n" + result.get("summary", ""),
                 chapters=[ChapterItem(**ch) for ch in result.get("chapters", [])],
             )
+            log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                      action="summary", status="SUCCESS")
+            return response
 
         raise HTTPException(status_code=400, detail="该视频没有字幕也没有简介，无法生成 AI 总结")
 

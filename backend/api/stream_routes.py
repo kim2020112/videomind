@@ -15,7 +15,6 @@ from core.pipeline import PipelineEvent
 from core.pipeline.subtitle import (
     BilibiliSubtitleUnavailable,
     fetch_subtitle,
-    save_subtitle,
     _build_part_info,
     extract_bvid,
 )
@@ -34,9 +33,15 @@ from core.summarizer import summarize_from_description
 from core.ai_client import stream_chat
 from config import WHISPER_MAX_DURATION
 from core.cache import (
-    get_cached, save_cache, delete_cache, delete_whisper_cache,
-    get_video_info_cache, save_video_info_cache, video_fingerprint,
+    get_cached,
+    get_video_info_cache, video_fingerprint,
     _get_cached_raw, get_whisper_cache,
+)
+from core.generation_commit import (
+    InvalidGenerationResult,
+    commit_cached_generation,
+    commit_full_generation,
+    validate_summary_result,
 )
 from core.whisper import estimate_transcribe_time
 from core.video import canonical_video_url, is_bilibili_video, video_duration_for_url
@@ -159,11 +164,7 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
         # ── 缓存检查 ──
         cached = get_cached(url)
         if req.force:
-            if cached:
-                if req.mode == "full":
-                    delete_cache(url)
-                    cached = None
-            elif req.mode != "full":
+            if not cached and req.mode != "full":
                 # prompt_version 不匹配导致 get_cached 返回 None，用 _get_cached_raw 兜底
                 from core.cache import _get_cached_raw
                 cached = _get_cached_raw(url)
@@ -269,7 +270,6 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
         fp = video_fingerprint(info.extractor, info.id) if info.extractor and info.id else None
         canonical_url = canonical_video_url(url, info)
         info.webpage_url = canonical_url
-        save_video_info_cache(canonical_url, info, fingerprint=fp)
 
         # ── 二次缓存检查（指纹命中） ──
         if not cached and fp:
@@ -340,9 +340,6 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
         if not subtitle_text:
             return _handle_no_subtitle(info, identity)
 
-        # 字幕持久化
-        save_subtitle(canonical_url, info, subtitle_text, sub_source, sub_lang)
-
         # ── AI 流水线 ──
         def _gen():
             source_label = {
@@ -369,6 +366,7 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
                 yield event
                 if event.type == "result":
                     result_data = event.data
+            validate_summary_result(result_data)
 
             # 2. 思维导图
             mindmap_md = run_mindmap(subtitle_for_rest, info.title, trace_id)
@@ -391,33 +389,30 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
 
             # ── 持久化 ──
             from core.cache import _max_prompt_version
-            save_cache_json = json.dumps({
+            generated_result = {
                 "result": result_data,
                 "mindmap_markdown": mindmap_md,
                 "notes": notes_text,
                 "qa_pairs": qa_pairs_result,
-            }, ensure_ascii=False)
+            }
             platform_name = detect_platform(canonical_url, info.extractor or "")
-            save_cache(
-                canonical_url, info.title, subtitle_text, sub_source,
-                save_cache_json, fingerprint=fp,
+            commit_full_generation(
+                url=canonical_url,
+                info=info,
+                fingerprint=fp,
+                subtitle_text=subtitle_text,
+                subtitle_source=sub_source,
+                subtitle_language=sub_lang,
                 part_info=_build_part_info(canonical_url, info=info),
                 platform=platform_name,
+                result=generated_result,
                 prompt_version=_max_prompt_version(),
-            )
-
-            add_user_history(
                 user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
-                url_hash=_url_hash(canonical_url), url=canonical_url,
-                title=info.title, platform=platform_name,
             )
 
             # 标签提取
             summary_for_tags = result_data.get("summary", "")
             run_tags(canonical_url, info.title, summary_for_tags, trace_id)
-
-            log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
-                      action="summary", status="SUCCESS")
 
             yield PipelineEvent("done", {})
 
@@ -525,9 +520,10 @@ def _try_long_video_fast_path(url: str, cached_info: dict, identity: dict):
         yield PipelineEvent("warn", {"message": f"{_no_cc_msg}视频时长 {int(duration)} 秒超过 {WHISPER_MAX_DURATION} 秒限制，跳过语音识别"})
         yield PipelineEvent("progress", {"stage": "summary_generating", "message": "正在基于视频简介生成总结..."})
         result = summarize_from_description(title, desc)
+        validate_summary_result(result)
+        result["summary"] = f"⚠️ {_no_cc_msg}{_long_video_msg}，以下总结基于视频简介生成，仅供参考。\n\n" + result.get("summary", "")
         log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
                   action="summary", status="SUCCESS")
-        result["summary"] = f"⚠️ {_no_cc_msg}{_long_video_msg}，以下总结基于视频简介生成，仅供参考。\n\n" + result.get("summary", "")
         yield PipelineEvent("result", result)
         yield PipelineEvent("done", {})
 
@@ -546,9 +542,10 @@ def _handle_no_subtitle(info, identity: dict):
         yield PipelineEvent("warn", {"message": f"{_no_cc_msg}该视频无字幕，将基于视频简介生成总结"})
         yield PipelineEvent("progress", {"stage": "summary_generating", "message": "正在基于视频简介生成总结..."})
         result = summarize_from_description(info.title, info.description)
+        validate_summary_result(result)
+        result["summary"] = "⚠️ 该视频无字幕，以下总结基于视频简介生成，仅供参考。\n\n" + result.get("summary", "")
         log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
                   action="summary", status="SUCCESS")
-        result["summary"] = "⚠️ 该视频无字幕，以下总结基于视频简介生成，仅供参考。\n\n" + result.get("summary", "")
         yield PipelineEvent("result", result)
         yield PipelineEvent("done", {})
 
@@ -578,7 +575,6 @@ async def _handle_partial(req, cached: dict, identity: dict, url: str, trace_id:
             cache_url = canonical_video_url(url, info)
             info.webpage_url = cache_url
             fp = video_fingerprint(info.extractor, info.id) if info.extractor and info.id else None
-            save_video_info_cache(cache_url, info, fingerprint=fp)
             video_title = info.title or video_title
         except Exception:
             pass  # parse_info 失败，继续使用已有缓存信息
@@ -588,6 +584,7 @@ async def _handle_partial(req, cached: dict, identity: dict, url: str, trace_id:
     def _gen():
         from core.cache import _max_prompt_version
 
+        usage_action = None
         if req.mode == "summary":
             yield PipelineEvent("progress", {"stage": "summary_generating", "message": "正在重新生成 AI 摘要..."})
             result_data = {}
@@ -595,15 +592,19 @@ async def _handle_partial(req, cached: dict, identity: dict, url: str, trace_id:
                 yield event
                 if event.type == "result":
                     result_data = event.data
-            log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
-                      action="summary", status="SUCCESS")
-            merged = json.dumps({**old_result, "result": result_data}, ensure_ascii=False)
+            validate_summary_result(result_data)
+            merged = {**old_result, "result": result_data}
+            required_value = result_data.get("summary")
+            artifact_name = "summary"
+            usage_action = "summary"
 
         elif req.mode == "mindmap":
             yield PipelineEvent("progress", {"stage": "mindmap_generating", "message": "正在重新生成思维导图..."})
             mindmap_md = run_mindmap(subtitle_text, video_title, trace_id)
             yield PipelineEvent("mindmap", {"markdown": mindmap_md})
-            merged = json.dumps({**old_result, "mindmap_markdown": mindmap_md}, ensure_ascii=False)
+            merged = {**old_result, "mindmap_markdown": mindmap_md}
+            required_value = mindmap_md
+            artifact_name = "mindmap"
 
         elif req.mode == "notes":
             yield PipelineEvent("progress", {"stage": "notes_generating", "message": "正在重新生成学习笔记..."})
@@ -612,18 +613,30 @@ async def _handle_partial(req, cached: dict, identity: dict, url: str, trace_id:
                 yield event
                 if event.type == "notes_text":
                     notes_full += event.data.get("text", "")
-            merged = json.dumps({**old_result, "notes": notes_full}, ensure_ascii=False)
+            merged = {**old_result, "notes": notes_full}
+            required_value = notes_full
+            artifact_name = "notes"
         else:
             yield PipelineEvent("error", {"message": f"未知模式: {req.mode}"})
             yield PipelineEvent("done", {})
             return
 
         _pi = _build_part_info(cache_url)
-        save_cache(cache_url, video_title, subtitle_text, "cache", merged, fingerprint=fp, part_info=_pi,
-                   prompt_version=_max_prompt_version())
-        add_user_history(
-            user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
-            url_hash=_url_hash(cache_url), url=cache_url, title=video_title, platform="",
+        commit_cached_generation(
+            url=cache_url,
+            video_title=video_title,
+            subtitle_text=subtitle_text,
+            source=cached.get("source", "cache"),
+            result=merged,
+            required_value=required_value,
+            artifact_name=artifact_name,
+            fingerprint=fp,
+            part_info=cached.get("part_info") or _pi,
+            platform=cached.get("platform", ""),
+            prompt_version=_max_prompt_version(),
+            user_id=identity.get("user_id"),
+            guest_id=identity.get("guest_id"),
+            usage_action=usage_action,
         )
         yield PipelineEvent("done", {})
 
@@ -648,13 +661,11 @@ async def _partial_subtitle(req, cached: dict, identity: dict, url: str, trace_i
             fp = video_fingerprint(info.extractor, info.id) if info.extractor and info.id else None
             cache_url = canonical_video_url(url, info)
             info.webpage_url = cache_url
-            save_video_info_cache(cache_url, info, fingerprint=fp)
             video_title = info.title or ""
             job_info = info
         except Exception:
             pass  # parse_info 失败，继续使用已有缓存信息
 
-    delete_whisper_cache(cache_url, fingerprint=fp)
     duration = video_duration_for_url(cache_url, cached_info or job_info)
     job = enqueue_whisper_job(
         url_hash=_url_hash(cache_url),
@@ -713,7 +724,13 @@ async def chat_stream(req: ChatRequest, request: Request):
 
 # ──── AI 关键问答对生成 ────
 
-def _merge_and_save_qanda(url: str, subtitle_text: str, video_title: str, qa_pairs: list):
+def _merge_and_save_qanda(
+    url: str,
+    subtitle_text: str,
+    video_title: str,
+    qa_pairs: list,
+    identity: dict,
+):
     """将问答对合并写入已有缓存（保留 summary/mindmap/notes）。"""
     existing_raw = _get_cached_raw(url)
     result_json = {}
@@ -734,16 +751,21 @@ def _merge_and_save_qanda(url: str, subtitle_text: str, video_title: str, qa_pai
     result_json["qa_pairs"] = qa_pairs
 
     from core.cache import _max_prompt_version
-    save_cache(
-        url,
-        video_title or (existing_raw.get("video_title", "") if existing_raw else ""),
-        subtitle_text or (existing_raw.get("subtitle_text", "") if existing_raw else ""),
-        source,
-        json.dumps(result_json, ensure_ascii=False),
+    commit_cached_generation(
+        url=url,
+        video_title=video_title or (existing_raw.get("video_title", "") if existing_raw else ""),
+        subtitle_text=subtitle_text or (existing_raw.get("subtitle_text", "") if existing_raw else ""),
+        source=source,
+        result=result_json,
+        required_value=qa_pairs,
+        artifact_name="qanda",
         fingerprint=fingerprint,
         part_info=existing_raw.get("part_info", "") if existing_raw else "",
         platform=platform,
         prompt_version=_max_prompt_version(),
+        user_id=identity.get("user_id"),
+        guest_id=identity.get("guest_id"),
+        usage_action="qanda",
     )
 
 
@@ -789,11 +811,23 @@ async def qa_stream(req: QaGenerationRequest, request: Request):
                 if event.type == "qa_pairs":
                     qa_pairs_result = event.data
 
-            if req.url and qa_pairs_result:
-                _merge_and_save_qanda(req.url, req.subtitle_text, req.video_title, qa_pairs_result)
-
-            log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
-                      action="qanda", status="SUCCESS")
+            if not qa_pairs_result:
+                raise InvalidGenerationResult("qanda result is empty")
+            if req.url:
+                _merge_and_save_qanda(
+                    req.url,
+                    req.subtitle_text,
+                    req.video_title,
+                    qa_pairs_result,
+                    identity,
+                )
+            else:
+                try:
+                    json.dumps(qa_pairs_result, ensure_ascii=False, allow_nan=False)
+                except (TypeError, ValueError) as exc:
+                    raise InvalidGenerationResult("qanda result is not JSON serializable") from exc
+                log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
+                          action="qanda", status="SUCCESS")
             yield PipelineEvent("done", {})
 
         return StreamingResponse(_sse_generator(_gen()), media_type="text/event-stream", headers=_sse_headers())

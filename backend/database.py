@@ -5,7 +5,14 @@ from core.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+AUTH_SESSION_MIGRATION_VERSION = "20260713_invalidate_legacy_auth_sessions"
+
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version TEXT PRIMARY KEY,
+    applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS videos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     url TEXT NOT NULL UNIQUE,
@@ -151,6 +158,25 @@ CREATE INDEX IF NOT EXISTS idx_background_jobs_url_hash
 """
 
 
+def _invalidate_legacy_auth_sessions(conn: sqlite3.Connection) -> None:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (AUTH_SESSION_MIGRATION_VERSION,),
+        ).fetchone()
+        if not applied:
+            conn.execute("DELETE FROM sessions")
+            conn.execute(
+                "INSERT INTO schema_migrations (version) VALUES (?)",
+                (AUTH_SESSION_MIGRATION_VERSION,),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 @contextmanager
 def get_db():
     conn = sqlite3.connect(str(DB_PATH))
@@ -184,6 +210,7 @@ def init_db():
             conn.execute("ALTER TABLE user_history ADD COLUMN status TEXT DEFAULT 'done'")
         except sqlite3.OperationalError:
             pass
+        _invalidate_legacy_auth_sessions(conn)
     logger.info(f"初始化完成: {DB_PATH}")
 
 

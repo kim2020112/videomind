@@ -221,19 +221,15 @@ def _cleanup_old_cache(conn):
         "SELECT url_hash FROM ai_cache WHERE fingerprint = '' OR fingerprint IS NULL ORDER BY updated_at DESC LIMIT 50"
         ")"
     )
-    # 级联清理 knowledge.db 中不再被缓存引用的关联数据
+    # 统一数据库内复用当前事务，避免持有写锁时再打开写连接。
     if old_urls:
-        try:
-            with _get_db() as kconn:
-                for (url,) in old_urls:
-                    video = kconn.execute("SELECT id FROM videos WHERE url = ?", (url,)).fetchone()
-                    if video:
-                        kconn.execute("DELETE FROM video_tags WHERE video_id = ?", (video["id"],))
-                        kconn.execute("DELETE FROM subtitles WHERE video_id = ?", (video["id"],))
-                        kconn.execute("DELETE FROM videos WHERE id = ?", (video["id"],))
-                kconn.execute("DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM video_tags)")
-        except Exception:
-            pass
+        for (url,) in old_urls:
+            video = conn.execute("SELECT id FROM videos WHERE url = ?", (url,)).fetchone()
+            if video:
+                conn.execute("DELETE FROM video_tags WHERE video_id = ?", (video["id"],))
+                conn.execute("DELETE FROM subtitles WHERE video_id = ?", (video["id"],))
+                conn.execute("DELETE FROM videos WHERE id = ?", (video["id"],))
+        conn.execute("DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM video_tags)")
 
 
 def save_cache(url: str, video_title: str = "", subtitle_text: str = "", source: str = "", result_json: str = "", fingerprint: str = None, part_info: str = "", platform: str = "", prompt_version: int = 0):

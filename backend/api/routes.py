@@ -10,7 +10,19 @@ import time
 from asyncio import Queue
 from urllib.parse import urlsplit
 
-from api.security import ensure_public_http_url, owns_resource, require_identity, require_websocket_identity
+from api.security import (
+    ensure_public_http_url,
+    owns_resource,
+    require_identity,
+    require_media_identity,
+    require_websocket_identity,
+)
+from api.media_security import (
+    MEDIA_RESPONSE_SECURITY_HEADERS,
+    fetch_thumbnail,
+    open_video,
+    referer_for_url,
+)
 from core.pipeline.subtitle import _download_subtitle_content
 from core.logging_config import get_logger
 from core.video import canonical_video_url
@@ -101,35 +113,9 @@ from core.models import ParseRequest, DownloadRequest, VideoInfo, DownloadTask, 
 
 router = APIRouter()
 
-# CDN 域名 → 所属平台 Referer 映射（视频流代理 + 缩略图代理共用）
-_CDN_REFERER = {
-    'xhscdn.com':       'https://www.xiaohongshu.com/',
-    'hdslb.com':        'https://www.bilibili.com/',
-    'bilivideo.com':    'https://www.bilibili.com/',
-    'bilibili.com':     'https://www.bilibili.com/',
-    'douyinvod.com':    'https://www.douyin.com/',
-    '365yg.com':        'https://www.douyin.com/',
-    'amemv.com':        'https://www.douyin.com/',
-    'pstatp.com':       'https://www.douyin.com/',
-    'ixigua.com':       'https://www.ixigua.com/',
-    'ytimg.com':        'https://www.youtube.com/',
-    'googlevideo.com':  'https://www.youtube.com/',
-    'youtube.com':      'https://www.youtube.com/',
-}
-
-
 def _get_cdn_referer(url: str) -> str | None:
     """根据 URL 域名匹配 CDN Referer。"""
-    from urllib.parse import urlparse
-    netloc = urlparse(url).netloc
-    return next(
-        (v for k, v in _CDN_REFERER.items() if netloc.endswith(k)),
-        None,
-    )
-
-
-def _validate_public_url(url: str) -> None:
-    ensure_public_http_url(url)
+    return referer_for_url(url)
 
 
 # 全局下载器实例
@@ -221,8 +207,7 @@ async def refresh_stream_url(url: str, request: Request):
 @router.get("/api/video/stream")
 async def proxy_video_stream(url: str, request: Request, video_url: str = ""):
     """代理视频流请求，解决 Bilibili 等平台 CDN 的 Referer 限制。"""
-    require_identity(request)
-    _validate_public_url(url)
+    require_media_identity(request)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
@@ -240,44 +225,43 @@ async def proxy_video_stream(url: str, request: Request, video_url: str = ""):
         headers["Range"] = range_header
 
     try:
-        req = urllib.request.Request(url, headers=headers)
-        resp = urllib.request.urlopen(req, timeout=30)
+        opened = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: open_video(url, headers=headers),
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"视频源请求失败: {str(e)}")
 
     def stream():
         try:
             while True:
-                chunk = resp.read(65536)
+                chunk = opened.response.read(65536)
                 if not chunk:
                     break
                 yield chunk
         finally:
-            resp.close()
+            opened.close()
 
     resp_headers = {
-        "Content-Type": resp.headers.get("Content-Type", "video/mp4"),
+        "Content-Type": opened.content_type,
         "Accept-Ranges": "bytes",
-        "Access-Control-Allow-Origin": "*",
+        **MEDIA_RESPONSE_SECURITY_HEADERS,
     }
-    cl = resp.headers.get("Content-Length")
+    cl = opened.response.getheader("Content-Length")
     if cl:
         resp_headers["Content-Length"] = cl
-    cr = resp.headers.get("Content-Range")
+    cr = opened.response.getheader("Content-Range")
     if cr:
         resp_headers["Content-Range"] = cr
 
-    status_code = resp.status if resp.status in (200, 206) else 200
-    return StreamingResponse(stream(), status_code=status_code, headers=resp_headers)
+    return StreamingResponse(stream(), status_code=opened.status, headers=resp_headers)
 
 
 @router.get("/api/thumbnail")
 async def proxy_thumbnail(url: str):
     """代理缩略图请求，解决混合内容和防盗链问题。"""
-    if url.startswith("http://"):
-        url = "https://" + url[7:]
-
-    _validate_public_url(url)
     referer = _get_cdn_referer(url)
 
     def _fetch():
@@ -287,13 +271,17 @@ async def proxy_thumbnail(url: str):
         }
         if referer:
             headers["Referer"] = referer
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return resp.read(), resp.headers.get("Content-Type", "image/jpeg")
+        return fetch_thumbnail(url, headers=headers)
 
     try:
-        content, content_type = await asyncio.get_event_loop().run_in_executor(None, _fetch)
-        return Response(content=content, media_type=content_type)
+        payload = await asyncio.get_event_loop().run_in_executor(None, _fetch)
+        return Response(
+            content=payload.content,
+            media_type=payload.content_type,
+            headers=MEDIA_RESPONSE_SECURITY_HEADERS,
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"缩略图获取失败: {e}")
 

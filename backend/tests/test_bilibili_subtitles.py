@@ -372,7 +372,7 @@ class BilibiliSubtitlePipelineTests(unittest.IsolatedAsyncioTestCase):
             patch.object(stream_routes, "is_whisper_available", return_value=True),
             patch.object(subtitle_pipeline, "try_get_bilibili_cc_subtitle", return_value=None),
             patch.object(stream_routes.downloader, "parse_info", return_value=info),
-            patch.object(stream_routes, "save_video_info_cache"),
+            patch.object(stream_routes, "save_video_info_cache", create=True),
             patch.object(stream_routes, "_quick_subtitle_check", return_value=None),
             patch.object(stream_routes, "fetch_subtitle", side_effect=RuntimeError("B站字幕接口暂时不可用")),
             patch.object(stream_routes, "enqueue_whisper_job") as enqueue,

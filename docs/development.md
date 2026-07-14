@@ -26,7 +26,7 @@ cp backend/.env.example backend/.env
 | `GUEST_SECRET` | 访客签名；保持默认值时访客入口关闭 |
 | `DB_PATH`、`AI_CONFIG_PATH` | 持久化数据位置 |
 | `TEMP_DIR`、`DOWNLOAD_DIR`、`WHISPER_MODELS_DIR` | 运行目录 |
-| `CORS_ORIGINS` | 逗号分隔的跨域来源 |
+| `CORS_ORIGINS` | 逗号分隔的精确跨域来源；留空仅同源，`*` 不生效 |
 
 不要提交 `backend/.env`、数据库、AI 配置、模型或真实 Cookie。
 
