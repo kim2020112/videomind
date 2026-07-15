@@ -185,7 +185,7 @@ def get_effective_model() -> str:
 # ── 查询 ──
 
 def get_all_providers() -> list[dict]:
-    """返回所有服务商（api_key 脱敏），含 models 列表。"""
+    """返回所有服务商（api_key 脱敏），含 models 列表。无自定义配置时展示 .env 兜底。"""
     result = []
     for p in _store.get("providers", []):
         result.append({
@@ -199,12 +199,29 @@ def get_all_providers() -> list[dict]:
                 for m in p.get("models", [])
             ],
         })
+    # 无自定义配置时，展示 .env 中的默认配置（只读）
+    if not result and app_config.AI_API_KEY:
+        env_model = app_config.AI_MODEL
+        result.append({
+            "id": "__env_default__",
+            "name": f"{app_config.AI_PROVIDER}（默认）",
+            "provider": app_config.AI_PROVIDER,
+            "api_key": mask_api_key(app_config.AI_API_KEY),
+            "base_url": app_config.AI_BASE_URL,
+            "models": [{"id": "__env_model__", "name": env_model, "model": env_model}],
+            "readonly": True,
+        })
     return result
 
 
 def get_active() -> dict:
     active = _store.get("active", {})
-    return {"provider_id": active.get("provider_id", ""), "model_id": active.get("model_id", "")}
+    pid = active.get("provider_id", "")
+    mid = active.get("model_id", "")
+    # 无自定义配置时，指向 .env 默认
+    if not pid and app_config.AI_API_KEY:
+        return {"provider_id": "__env_default__", "model_id": "__env_model__"}
+    return {"provider_id": pid, "model_id": mid}
 
 
 # ── 服务商 CRUD ──
@@ -344,15 +361,18 @@ def mask_api_key(key: str) -> str:
 
 
 def test_connection(api_key: str = None, base_url: str = None, model: str = None) -> dict:
-    """测试连通性。不传参数则用当前激活模型。"""
-    api_key = api_key or get_effective_api_key()
-    base_url = base_url or get_effective_base_url()
-    model = model or get_effective_model()
+    """测试连通性。不传参数（None）则用当前激活模型；空字符串不回退。"""
+    api_key = api_key if api_key is not None else get_effective_api_key()
+    base_url = base_url if base_url is not None else get_effective_base_url()
+    model = model if model is not None else get_effective_model()
     return _do_test(api_key, base_url, model)
 
 
 def test_provider(provider_id: str) -> dict:
     """用指定服务商的 API Key 测试连通性（用第一个模型）。"""
+    # .env 默认配置
+    if provider_id == "__env_default__":
+        return _do_test(app_config.AI_API_KEY, app_config.AI_BASE_URL, app_config.AI_MODEL)
     p = _find_provider(provider_id)
     if not p:
         raise ValueError(f"服务商 {provider_id} 不存在")
@@ -363,6 +383,10 @@ def test_provider(provider_id: str) -> dict:
 def _do_test(api_key: str, base_url: str, model: str) -> dict:
     if not api_key:
         return {"success": False, "message": "未配置 API Key", "model": model}
+    if not base_url:
+        return {"success": False, "message": "未配置 Base URL", "model": model}
+    if not model:
+        return {"success": False, "message": "未配置模型名称", "model": model}
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=api_key, base_url=base_url)
