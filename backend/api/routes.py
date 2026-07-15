@@ -118,6 +118,14 @@ def _get_cdn_referer(url: str) -> str | None:
     return referer_for_url(url)
 
 
+def _upgrade_thumbnail_url(url: str) -> str:
+    """Upgrade legacy HTTP thumbnail URLs before strict media validation."""
+    parsed = urlsplit(url)
+    if parsed.scheme.lower() == "http":
+        return parsed._replace(scheme="https").geturl()
+    return url
+
+
 # 全局下载器实例
 downloader = VideoDownloader(output_dir=os.path.join(os.path.dirname(os.path.dirname(__file__)), "downloads"))
 
@@ -262,7 +270,8 @@ async def proxy_video_stream(url: str, request: Request, video_url: str = ""):
 @router.get("/api/thumbnail")
 async def proxy_thumbnail(url: str):
     """代理缩略图请求，解决混合内容和防盗链问题。"""
-    referer = _get_cdn_referer(url)
+    thumbnail_url = _upgrade_thumbnail_url(url)
+    referer = _get_cdn_referer(thumbnail_url)
 
     def _fetch():
         headers = {
@@ -271,7 +280,7 @@ async def proxy_thumbnail(url: str):
         }
         if referer:
             headers["Referer"] = referer
-        return fetch_thumbnail(url, headers=headers)
+        return fetch_thumbnail(thumbnail_url, headers=headers)
 
     try:
         payload = await asyncio.get_event_loop().run_in_executor(None, _fetch)

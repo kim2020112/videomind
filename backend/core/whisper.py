@@ -38,7 +38,7 @@ def is_model_available() -> bool:
     return True
 
 
-def _download_audio(url: str) -> str:
+def _download_audio(url: str, *, audio_url: str | None = None) -> str:
     """用 yt-dlp 下载视频音频（仅音频，mp3）。返回音频文件路径。"""
     import yt_dlp
 
@@ -57,19 +57,34 @@ def _download_audio(url: str) -> str:
         "no_warnings": True,
         "noplaylist": True,
     }
+    if audio_url and "bilibili.com" in url.lower():
+        ydl_opts["http_headers"] = {
+            "Referer": "https://www.bilibili.com/",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"
+            ),
+        }
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            base = os.path.splitext(ydl.prepare_filename(info))[0]
-            mp3_path = base + ".mp3"
-            if os.path.exists(mp3_path):
-                return mp3_path
-            for f in os.listdir(tmpdir):
-                fp = os.path.join(tmpdir, f)
-                if os.path.isfile(fp) and not f.endswith(".part"):
-                    return fp
-            raise FileNotFoundError("音频下载后未找到输出文件")
+        targets = [audio_url, url] if audio_url else [url]
+        last_error = None
+        for target in targets:
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(target, download=True)
+                    base = os.path.splitext(ydl.prepare_filename(info))[0]
+                    mp3_path = base + ".mp3"
+                    if os.path.exists(mp3_path):
+                        return mp3_path
+                    for f in os.listdir(tmpdir):
+                        fp = os.path.join(tmpdir, f)
+                        if os.path.isfile(fp) and not f.endswith(".part"):
+                            return fp
+                    raise FileNotFoundError("音频下载后未找到输出文件")
+            except Exception as exc:
+                last_error = exc
+        raise last_error or RuntimeError("音频下载失败")
     except Exception:
         shutil.rmtree(tmpdir, ignore_errors=True)
         raise

@@ -43,7 +43,7 @@
 
 ## 媒体代理安全
 
-缩略图和视频代理共用统一媒体安全层：只接受 HTTPS，并按完整域名标签匹配已知平台 CDN。每次重定向都会重新解析并校验公网 IP，最多跟随 3 跳；连接固定到已校验 IP，同时保留原域名用于 TLS SNI 和证书验证。
+缩略图和视频代理共用统一媒体安全层：底层只接受 HTTPS，并按完整域名标签匹配已知平台 CDN。缩略图入口会先用结构化 URL 解析把平台返回的旧 HTTP 地址升级为 HTTPS，再进入同一安全层；视频代理仍直接拒绝 HTTP。每次重定向都会重新解析并校验公网 IP，最多跟随 3 跳；连接固定到已校验 IP，同时保留原域名用于 TLS SNI 和证书验证。
 
 缩略图只接受 JPEG、PNG、WebP、GIF 和 AVIF，响应上限 10 MiB；HTML、SVG、未知 MIME 和超限内容会被拒绝。视频只接受 `video/*`、`audio/*` 和 `application/octet-stream`。代理响应带 `X-Content-Type-Options: nosniff` 和隔离 CSP，服务不启用通配 CORS。未知平台仍可解析和下载，但不提供代理缩略图或在线播放。
 
@@ -98,6 +98,8 @@ queued -> downloading -> transcribing -> generating -> done
 - `core/generation_commit.py`：验证生成结果并原子替换缓存、字幕、历史和用量。
 
 服务启动时会恢复被中断的任务；取消会终止当前子进程并清理临时结果。业务失败进入终态，不无限重试。
+
+视频解析结果会分别保留播放流和最佳音频流。提交 Whisper 任务时，解析信息随任务 payload 持久化；仍有效的音频直链通过 `--audio-url` 传给 worker。worker 优先直接下载音频 CDN，避免 B 站在短时间内重复抓取视频页面触发 `412`；直链缺失或失效时才回退到原视频 URL。旧缓存没有音频直链时，B 站任务会先刷新解析信息再入队。
 
 ## 启动与能力降级
 

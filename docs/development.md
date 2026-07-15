@@ -97,6 +97,7 @@ curl http://127.0.0.1:8000/api/capabilities
 - `/api/health/ready` 返回 503：检查 SQLite、临时目录和下载目录权限。
 - 前端 5173 无法访问：检查 Vite 进程、监听地址和防火墙。
 - B 站字幕临时不可用：查看后端日志中的平台错误码；不要直接改成“无字幕”回退。
+- B 站无 CC 后转录出现 `HTTP 412`：确认解析结果含 `audio_stream_url`，并确认 worker 命令收到 `--audio-url`。旧 `video_info_cache` 没有该字段时应先刷新解析，不要直接让 worker 再次抓取视频页面。
 - 分 P 状态异常：同时检查精确 URL、`url_hash`、当前身份历史状态和非空 AI 缓存；不要把共享视频指纹当成分 P 唯一键。
 - 分 P 转录 ETA 异常：确认 canonical URL 保留 `p` 参数，并从 `parts` 中读取所选分 P 时长，而不是全集总时长。
 

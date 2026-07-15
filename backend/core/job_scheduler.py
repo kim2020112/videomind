@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -230,4 +231,11 @@ class JobScheduler:
         ]
         if job.get("lang"):
             command.extend(["--language", job["lang"]])
+        info = job.get("payload", {}).get("info") or {}
+        audio_url = info.get("audio_stream_url")
+        audio_expires_at = info.get("audio_stream_expires_at")
+        if audio_url and (
+            not audio_expires_at or float(audio_expires_at) > time.time()
+        ):
+            command.extend(["--audio-url", audio_url])
         return command

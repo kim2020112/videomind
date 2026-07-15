@@ -28,13 +28,19 @@ def lower_priority() -> None:
             pass
 
 
-def run(url: str, language: str | None, result_path: Path) -> None:
+def run(
+    url: str,
+    language: str | None,
+    result_path: Path,
+    *,
+    audio_url: str | None = None,
+) -> None:
     lower_priority()
     if not is_model_available():
         raise RuntimeError(f"Whisper model is unavailable: {model_directory()}")
 
     emit({"type": "progress", "stage": "downloading", "progress": 2, "message": "正在下载音频"})
-    audio_path = _download_audio(url)
+    audio_path = _download_audio(url, audio_url=audio_url)
     audio_dir = os.path.dirname(audio_path)
     try:
         emit({"type": "progress", "stage": "transcribing", "progress": 15, "message": "正在加载转录模型"})
@@ -85,11 +91,12 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--url", required=True)
+    parser.add_argument("--audio-url", default=None)
     parser.add_argument("--language", default=None)
     parser.add_argument("--result-path", type=Path, required=True)
     args = parser.parse_args()
     try:
-        run(args.url, args.language, args.result_path)
+        run(args.url, args.language, args.result_path, audio_url=args.audio_url)
         return 0
     except Exception as exc:
         emit({"type": "error", "error": str(exc)})

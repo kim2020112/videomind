@@ -358,6 +358,8 @@ class VideoDownloader:
             and (f.get('vcodec', 'none') or 'none') == 'none'
         ]
         audio_fmts.sort(key=lambda f: f.get('tbr') or 0, reverse=True)
+        audio_stream_url = audio_fmts[0].get('url') if audio_fmts else None
+        audio_stream_expires_at = int(time.time()) + 1800 if audio_stream_url else None
         seen_audio_ext: set[str] = set()
         for f in audio_fmts[:4]:
             ext = f.get('ext', 'm4a')
@@ -540,6 +542,8 @@ class VideoDownloader:
             subtitles=subtitles,
             stream_url=stream_url,
             stream_expires_at=stream_expires_at,
+            audio_stream_url=audio_stream_url,
+            audio_stream_expires_at=audio_stream_expires_at,
         )
 
     def _download_concat_parts(self, url: str, format_id: str, task_id: str, task_dir: str,

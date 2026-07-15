@@ -97,11 +97,12 @@ class MediaUrlValidationTests(unittest.TestCase):
             with self.subTest(url=url):
                 media_security.validate_media_url(url, resolver=public_resolver)
 
-    def test_rejects_http_unknown_hosts_and_malicious_suffixes(self):
+    def test_rejects_http_credentials_unknown_hosts_and_malicious_suffixes(self):
         media_security = load_media_security(self)
 
         for url in (
             "http://i0.hdslb.com/image.jpg",
+            "https://user:password@i0.hdslb.com/image.jpg",
             "https://example.com/image.jpg",
             "https://evilhdslb.com/image.jpg",
             "https://hdslb.com.evil.example/image.jpg",
@@ -397,6 +398,21 @@ class MediaFetchTests(unittest.TestCase):
 
 
 class MediaRouteHeaderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_thumbnail_proxy_upgrades_http_url_before_secure_fetch(self):
+        payload = SimpleNamespace(content=b"jpeg", content_type="image/jpeg")
+
+        with patch.object(routes, "fetch_thumbnail", return_value=payload) as fetch:
+            response = await routes.proxy_thumbnail(
+                "http://i0.hdslb.com/bfs/archive/example.jpg?token=abc"
+            )
+
+        self.assertEqual(200, response.status_code)
+        fetch.assert_called_once()
+        self.assertEqual(
+            "https://i0.hdslb.com/bfs/archive/example.jpg?token=abc",
+            fetch.call_args.args[0],
+        )
+
     async def test_video_proxy_uses_isolation_headers_without_wildcard_cors(self):
         upstream = FakeUpstreamResponse(
             status=206,

@@ -241,8 +241,12 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
             and not bilibili_lookup_unavailable
             and is_whisper_available()
         )
+        cached_audio_ready = (
+            not is_bilibili_video(url, cached_info)
+            or bool((cached_info or {}).get("audio_stream_url"))
+        )
 
-        if need_whisper and cached_info:
+        if need_whisper and cached_info and cached_audio_ready:
             # 有缓存时长信息，立即走后台
             est = estimate_transcribe_time(duration_from_cache)
             job = enqueue_whisper_job(

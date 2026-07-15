@@ -81,6 +81,62 @@ class BilibiliSubtitleExtractorTests(unittest.TestCase):
 
 
 class BilibiliDownloaderTests(unittest.TestCase):
+    def test_parse_info_preserves_best_audio_stream_for_background_transcription(self):
+        from core import downloader as downloader_module
+
+        audio_url = "https://audio.example.com/best.m4s?deadline=9999999999"
+
+        class FakeYoutubeDL:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, _url, download=False):
+                return {
+                    "id": "BV1demo",
+                    "title": "Demo",
+                    "webpage_url": "https://www.bilibili.com/video/BV1demo",
+                    "duration": 600,
+                    "extractor": "BiliBili",
+                    "formats": [
+                        {
+                            "format_id": "video",
+                            "url": "https://video.example.com/video.m4s",
+                            "height": 1080,
+                            "vcodec": "avc1",
+                            "acodec": "none",
+                        },
+                        {
+                            "format_id": "audio-low",
+                            "url": "https://audio.example.com/low.m4s",
+                            "vcodec": "none",
+                            "acodec": "mp4a",
+                            "tbr": 64,
+                        },
+                        {
+                            "format_id": "audio-best",
+                            "url": audio_url,
+                            "vcodec": "none",
+                            "acodec": "mp4a",
+                            "tbr": 128,
+                        },
+                    ],
+                }
+
+        with (
+            tempfile.TemporaryDirectory() as output_dir,
+            patch.object(downloader_module.yt_dlp, "YoutubeDL", return_value=FakeYoutubeDL()),
+            patch.object(downloader_module, "_fetch_bilibili_parts", return_value=[]),
+        ):
+            info = downloader_module.VideoDownloader(output_dir=output_dir).parse_info(
+                "https://www.bilibili.com/video/BV1demo"
+            )
+
+        self.assertEqual(audio_url, info.audio_stream_url)
+        self.assertGreater(info.audio_stream_expires_at, 0)
+
     def test_short_link_resolution_is_case_insensitive_and_preserves_part(self):
         from api import routes
 
@@ -396,6 +452,8 @@ class BilibiliSubtitlePipelineTests(unittest.IsolatedAsyncioTestCase):
             "extractor": "BiliBili",
             "duration": 600,
             "parts": [],
+            "audio_stream_url": "https://audio.example.com/demo.m4s",
+            "audio_stream_expires_at": 9999999999,
         }
         job = {
             "task_id": "task-1",
@@ -431,6 +489,64 @@ class BilibiliSubtitlePipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(200, response.status_code)
         enqueue.assert_called_once()
 
+    async def test_stream_refreshes_legacy_bilibili_cache_before_whisper_enqueue(self):
+        from api import stream_routes
+
+        url = "https://www.bilibili.com/video/BV1demo"
+        cached_info = {
+            "title": "Demo",
+            "webpage_url": url,
+            "id": "BV1demo",
+            "extractor": "BiliBili",
+            "duration": 600,
+            "parts": [],
+        }
+        refreshed_info = VideoInfo(
+            title="Demo",
+            webpage_url=url,
+            id="BV1demo",
+            extractor="BiliBili",
+            duration=600,
+            audio_stream_url="https://audio.example.com/demo.m4s",
+            audio_stream_expires_at=9999999999,
+        )
+        job = {
+            "task_id": "task-refreshed",
+            "url_hash": "hash-refreshed",
+            "estimated_seconds": 60,
+            "queue_position": 1,
+        }
+
+        with (
+            patch.object(stream_routes, "is_ai_available", return_value=True),
+            patch.object(stream_routes, "extract_url", return_value=url),
+            patch.object(stream_routes, "ensure_public_http_url"),
+            patch.object(stream_routes, "require_identity", return_value={"user_id": 1, "guest_id": None}),
+            patch.object(stream_routes, "get_cached", return_value=None),
+            patch.object(stream_routes, "check_usage_limit", return_value=(True, 0, 20)),
+            patch.object(stream_routes, "get_video_info_cache", return_value=cached_info),
+            patch.object(stream_routes, "find_active_job", return_value=None),
+            patch.object(stream_routes, "_quick_db_subtitle_check", return_value=False),
+            patch.object(stream_routes, "get_whisper_cache", return_value=None),
+            patch.object(stream_routes, "is_whisper_available", return_value=True),
+            patch.object(
+                subtitle_pipeline,
+                "try_get_bilibili_cc_subtitle",
+                return_value={"has_subtitle": False, "reason": "absent"},
+            ),
+            patch.object(stream_routes.downloader, "parse_info", return_value=refreshed_info) as parse_info,
+            patch.object(stream_routes, "_quick_subtitle_check", return_value=False),
+            patch.object(stream_routes, "enqueue_whisper_job", return_value=job) as enqueue,
+        ):
+            response = await stream_routes.summarize_stream(
+                SummarizeRequest(url=url),
+                object(),
+            )
+
+        self.assertEqual(200, response.status_code)
+        parse_info.assert_called_once_with(url)
+        self.assertIs(refreshed_info, enqueue.call_args.kwargs["info"])
+
     async def test_stream_uses_selected_part_duration_from_legacy_cached_info(self):
         from api import stream_routes
         from core.whisper import estimate_transcribe_time
@@ -446,6 +562,8 @@ class BilibiliSubtitlePipelineTests(unittest.IsolatedAsyncioTestCase):
                 {"index": 1, "title": "Part 1", "duration": 1000},
                 {"index": 20, "title": "Part 20", "duration": 538},
             ],
+            "audio_stream_url": "https://audio.example.com/part-20.m4s",
+            "audio_stream_expires_at": 9999999999,
         }
         job = {
             "task_id": "task-20",

@@ -39,6 +39,27 @@ class JobSchedulerTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_default_command_passes_cached_audio_stream_to_worker(self):
+        from core.job_scheduler import JobScheduler
+
+        audio_url = "https://audio.example.com/best.m4s?deadline=9999999999"
+        job = {
+            "task_id": "job-audio",
+            "url": "https://www.bilibili.com/video/BV1demo",
+            "lang": "",
+            "payload": {
+                "info": {
+                    "audio_stream_url": audio_url,
+                    "audio_stream_expires_at": 9999999999,
+                }
+            },
+        }
+
+        command = JobScheduler._default_command(job, self.work_dir / "result.json")
+
+        self.assertIn("--audio-url", command)
+        self.assertEqual(audio_url, command[command.index("--audio-url") + 1])
+
     async def test_completed_child_progress_marks_job_done(self):
         from core.job_scheduler import JobScheduler
 
