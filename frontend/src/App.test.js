@@ -12,11 +12,15 @@ const mocks = vi.hoisted(() => ({
   resetSummary: vi.fn(),
   resetChat: vi.fn(),
   resetQa: vi.fn(),
+  videoInfo: null,
+  summaryResult: null,
+  summarySubtitleText: '',
+  summaryQaPairs: null,
 }))
 
 vi.mock('./composables/useDownloader.js', () => ({
   useDownloader: () => ({
-    videoInfo: ref(null),
+    videoInfo: ref(mocks.videoInfo),
     formats: ref([]),
     selectedFormat: ref('best'),
     progress: ref(null),
@@ -61,11 +65,11 @@ vi.mock('./composables/useCapabilities.js', () => ({
 
 vi.mock('./composables/useSummary.js', () => ({
   useSummary: () => ({
-    summaryResult: ref(null),
+    summaryResult: ref(mocks.summaryResult),
     isSummarizing: ref(false),
     summarizeError: ref(''),
     streamingText: ref(''),
-    subtitleText: ref(''),
+    subtitleText: ref(mocks.summarySubtitleText),
     isFetchingSubtitle: ref(false),
     subtitleError: ref(''),
     subtitleInfo: ref(null),
@@ -73,7 +77,7 @@ vi.mock('./composables/useSummary.js', () => ({
     notesMarkdown: ref(''),
     notesSections: ref(null),
     flashcards: ref(null),
-    qaPairs: ref(null),
+    qaPairs: ref(mocks.summaryQaPairs),
     generationStage: ref(''),
     regeneratingMode: ref(''),
     subtitleSource: ref(''),
@@ -111,6 +115,10 @@ vi.mock('./composables/useQa.js', () => ({
 describe('App workspace route restoration', () => {
   beforeEach(() => {
     mocks.parseVideo.mockReset().mockResolvedValue(undefined)
+    mocks.videoInfo = null
+    mocks.summaryResult = null
+    mocks.summarySubtitleText = ''
+    mocks.summaryQaPairs = null
     Element.prototype.scrollIntoView = vi.fn()
   })
 
@@ -125,6 +133,33 @@ describe('App workspace route restoration', () => {
     await router.push('/workspace?url=https%3A%2F%2Fexample.com%2Ftwo&tab=summary&part=1')
 
     await vi.waitFor(() => expect(mocks.parseVideo).toHaveBeenCalledWith('https://example.com/two'))
+    wrapper.unmount()
+  })
+
+  it('toggles answers when generated pairs come from the full summary stream', async () => {
+    mocks.videoInfo = { webpage_url: 'https://example.com/video', title: '示例视频', parts: [] }
+    mocks.summaryResult = { summary: '视频摘要' }
+    mocks.summarySubtitleText = '视频字幕内容'
+    mocks.summaryQaPairs = [{ question: '这个视频讲了什么？', answer: '视频答案', expanded: false }]
+    window.matchMedia = () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })
+
+    const router = createAppRouter(createMemoryHistory())
+    await router.push('/workspace?url=https%3A%2F%2Fexample.com%2Fvideo')
+    await router.isReady()
+    const wrapper = shallowMount(App, {
+      global: {
+        plugins: [router],
+        renderStubDefaultSlot: true,
+        stubs: { ResultWorkspace: false, AiSummary: false },
+      },
+    })
+
+    await vi.waitFor(() => expect(wrapper.find('.qa-pair-header').exists()).toBe(true))
+    await wrapper.find('.sub-tab-btn:last-child').trigger('click')
+    await wrapper.find('.qa-pair-header').trigger('click')
+
+    expect(wrapper.find('.qa-pair-answer').attributes('style')).not.toContain('display: none')
+    expect(wrapper.find('.qa-pair-answer-content').text()).toContain('视频答案')
     wrapper.unmount()
   })
 })

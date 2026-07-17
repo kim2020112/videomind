@@ -233,7 +233,6 @@ const {
   isQaGenerating,
   qaError,
   generateQa,
-  toggleExpand: toggleQaExpand,
   resetQa,
 } = useQa()
 
@@ -241,6 +240,14 @@ const displayQaPairs = computed(() => {
   if (qaPairs.value.length > 0) return qaPairs.value
   return summaryQaPairs.value || []
 })
+
+// 精选问答可能来自完整总结或单独生成，展开状态必须作用于当前展示的数据源。
+function toggleQaExpand(index) {
+  const pair = displayQaPairs.value[index]
+  if (pair) {
+    pair.expanded = !pair.expanded
+  }
+}
 
 const liveBackgroundTask = computed(() => {
   if (!backgroundTask.value?.task_id) return backgroundTask.value
