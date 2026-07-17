@@ -20,6 +20,8 @@
                                   `- Whisper 子进程（按需）
 ```
 
+需要保留独立前端端口时，可由 Vite Preview 在 `:5173` 提供同一份 `frontend/dist`，并代理 `/api`、`/ws` 到 FastAPI。长期运行环境不使用 Vite 开发服务器，避免 HMR WebSocket 重连触发整页刷新。
+
 `backend/main.py` 在 `frontend/dist` 存在时直接挂载静态前端。Vue Router 的工作区与历史深链回退到 `index.html`，缺失的静态资源仍返回 404。后台任务调度器和 API 运行在同一 FastAPI 进程中，因此生产环境使用单个 Uvicorn worker。
 
 ## 前端结构
@@ -27,9 +29,17 @@
 - `frontend/src/App.vue`：认证、能力、路由和工作台状态编排。
 - `frontend/src/router.js`：`/`、`/workspace`、`/history` 和历史详情路由。
 - `frontend/src/components/`：页面区域、Dialog、下载、视频和 AI 结果组件。
-- `frontend/src/composables/`：认证、能力、总结、下载和后台任务状态。
+- `frontend/src/composables/`：认证、能力、总结、下载、后台任务和管理员连接状态。
 
 工作台 URL 保存当前视频链接、标签页和分 P。刷新、前进后退或打开历史详情时，前端从路由查询参数恢复状态。History、管理员设置、视频播放器和 markmap 等较重功能按需加载。
+
+## AI 连接与文本客户端
+
+`core/ai_config.py` 将管理员配置持久化为版本 3 的 `connections` 结构。每个连接保存 `api_format`、Base URL、可选模型发现地址、`primary_model_id` 和模型目录；模型的来源/发现状态与测试状态分别保存，避免刷新目录覆盖手动模型或历史测试结果。旧的单模型与服务商分组格式在读取时兼容归一化。
+
+运行时连接优先于 `.env` 兜底。首个可用连接会自动成为全局 active；编辑非当前连接只修改其连接级主力模型；显式切换会在一次持久化操作中同时更新连接主力模型和全局 active。管理员 API 只返回脱敏后的 API Key，删除当前连接时会回退到另一个连接的主力模型或 `.env` 兜底。
+
+`core/text_client.py` 为 OpenAI 与 Anthropic 兼容接口提供统一的生成、流式输出、模型发现和连通性测试。模型发现会按协议尝试兼容端点，并为 Anthropic 路径的中转站回退到 OpenAI 风格的 `/models` 端点；既有 AI 流水线通过一个 Anthropic 形状的兼容层继续调用该客户端。
 
 ## 身份与会话
 
