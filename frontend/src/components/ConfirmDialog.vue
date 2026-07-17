@@ -9,6 +9,8 @@ defineProps({
   cancelLabel: { type: String, default: '取消' },
   danger: { type: Boolean, default: false },
   busy: { type: Boolean, default: false },
+  busyLabel: { type: String, default: '处理中...' },
+  error: { type: String, default: '' },
 })
 
 const emit = defineEmits(['confirm', 'close'])
@@ -21,12 +23,14 @@ const emit = defineEmits(['confirm', 'close'])
     close-label="关闭确认弹窗"
     initial-focus="[data-confirm-cancel]"
     layer="confirmation"
-    @close="emit('close')"
+    :show-close="!busy"
+    @close="!busy && emit('close')"
   >
     <h2 id="confirm-dialog-title" class="confirm-title">{{ title }}</h2>
     <p class="confirm-message">{{ message }}</p>
+    <p v-if="error" class="confirm-error" role="alert">{{ error }}</p>
     <div class="confirm-actions">
-      <button type="button" class="confirm-button confirm-button--secondary" data-confirm-cancel @click="emit('close')">
+      <button type="button" class="confirm-button confirm-button--secondary" data-confirm-cancel :disabled="busy" @click="emit('close')">
         {{ cancelLabel }}
       </button>
       <button
@@ -36,7 +40,7 @@ const emit = defineEmits(['confirm', 'close'])
         :disabled="busy"
         @click="emit('confirm')"
       >
-        {{ busy ? '处理中…' : confirmLabel }}
+        {{ busy ? busyLabel : confirmLabel }}
       </button>
     </div>
   </BaseDialog>
@@ -53,6 +57,17 @@ const emit = defineEmits(['confirm', 'close'])
   margin: 0;
   color: var(--text-secondary);
   line-height: 1.7;
+}
+
+.confirm-error {
+  margin: 1rem 0 0;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 6px;
+  background: rgba(239, 68, 68, 0.09);
+  color: #fecaca;
+  font-size: 0.8125rem;
+  line-height: 1.5;
 }
 
 .confirm-actions {
@@ -92,5 +107,10 @@ const emit = defineEmits(['confirm', 'close'])
 .confirm-button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.confirm-button:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
 }
 </style>

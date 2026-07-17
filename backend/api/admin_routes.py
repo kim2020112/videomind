@@ -1,137 +1,120 @@
-"""管理员路由 — AI 服务商/模型配置管理。"""
+"""Administrator endpoints for AI connections and models."""
+
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from api.security import require_admin
 from core import ai_config
-from core.logging_config import get_logger
-
-logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
-# ── 请求体 ──
-
-class ProviderRequest(BaseModel):
-    name: str
-    provider: str
-    api_key: str
-    base_url: str
-
-
-class ModelRequest(BaseModel):
+class ModelSelection(BaseModel):
+    id: str | None = None
     name: str
     model: str
+    source: Literal["discovered", "manual"] = "discovered"
+    discovery_status: Literal["available", "not_returned", "manual"] | None = None
+    test_status: Literal["untested", "passed", "failed"] | None = None
+    test_message: str = ""
+    tested_at: str = ""
+    # Accepted while version 2 clients are being migrated.
+    status: Literal["available", "not_returned", "unverified"] | None = None
+
+
+class ConnectionRequest(BaseModel):
+    name: str
+    api_format: Literal["openai", "anthropic"]
+    api_key: str = ""
+    base_url: str
+    models_url: str = ""
+    discovery_url: str = ""
+    models: list[ModelSelection]
+    primary_model: str = ""
+    active_model: str = ""
+
+    def selected_model(self) -> str:
+        return self.primary_model or self.active_model
+
+
+class DiscoverRequest(BaseModel):
+    api_format: Literal["openai", "anthropic"]
+    api_key: str
+    base_url: str
+    models_url: str = ""
+    connection_id: str = ""
 
 
 class SwitchRequest(BaseModel):
-    provider_id: str
+    connection_id: str
     model_id: str
 
 
-class TestRequest(BaseModel):
-    api_key: str
-    base_url: str
-    model: str
+def _bad_request(call, *args, **kwargs):
+    try:
+        return call(*args, **kwargs)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
 
-
-# ── 查询 ──
 
 @router.get("/ai-config")
 async def get_config(request: Request):
     require_admin(request)
-    return {
-        "providers": ai_config.get_all_providers(),
-        "active": ai_config.get_active(),
-    }
+    active = ai_config.get_active()
+    return {"version": 3, "connections": ai_config.get_all_connections(),
+            "active": {"connection_id": active["provider_id"], "model_id": active["model_id"]}}
 
 
-# ── 服务商 CRUD ──
-
-@router.post("/ai-config/providers")
-async def add_provider(req: ProviderRequest, request: Request):
+@router.post("/ai-config/discover")
+async def discover(req: DiscoverRequest, request: Request):
     require_admin(request)
-    try:
-        return ai_config.add_provider(req.name, req.provider, req.api_key, req.base_url)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    return _bad_request(ai_config.discover_models, req.api_format, req.api_key, req.base_url,
+                        req.models_url, req.connection_id)
 
 
-@router.put("/ai-config/providers/{provider_id}")
-async def update_provider(provider_id: str, req: ProviderRequest, request: Request):
+@router.post("/ai-config/connections")
+async def add_connection(req: ConnectionRequest, request: Request):
     require_admin(request)
-    try:
-        return ai_config.update_provider(provider_id, req.name, req.provider, req.api_key, req.base_url)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    connection = _bad_request(ai_config.save_connection, req.name, req.api_format, req.api_key, req.base_url,
+                              [item.model_dump() for item in req.models], req.selected_model(), None,
+                              req.models_url, req.discovery_url)
+    active = ai_config.get_active()
+    return {"connection": connection,
+            "active": {"connection_id": active["provider_id"], "model_id": active["model_id"]}}
 
 
-@router.delete("/ai-config/providers/{provider_id}")
-async def delete_provider(provider_id: str, request: Request):
+@router.put("/ai-config/connections/{connection_id}")
+async def update_connection(connection_id: str, req: ConnectionRequest, request: Request):
     require_admin(request)
-    try:
-        ai_config.delete_provider(provider_id)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    return {"status": "ok"}
+    connection = _bad_request(ai_config.save_connection, req.name, req.api_format, req.api_key, req.base_url,
+                              [item.model_dump() for item in req.models], req.selected_model(), connection_id,
+                              req.models_url, req.discovery_url)
+    active = ai_config.get_active()
+    return {"connection": connection,
+            "active": {"connection_id": active["provider_id"], "model_id": active["model_id"]}}
 
 
-@router.post("/ai-config/providers/{provider_id}/test")
-async def test_provider(provider_id: str, request: Request):
+@router.delete("/ai-config/connections/{connection_id}")
+async def delete_connection(connection_id: str, request: Request):
     require_admin(request)
-    try:
-        return ai_config.test_provider(provider_id)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    return _bad_request(ai_config.delete_connection, connection_id)
 
 
-# ── 模型 CRUD ──
-
-@router.post("/ai-config/providers/{provider_id}/models")
-async def add_model(provider_id: str, req: ModelRequest, request: Request):
+@router.post("/ai-config/connections/{connection_id}/refresh")
+async def refresh_connection(connection_id: str, request: Request):
     require_admin(request)
-    try:
-        return ai_config.add_model(provider_id, req.name, req.model)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    return _bad_request(ai_config.refresh_models, connection_id)
 
 
-@router.put("/ai-config/providers/{provider_id}/models/{model_id}")
-async def update_model(provider_id: str, model_id: str, req: ModelRequest, request: Request):
+@router.post("/ai-config/connections/{connection_id}/models/{model_id}/test")
+async def test_model(connection_id: str, model_id: str, request: Request):
     require_admin(request)
-    try:
-        return ai_config.update_model(provider_id, model_id, req.name, req.model)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    return _bad_request(ai_config.test_model, connection_id, model_id)
 
-
-@router.delete("/ai-config/providers/{provider_id}/models/{model_id}")
-async def delete_model(provider_id: str, model_id: str, request: Request):
-    require_admin(request)
-    try:
-        ai_config.delete_model(provider_id, model_id)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    return {"status": "ok"}
-
-
-# ── 切换 ──
 
 @router.post("/ai-config/switch")
 async def switch_model(req: SwitchRequest, request: Request):
     require_admin(request)
-    try:
-        ai_config.switch_model(req.provider_id, req.model_id)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    return {"status": "ok", "active": {"provider_id": req.provider_id, "model_id": req.model_id}}
-
-
-# ── 测试连接（用传入参数） ──
-
-@router.post("/ai-config/test")
-async def test_config(req: TestRequest, request: Request):
-    require_admin(request)
-    return ai_config.test_connection(req.api_key, req.base_url, req.model)
+    return _bad_request(ai_config.switch_model, req.connection_id, req.model_id)

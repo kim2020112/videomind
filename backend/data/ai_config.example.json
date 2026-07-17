@@ -1,22 +1,31 @@
 {
-  "providers": [
+  "version": 3,
+  "connections": [
     {
-      "id": "example-provider",
-      "name": "Example Provider",
-      "provider": "deepseek",
+      "id": "example-connection",
+      "name": "Example Gateway",
+      "api_format": "openai",
       "api_key": "",
-      "base_url": "https://api.example.com/anthropic",
+      "base_url": "https://api.example.com/v1",
+      "models_url": "",
+      "discovery_url": "https://api.example.com/v1/models",
+      "primary_model_id": "example-model",
       "models": [
         {
           "id": "example-model",
           "name": "Example Model",
-          "model": "example-model"
+          "model": "example-model",
+          "source": "discovered",
+          "discovery_status": "available",
+          "test_status": "untested",
+          "test_message": "",
+          "tested_at": ""
         }
       ]
     }
   ],
   "active": {
-    "provider_id": "example-provider",
+    "connection_id": "example-connection",
     "model_id": "example-model"
   }
 }

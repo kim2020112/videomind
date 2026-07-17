@@ -8,6 +8,7 @@ BASE_DIR = Path(__file__).parent
 
 # AI API 配置
 AI_PROVIDER = os.getenv("AI_PROVIDER", "deepseek")  # deepseek | openai | openrouter
+AI_API_FORMAT = os.getenv("AI_API_FORMAT", "anthropic").strip().lower()
 AI_API_KEY = os.getenv("AI_API_KEY", os.getenv("DEEPSEEK_API_KEY", ""))
 AI_BASE_URL = os.getenv("AI_BASE_URL", os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/anthropic"))
 AI_MODEL = os.getenv("AI_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))

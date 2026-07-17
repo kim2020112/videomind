@@ -8,7 +8,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import (PROMPT_VERSION, BASE_DIR,
                     SUMMARY_PROMPT_VERSION, NOTES_PROMPT_VERSION, MINDMAP_PROMPT_VERSION,
                     QANDA_PROMPT_VERSION)
-from core.ai_config import get_effective_api_key, get_effective_base_url, get_effective_model
+from core.ai_config import (get_effective_api_format, get_effective_api_key,
+                            get_effective_base_url, get_effective_model)
+from core.text_client import TextClient, is_recoverable, retry
 from core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -23,17 +25,7 @@ _RETRY_BASE_DELAY = 2  # 秒，指数退避基数
 
 
 def _is_recoverable(err: Exception) -> bool:
-    """判断是否为可恢复的错误（网络/超时/服务端/限流），4xx 不可恢复。"""
-    try:
-        import anthropic
-    except ImportError:
-        return isinstance(err, (ConnectionError, TimeoutError, OSError))
-    if isinstance(err, (anthropic.APIConnectionError, anthropic.APITimeoutError)):
-        return True
-    if isinstance(err, anthropic.APIStatusError):
-        return err.status_code >= 500 or err.status_code == 429
-    # 非 Anthropic 异常（如 urllib3 连接错误）视为可恢复
-    return isinstance(err, (ConnectionError, TimeoutError, OSError))
+    return is_recoverable(err)
 
 
 def _retry(fn, *args, **kwargs):
@@ -73,15 +65,15 @@ def _load_prompt(name: str) -> str:
 # ──── AI Client ────
 
 def _get_client():
-    """获取 Anthropic 客户端（延迟导入）。"""
-    import anthropic
     api_key = get_effective_api_key()
     if not api_key:
         raise ValueError("未配置 AI_API_KEY，请在 backend/.env 中设置")
-    return anthropic.Anthropic(api_key=api_key, base_url=get_effective_base_url())
+    return TextClient(get_effective_api_format(), api_key, get_effective_base_url())
 
 
 def _extract_text(response) -> str:
+    if isinstance(response, str):
+        return response.strip()
     for block in response.content:
         if hasattr(block, "text"):
             return block.text.strip()

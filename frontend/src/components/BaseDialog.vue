@@ -169,7 +169,7 @@ onUnmounted(() => {
 }
 
 .base-dialog-panel--wide {
-  width: min(100%, 680px);
+  width: min(100%, 760px);
 }
 
 .base-dialog-panel--video {
