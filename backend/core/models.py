@@ -76,6 +76,7 @@ class VideoInfo(BaseModel):
     stream_expires_at: Optional[int] = None
     audio_stream_url: Optional[str] = None
     audio_stream_expires_at: Optional[int] = None
+    stream_needs_audio: bool = False
 
     @field_validator('view_count', mode='before')
     @classmethod

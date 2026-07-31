@@ -185,6 +185,12 @@ async def refresh_stream_url(url: str, request: Request):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
         raw_formats = info.get('formats', [])
+        audio_only = [
+            f for f in raw_formats
+            if (f.get('acodec', 'none') or 'none') != 'none'
+            and (f.get('vcodec', 'none') or 'none') == 'none'
+            and f.get('url')
+        ]
         combined = [
             f for f in raw_formats
             if (f.get('vcodec', 'none') or 'none') != 'none'
@@ -202,11 +208,20 @@ async def refresh_stream_url(url: str, request: Request):
                 and f.get('url')
             ]
             if not video_only:
-                return {"stream_url": None, "stream_expires_at": None}
+                return {
+                    "stream_url": None, "stream_expires_at": None,
+                    "audio_stream_url": None, "audio_stream_expires_at": None,
+                    "stream_needs_audio": False,
+                }
             best = max(video_only, key=lambda f: f.get('height') or 0)
+        audio = max(audio_only, key=lambda f: f.get('tbr') or 0) if audio_only else None
+        expires_at = int(_time.time()) + 1800
         return {
             "stream_url": best['url'],
-            "stream_expires_at": int(_time.time()) + 1800,
+            "stream_expires_at": expires_at,
+            "audio_stream_url": audio.get('url') if audio else None,
+            "audio_stream_expires_at": expires_at if audio else None,
+            "stream_needs_audio": not combined and bool(audio),
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"刷新失败: {str(e)}")

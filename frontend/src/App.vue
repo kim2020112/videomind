@@ -100,6 +100,7 @@ const desktopSidebarCollapsed = ref(false)
 // 视频播放 Modal
 const showVideoModal = ref(false)
 const videoStreamUrl = ref('')
+const videoPlaybackRate = ref(1)
 const videoCurrentTime = ref(0)
 const videoPlayerRef = ref(null)
 
@@ -849,10 +850,14 @@ function handleUrlChange(value) {
       ref="videoPlayerRef"
       :visible="showVideoModal"
       :streamUrl="videoStreamUrl"
+      :audioStreamUrl="videoInfo?.audio_stream_url || ''"
+      :streamNeedsAudio="videoInfo?.stream_needs_audio || false"
+      :playbackRate="videoPlaybackRate"
       :videoTitle="videoInfo?.title || ''"
       :videoUrl="videoInfo?.webpage_url || ''"
       @close="showVideoModal = false"
       @seek="onVideoSeek"
+      @playback-rate-change="videoPlaybackRate = $event"
     />
     <TaskProgressDock :tasks="activeTasks" @open-history="router.push({ name: 'history' })" />
   </div>

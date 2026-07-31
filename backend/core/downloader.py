@@ -500,6 +500,7 @@ class VideoDownloader:
 
         # 提取最佳视频流 URL 用于在线播放（合并流优先，否则降级到纯视频流）
         stream_url = None
+        stream_needs_audio = False
         stream_expires_at = None
         combined_fmts = [
             f for f in raw_formats
@@ -511,7 +512,7 @@ class VideoDownloader:
             best = max(combined_fmts, key=lambda f: f.get('height') or 0)
             stream_url = best['url']
         else:
-            # DASH 降级：使用最佳纯视频流（无声音，但可预览画面）
+            # DASH 降级：使用最佳纯视频流，并由前端伴随独立音频播放。
             video_only_fmts = [
                 f for f in raw_formats
                 if (f.get('vcodec', 'none') or 'none') != 'none'
@@ -521,6 +522,7 @@ class VideoDownloader:
             if video_only_fmts:
                 best = max(video_only_fmts, key=lambda f: f.get('height') or 0)
                 stream_url = best['url']
+                stream_needs_audio = bool(audio_stream_url)
         if stream_url:
             stream_expires_at = int(time.time()) + 1800
 
@@ -544,6 +546,7 @@ class VideoDownloader:
             stream_expires_at=stream_expires_at,
             audio_stream_url=audio_stream_url,
             audio_stream_expires_at=audio_stream_expires_at,
+            stream_needs_audio=stream_needs_audio,
         )
 
     def _download_concat_parts(self, url: str, format_id: str, task_id: str, task_dir: str,
