@@ -157,16 +157,17 @@ def try_get_bilibili_cc_subtitle(url: str, cached_info=None) -> dict | None:
 # ─── Pipeline ────────────────────────────────────────────────
 
 async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = None,
-                         trace_id: str = "") -> tuple[str, str, str]:
+                         trace_id: str = "", refresh: bool = False) -> tuple[str, str, str]:
     """标准化字幕获取（DB 优先，减少重复 API 调用）。
 
     返回 (subtitle_text, source, language)。不含 AI 校正。
+    refresh=True 跳过 DB 缓存强制重新获取（用于修复上游字幕错配等坏缓存）。
     """
     url = canonical_video_url(url, info)
     platform = info.extractor or ""
 
     # ── DB 缓存检查 ──
-    cached_sub = get_subtitle_from_db(url)
+    cached_sub = None if refresh else get_subtitle_from_db(url)
     if cached_sub and len(cached_sub["full_text"].strip()) >= 50:
         if cached_sub["source"] == "bilibili_cc" and not re.search(r'\[\d{2}:\d{2}\]', cached_sub["full_text"]):
             logger.info(f"DB缓存的B站CC字幕缺少时间戳，跳过缓存重新获取")

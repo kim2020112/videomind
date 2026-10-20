@@ -42,6 +42,24 @@ async def consume_stream(response) -> bytes:
 
 
 class StreamingGenerateThenSwapTests(unittest.IsolatedAsyncioTestCase):
+    async def test_mindmap_failure_warns_and_still_commits_notes_and_finishes(self):
+        info = VideoInfo(title="New title", webpage_url=URL, duration=60)
+        with ExitStack() as stack:
+            mocks = self._patch_full_pipeline(
+                stack, info, [PipelineEvent("result", {"summary": "Valid summary"})],
+            )
+            stack.enter_context(patch.object(stream_routes, "run_notes", return_value=[
+                PipelineEvent("notes_text", {"text": "Complete notes"}),
+            ]))
+            response = await stream_routes.summarize_stream(SummarizeRequest(url=URL, force=True), object())
+            body = await consume_stream(response)
+        events = [json.loads(line[6:]) for line in body.decode().splitlines() if line.startswith('data: ')]
+        self.assertTrue(any(e['type'] == 'warn' for e in events))
+        self.assertEqual('done', events[-1]['type'])
+        result = mocks['commit_full_generation'].call_args.kwargs['result']
+        self.assertEqual('Complete notes', result['notes'])
+        self.assertEqual('', result['mindmap_markdown'])
+
     def _patch_full_pipeline(self, stack: ExitStack, info: VideoInfo, summary_events: list):
         stack.enter_context(patch.object(stream_routes, "is_ai_available", return_value=True))
         stack.enter_context(patch.object(stream_routes, "extract_url", return_value=URL))
@@ -658,24 +676,25 @@ class GenerationTransactionTests(unittest.TestCase):
         self.assertEqual(1, snapshot["history"])
 
     def test_successful_commit_enforces_cache_retention_and_keeps_new_result(self):
-        for index in range(50):
-            cached_url = f"https://www.example.com/video/cached-{index}"
-            cache.save_cache(
-                cached_url,
-                video_title=f"Cached {index}",
-                result_json=json.dumps({"result": {"summary": f"Summary {index}"}}),
-                fingerprint=f"example:cached-{index}",
-                prompt_version=1,
-            )
+        with patch.object(cache, "AI_CACHE_KEEP", 50):
+            for index in range(50):
+                cached_url = f"https://www.example.com/video/cached-{index}"
+                cache.save_cache(
+                    cached_url,
+                    video_title=f"Cached {index}",
+                    result_json=json.dumps({"result": {"summary": f"Summary {index}"}}),
+                    fingerprint=f"example:cached-{index}",
+                    prompt_version=1,
+                )
 
-        self._commit()
+            self._commit()
 
-        with database.get_db() as conn:
-            cache_count = conn.execute("SELECT COUNT(*) FROM ai_cache").fetchone()[0]
-            committed = conn.execute(
-                "SELECT result_json FROM ai_cache WHERE url_hash = ?",
-                (cache._url_hash(URL),),
-            ).fetchone()
+            with database.get_db() as conn:
+                cache_count = conn.execute("SELECT COUNT(*) FROM ai_cache").fetchone()[0]
+                committed = conn.execute(
+                    "SELECT result_json FROM ai_cache WHERE url_hash = ?",
+                    (cache._url_hash(URL),),
+                ).fetchone()
 
         self.assertEqual(50, cache_count)
         self.assertIsNotNone(committed)

@@ -82,11 +82,21 @@ def _extract_text(response) -> str:
 
 # ──── 文本分片 ────
 
+MUSIC_MARKS = "♪♫♬〜~·…、。！？,.!?:;：；（）()[]【】\"'` \t\n"
+
+def effective_speech_chars(text: str) -> int:
+    """剥离时间戳/音乐标记/标点后剩余的有效字符数，用于判断字幕是否缺乏语音内容。"""
+    stripped = re.sub(r"\[\d{1,2}:\d{2}(?::\d{2})?\]", "", text or "")
+    stripped = re.sub(r"\s+", "", stripped)
+    return sum(1 for ch in stripped if ch not in MUSIC_MARKS)
+
+
 def _split_text(text: str, max_chars: int = MAX_SUBTITLE_CHARS, overlap: int = 0) -> list[str]:
     """按段落分片。overlap > 0 时保留上一片的末尾段落作为重叠。"""
     if len(text) <= max_chars:
         return [text]
-    paragraphs = text.split("\n")
+    paragraphs = [part for line in text.split("\n")
+                  for part in (line[i:i + max_chars] for i in range(0, max(1, len(line)), max_chars))]
     chunks, current, current_len = [], [], 0
     for para in paragraphs:
         para_len = len(para) + 1
@@ -107,28 +117,55 @@ def _split_text(text: str, max_chars: int = MAX_SUBTITLE_CHARS, overlap: int = 0
 
 # ──── 结构化 JSON 解析 ────
 
+_JSON_STRUCTURAL = set(':,[{} \t\n\r\\"')
+
+
+def _repair_inner_json_quotes(content: str) -> str:
+    """修复 JSON 字符串值内未转义的引号（模型常见输出缺陷）。
+
+    判定：前后都是内容字符（非结构字符）的 `"` 视为值内引号，转义之。
+    """
+    out = []
+    for i, ch in enumerate(content):
+        if ch == '"':
+            prev = content[i - 1] if i > 0 else ""
+            nxt = content[i + 1] if i + 1 < len(content) else ""
+            if prev and nxt and prev != "\\" and prev not in _JSON_STRUCTURAL \
+                    and nxt not in _JSON_STRUCTURAL:
+                out.append('\\"')
+                continue
+        out.append(ch)
+    return "".join(out)
+
+
+def _try_decode_json(content: str):
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r'[\[{]', content):
+        try:
+            parsed, _ = decoder.raw_decode(content, match.start())
+            return parsed
+        except json.JSONDecodeError:
+            continue
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return None
+
+
 def _parse_json_response(content: str) -> dict:
     """从 AI 响应中提取 JSON。支持代码块包裹和裸 JSON。"""
     # 尝试提取 ```json ... ``` 中的内容
     m = JSON_BLOCK_RE.search(content)
     if m:
         content = m.group(1).strip()
-    # 尝试找到第一个 [ 到最后一个 ]（数组格式）
-    arr_start = content.find('[')
-    arr_end = content.rfind(']')
-    if arr_start != -1 and arr_end != -1 and arr_end > arr_start:
-        content = content[arr_start:arr_end + 1]
-    else:
-        # 尝试找到第一个 { 到最后一个 }（对象格式）
-        start = content.find('{')
-        end = content.rfind('}')
-        if start != -1 and end != -1 and end > start:
-            content = content[start:end + 1]
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        # 返回原始文本作为 summary
-        return {"summary": content, "notes": "", "key_points": [], "code_blocks": [], "flashcards": [], "one_liner": "", "continue_learning": []}
+    parsed = _try_decode_json(content)
+    if parsed is None:
+        # 严格解析失败：修复值内未转义引号后重试
+        parsed = _try_decode_json(_repair_inner_json_quotes(content))
+    if parsed is not None:
+        return parsed
+    # 返回原始文本作为 summary
+    return {"summary": content, "notes": "", "key_points": [], "code_blocks": [], "flashcards": [], "one_liner": "", "continue_learning": []}
 
 
 def _parse_json_or_fallback(content: str) -> dict:
@@ -285,7 +322,7 @@ def generate_mindmap(subtitle_text: str, video_title: str = "") -> str:
         video_title=f"视频标题：{video_title}\n\n" if video_title else "",
         subtitle_text=_chunk_summarize(subtitle_text, video_title),
     )
-    resp = _retry(client.messages.create,
+    resp = client.messages.create(
         model=get_effective_model(), max_tokens=2000, temperature=0.5,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -355,7 +392,11 @@ def stream_summarize(subtitle_text: str, video_title: str = ""):
                         full_text += delta.text
                         yield ("text", {"text": delta.text})
 
-        full_text = full_text.strip() or "AI 未能生成有效的总结内容，请重试。"
+        full_text = full_text.strip()
+        if not full_text:
+            # 空输出不再以哨兵文案冒充结果（那会通过校验被永久入库）
+            yield ("error", {"message": "AI 未能生成有效的总结内容，请重试"})
+            return
         yield ("result", {"summary": full_text})
 
     except Exception as e:
@@ -465,8 +506,39 @@ def stream_flashcards(content_summary: str, video_title: str = ""):
         yield ("error", {"message": str(e)})
 
 
+def _normalize_qa_pairs(parsed) -> list[dict]:
+    """把各种问答响应形状归一为 [{"question","answer"}]。
+
+    模型可能输出对象包裹（{"qa_pairs": [...]} / {"questions": [...]}）或
+    字段大小写变体，此前这些会被静默丢弃成空数组。
+    """
+    candidates = []
+    if isinstance(parsed, list):
+        candidates = parsed
+    elif isinstance(parsed, dict):
+        for key in ("qa_pairs", "questions", "qa", "cards", "items", "data"):
+            value = parsed.get(key)
+            if isinstance(value, list):
+                candidates = value
+                break
+    pairs = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        question = answer = ""
+        for key, value in item.items():
+            lowered = str(key).lower()
+            if lowered in ("question", "q") and not question:
+                question = str(value or "").strip()
+            elif lowered in ("answer", "a") and not answer:
+                answer = str(value or "").strip()
+        if question and answer:
+            pairs.append({"question": question, "answer": answer})
+    return pairs
+
+
 def stream_qanda(subtitle_text: str, video_title: str = ""):
-    """流式生成关键问答对。"""
+    """流式生成关键问答对。解析失败/为空时做一次格式强化重试。"""
     client = _get_client()
     prompt = _load_prompt("qanda").format(
         video_title=video_title,
@@ -486,8 +558,25 @@ def stream_qanda(subtitle_text: str, video_title: str = ""):
                         full_text += delta.text
                         yield ("qa_text", {"text": delta.text})
 
-        parsed = _parse_json_or_fallback(full_text.strip())
-        pairs = parsed if isinstance(parsed, list) else []
+        pairs = _normalize_qa_pairs(_parse_json_or_fallback(full_text.strip()))
+        if not pairs and full_text.strip():
+            # 模型输出了内容但无法解析：带格式强化重试一次
+            retry_prompt = (
+                prompt
+                + "\n\n注意：上一次输出未通过解析。请严格输出 JSON 数组，"
+                  "形如 [{\"question\": \"...\", \"answer\": \"...\"}]，"
+                  "不要包裹在对象中，不要输出任何其他文字。"
+            )
+            try:
+                retry_text = _retry(
+                    client.messages.create,
+                    model=get_effective_model(), max_tokens=3000,
+                    messages=[{"role": "user", "content": retry_prompt}],
+                )
+                raw = next((b.text for b in retry_text.content if hasattr(b, "text")), "")
+                pairs = _normalize_qa_pairs(_parse_json_or_fallback(raw.strip()))
+            except Exception:
+                pass  # 保留空结果，由调用方按「无问答」处理
         yield ("qa_pairs", pairs)
     except Exception as e:
         yield ("error", {"message": str(e)})

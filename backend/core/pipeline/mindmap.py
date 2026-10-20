@@ -13,5 +13,5 @@ def run_mindmap(subtitle_text: str, video_title: str, trace_id: str = "") -> str
         logger.info(f"思维导图生成完成")
         return mindmap_md
     except Exception as e:
-        logger.info(f"思维导图生成失败: {e}")
+        logger.warning(f"思维导图生成失败（流程将继续）: {e}")
         return ""

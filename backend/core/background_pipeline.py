@@ -10,6 +10,7 @@ from core.cache import (
     video_fingerprint,
 )
 from core.generation_commit import (
+    InvalidGenerationResult,
     commit_full_generation,
     commit_subtitle_generation,
     validate_summary_result,
@@ -151,32 +152,64 @@ async def _load_video_info(job: dict):
     return await asyncio.to_thread(downloader.parse_info, job["url"])
 
 
-def _generate_and_persist(
+def generate_full_from_subtitle(
     job,
+    *,
     info,
-    canonical_url,
-    subtitle_text,
-    fingerprint,
-    raw_text,
-    language,
+    canonical_url: str,
+    subtitle_text: str,
+    subtitle_source: str,
+    subtitle_language: str,
+    fingerprint: str | None,
+    raw_text: str | None = None,
 ) -> dict:
+    """完整 AI 学习资料生成模板：摘要→思维导图→笔记→问答→原子提交。
+
+    供 Whisper 后台完成与博主批量条目共用；subtitle_source/raw_text 参数化，
+    CC 字幕条目不会被错标为 whisper 来源。
+    """
+    from core.ai_client import effective_speech_chars
+    effective = effective_speech_chars(subtitle_text)
+    if effective < 20 or (effective < 80 and len(subtitle_text) > 500):
+        raise InvalidGenerationResult(
+            "字幕缺乏有效语音内容（多为音乐标记/无对白），无法生成学习资料"
+        )
     trace_id = job["task_id"][:8]
+    job_store.update_job(job["task_id"], message="正在生成 AI 摘要", progress=96)
     result_data = {}
     for event in run_summary(subtitle_text, info.title, trace_id):
         if event.type == "result":
             result_data = event.data
     validate_summary_result(result_data)
 
-    mindmap_markdown = run_mindmap(subtitle_text, info.title, trace_id)
-    notes_text = ""
-    for event in run_notes(subtitle_text, info.title, canonical_url, trace_id):
-        if event.type == "notes_text":
-            notes_text += event.data.get("text", "")
+    # 思维导图/笔记/问答输入相同且互不依赖，三线程并行（各自内部已隔离失败）
+    job_store.update_job(job["task_id"], message="正在生成笔记/思维导图/问答", progress=97)
 
-    qa_pairs = []
-    for event in run_qanda(subtitle_text, info.title, trace_id):
-        if event.type == "qa_pairs":
-            qa_pairs = event.data
+    def _collect_mindmap() -> str:
+        return run_mindmap(subtitle_text, info.title, trace_id)
+
+    def _collect_notes() -> str:
+        notes = ""
+        for event in run_notes(subtitle_text, info.title, canonical_url, trace_id):
+            if event.type == "notes_text":
+                notes += event.data.get("text", "")
+        return notes
+
+    def _collect_qanda() -> list:
+        pairs = []
+        for event in run_qanda(subtitle_text, info.title, trace_id):
+            if event.type == "qa_pairs":
+                pairs = event.data
+        return pairs
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        future_mindmap = pool.submit(_collect_mindmap)
+        future_notes = pool.submit(_collect_notes)
+        future_qanda = pool.submit(_collect_qanda)
+        mindmap_markdown = future_mindmap.result()
+        notes_text = future_notes.result()
+        qa_pairs = future_qanda.result()
 
     result = {
         "result": result_data,
@@ -190,8 +223,8 @@ def _generate_and_persist(
         info=info,
         fingerprint=fingerprint,
         subtitle_text=subtitle_text,
-        subtitle_source="whisper",
-        subtitle_language=language,
+        subtitle_source=subtitle_source,
+        subtitle_language=subtitle_language,
         part_info=_build_part_info(canonical_url, info=info),
         platform=platform,
         result=result,
@@ -202,6 +235,27 @@ def _generate_and_persist(
     )
     run_tags(canonical_url, info.title, result_data.get("summary", ""), trace_id)
     return result
+
+
+def _generate_and_persist(
+    job,
+    info,
+    canonical_url,
+    subtitle_text,
+    fingerprint,
+    raw_text,
+    language,
+) -> dict:
+    return generate_full_from_subtitle(
+        job,
+        info=info,
+        canonical_url=canonical_url,
+        subtitle_text=subtitle_text,
+        subtitle_source="whisper",
+        subtitle_language=language,
+        fingerprint=fingerprint,
+        raw_text=raw_text,
+    )
 
 
 def _owner_where(identity: dict) -> tuple[str, list]:

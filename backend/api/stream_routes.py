@@ -7,6 +7,7 @@ import asyncio
 import json
 import re
 import uuid
+import threading
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -56,6 +57,7 @@ from core.auth import check_usage_limit, log_usage, add_user_history
 from core.cache import _url_hash
 
 router = APIRouter()
+SSE_HEARTBEAT_SECONDS = 10
 
 
 # ──── SSE 工具 ────
@@ -68,27 +70,45 @@ async def _sse_generator(sync_gen):
     """将同步 PipelineEvent generator 转为 SSE 字节流。"""
     loop = asyncio.get_event_loop()
     queue = asyncio.Queue()
+    stopped = threading.Event()
+
+    def _put(payload):
+        if not stopped.is_set() and not loop.is_closed():
+            loop.call_soon_threadsafe(queue.put_nowait, payload)
 
     def _run():
         try:
             for event in sync_gen:
+                if stopped.is_set():
+                    break
                 if isinstance(event, PipelineEvent):
                     payload = {"type": event.type, "data": event.data}
                 else:
                     # 兼容旧 tuple 格式
                     payload = {"type": event[0], "data": event[1]}
-                loop.call_soon_threadsafe(queue.put_nowait, payload)
+                _put(payload)
         except Exception as e:
-            loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "data": {"message": str(e)}})
-        loop.call_soon_threadsafe(queue.put_nowait, None)
+            logger.exception("SSE pipeline failed")
+            _put({"type": "error", "data": {"message": str(e)}})
+        finally:
+            if hasattr(sync_gen, "close"):
+                sync_gen.close()
+            _put(None)
 
     loop.run_in_executor(None, _run)
 
-    while True:
-        payload = await queue.get()
-        if payload is None:
-            break
-        yield _to_sse(payload)
+    try:
+        while True:
+            try:
+                payload = await asyncio.wait_for(queue.get(), timeout=SSE_HEARTBEAT_SECONDS)
+            except asyncio.TimeoutError:
+                yield b": heartbeat\n\n"
+                continue
+            if payload is None:
+                break
+            yield _to_sse(payload)
+    finally:
+        stopped.set()
 
 
 def _sse_headers():
@@ -331,7 +351,8 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
             whisper_est = estimate_transcribe_time(info.duration)
 
         subtitle_text, sub_source, sub_lang = await fetch_subtitle(
-            canonical_url, info, req.lang, fingerprint=fp, trace_id=trace_id
+            canonical_url, info, req.lang, fingerprint=fp, trace_id=trace_id,
+            refresh=bool(getattr(req, "force", False)),
         )
 
         # Whisper 字幕 AI 校正
@@ -373,9 +394,12 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
             validate_summary_result(result_data)
 
             # 2. 思维导图
+            yield PipelineEvent("progress", {"stage": "mindmap_generating", "message": "正在生成思维导图..."})
             mindmap_md = run_mindmap(subtitle_for_rest, info.title, trace_id)
             if mindmap_md:
                 yield PipelineEvent("mindmap", {"markdown": mindmap_md})
+            else:
+                yield PipelineEvent("warn", {"message": "思维导图生成失败或超时，继续生成学习笔记；可稍后单独重试思维导图"})
 
             # 3. 学习笔记
             notes_text = ""
@@ -575,7 +599,7 @@ async def _handle_partial(req, cached: dict, identity: dict, url: str, trace_id:
         fp = cached_info.get("fingerprint")
     else:
         try:
-            info = downloader.parse_info(url)
+            info = await asyncio.to_thread(downloader.parse_info, url)
             cache_url = canonical_video_url(url, info)
             info.webpage_url = cache_url
             fp = video_fingerprint(info.extractor, info.id) if info.extractor and info.id else None

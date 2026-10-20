@@ -20,6 +20,8 @@ def validate_summary_result(result: Any) -> dict:
     summary = result.get("summary")
     if not isinstance(summary, str) or not summary.strip():
         raise InvalidGenerationResult("AI summary result is empty")
+    if summary.strip().startswith("AI 未能生成有效的总结内容"):
+        raise InvalidGenerationResult("AI summary result is empty")
     if result.get("is_partial") is True:
         raise InvalidGenerationResult("AI summary did not reach a complete result")
     _encode_json(result, "AI summary result")

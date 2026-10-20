@@ -19,12 +19,43 @@ function streamingResponse(readResult) {
     ok: true,
     body: { getReader: () => ({
       read: () => reads++ === 0 ? readResult.promise : Promise.resolve({ done: true }),
+      cancel: vi.fn().mockResolvedValue(),
+      releaseLock: vi.fn(),
     }) },
   }
 }
 
 describe('useSummary stream lifecycle', () => {
   beforeEach(() => vi.unstubAllGlobals())
+
+  it.each(['done', 'error'])('stops reading on the %s event without waiting for EOF', async type => {
+    const reader = {
+      read: vi.fn().mockResolvedValue({ done: false, value: new TextEncoder().encode(
+        `data: ${JSON.stringify({ type, data: { message: '生成失败' } })}\n\n`,
+      ) }),
+      cancel: vi.fn().mockResolvedValue(),
+      releaseLock: vi.fn(),
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, body: { getReader: () => reader } }))
+    const { useSummary } = await import('./useSummary.js')
+    const summary = useSummary()
+    await summary.summarizeVideoStream('https://example.com/video')
+    expect(reader.read).toHaveBeenCalledTimes(1)
+    expect(reader.cancel).toHaveBeenCalled()
+    expect(summary.isSummarizing.value).toBe(false)
+    expect(summary.summarizeError.value).toBe(type === 'error' ? '生成失败' : '')
+  })
+
+  it('reports EOF without a terminal event as an interrupted generation', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamingResponse({
+      promise: Promise.resolve({ done: true }),
+    })))
+    const { useSummary } = await import('./useSummary.js')
+    const summary = useSummary()
+    await summary.summarizeVideoStream('https://example.com/video')
+    expect(summary.summarizeError.value).toContain('中断')
+    expect(summary.isSummarizing.value).toBe(false)
+  })
 
   it('aborts the active stream when summary state is reset', async () => {
     const read = deferred()

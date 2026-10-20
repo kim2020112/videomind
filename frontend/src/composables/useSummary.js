@@ -68,6 +68,7 @@ export function useSummary() {
     }
     const requestId = ++activeRequestId
     const controller = new AbortController()
+    let reader = null
     abortController = controller
 
     isSummarizing.value = true
@@ -113,13 +114,18 @@ export function useSummary() {
         throw new Error(err.detail || 'AI 总结失败')
       }
 
-      const reader = response.body.getReader()
+      reader = response.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
 
       while (true) {
         const { done, value } = await reader.read()
-        if (done) break
+        if (done) {
+          if (requestId === activeRequestId && !summarizeError.value) {
+            summarizeError.value = '生成连接已中断，请重试'
+          }
+          break
+        }
         buffer += decoder.decode(value, { stream: true })
 
         const lines = buffer.split('\n')
@@ -188,7 +194,10 @@ export function useSummary() {
                 break
               case 'error':
                 summarizeError.value = event.data.message
-                break
+                return
+              case 'done':
+                generationStage.value = 'done'
+                return
             }
           } catch (e) {
             // 跳过解析失败的事件
@@ -200,6 +209,10 @@ export function useSummary() {
         summarizeError.value = e.message || 'AI 总结失败'
       }
     } finally {
+      if (reader) {
+        await reader.cancel().catch(() => {})
+        reader.releaseLock?.()
+      }
       if (requestId === activeRequestId) {
         isSummarizing.value = false
         regeneratingMode.value = ''

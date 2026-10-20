@@ -6,7 +6,7 @@ import re
 import sqlite3
 import time
 from datetime import datetime, timezone, timedelta
-from config import DB_PATH
+from config import AI_CACHE_KEEP, DB_PATH
 from database import get_db as _get_db
 from core.logging_config import get_logger
 
@@ -186,16 +186,18 @@ def _compute_notes_chars(result_json: str) -> int:
 
 
 def _cleanup_old_cache(conn):
-    """保留最新的 50 个视频的缓存，删除超出的旧记录。
+    """保留最新的 AI_CACHE_KEEP 个视频的缓存，删除超出的旧记录。
     按 fingerprint（视频唯一标识，如 bilibili:BVxxx）去重计数：
     - 一个多P视频（如 185P）算 1 个视频，所有分P都保留
-    - 无 fingerprint 的记录按单条计数，保留最新的 50 条
+    - 无 fingerprint 的记录按单条计数，保留最新的 AI_CACHE_KEEP 条
     """
+    keep = int(AI_CACHE_KEEP)
     # 1. 收集需删除的 URL（在删除前收集，用于级联清理）
     old_urls = []
-    # 有 fingerprint: 找出不在 top 50 的视频
+    # 有 fingerprint: 找出不在 top keep 的视频
     kept_fps = conn.execute(
-        "SELECT DISTINCT fingerprint FROM ai_cache WHERE fingerprint != '' ORDER BY updated_at DESC LIMIT 50"
+        "SELECT DISTINCT fingerprint FROM ai_cache WHERE fingerprint != '' ORDER BY updated_at DESC LIMIT ?",
+        (keep,),
     ).fetchall()
     if kept_fps:
         placeholders = ','.join('?' for _ in kept_fps)
@@ -208,18 +210,20 @@ def _cleanup_old_cache(conn):
             f"DELETE FROM ai_cache WHERE fingerprint != '' AND fingerprint NOT IN ({placeholders})",
             [r[0] for r in kept_fps],
         )
-    # 无 fingerprint: 保留最新的 50 条
+    # 无 fingerprint: 保留最新的 keep 条
     old = conn.execute(
         "SELECT url FROM ai_cache WHERE (fingerprint = '' OR fingerprint IS NULL) "
         "AND url_hash NOT IN ("
-        "SELECT url_hash FROM ai_cache WHERE fingerprint = '' OR fingerprint IS NULL ORDER BY updated_at DESC LIMIT 50"
-        ")"
+        "SELECT url_hash FROM ai_cache WHERE fingerprint = '' OR fingerprint IS NULL ORDER BY updated_at DESC LIMIT ?"
+        ")",
+        (keep,),
     ).fetchall()
     old_urls.extend(old)
     conn.execute(
         "DELETE FROM ai_cache WHERE (fingerprint = '' OR fingerprint IS NULL) AND url_hash NOT IN ("
-        "SELECT url_hash FROM ai_cache WHERE fingerprint = '' OR fingerprint IS NULL ORDER BY updated_at DESC LIMIT 50"
-        ")"
+        "SELECT url_hash FROM ai_cache WHERE fingerprint = '' OR fingerprint IS NULL ORDER BY updated_at DESC LIMIT ?"
+        ")",
+        (keep,),
     )
     # 统一数据库内复用当前事务，避免持有写锁时再打开写连接。
     if old_urls:

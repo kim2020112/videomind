@@ -12,11 +12,13 @@ AI_API_FORMAT = os.getenv("AI_API_FORMAT", "anthropic").strip().lower()
 AI_API_KEY = os.getenv("AI_API_KEY", os.getenv("DEEPSEEK_API_KEY", ""))
 AI_BASE_URL = os.getenv("AI_BASE_URL", os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/anthropic"))
 AI_MODEL = os.getenv("AI_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
+AI_REQUEST_TIMEOUT = max(1.0, float(os.getenv("AI_REQUEST_TIMEOUT", "90")))
+AI_STREAM_TIMEOUT = max(1.0, float(os.getenv("AI_STREAM_TIMEOUT", "300")))
 
 # Prompt 版本（全局默认 + 按模块独立，修改某模块版本只失效该模块缓存）
 PROMPT_VERSION = int(os.getenv("PROMPT_VERSION", "1"))
-SUMMARY_PROMPT_VERSION = int(os.getenv("SUMMARY_PROMPT_VERSION", "2"))
-NOTES_PROMPT_VERSION = int(os.getenv("NOTES_PROMPT_VERSION", str(PROMPT_VERSION)))
+SUMMARY_PROMPT_VERSION = int(os.getenv("SUMMARY_PROMPT_VERSION", "3"))
+NOTES_PROMPT_VERSION = int(os.getenv("NOTES_PROMPT_VERSION", "3"))
 MINDMAP_PROMPT_VERSION = int(os.getenv("MINDMAP_PROMPT_VERSION", str(PROMPT_VERSION)))
 QANDA_PROMPT_VERSION = int(os.getenv("QANDA_PROMPT_VERSION", str(PROMPT_VERSION)))
 
@@ -63,6 +65,8 @@ REGISTRATION_ENABLED = os.getenv("REGISTRATION_ENABLED", "true").lower() == "tru
 GUEST_SECRET = os.getenv("GUEST_SECRET", DEFAULT_GUEST_SECRET)
 GUEST_DAILY_LIMIT = int(os.getenv("GUEST_DAILY_LIMIT", "3"))
 USER_DAILY_LIMIT = int(os.getenv("USER_DAILY_LIMIT", "20"))
+# AI 缓存保留条数：批量生成场景需要比单视频更高的上限，否则成果会被淘汰吞掉
+AI_CACHE_KEEP = max(10, int(os.getenv("AI_CACHE_KEEP", "500")))
 
 # 目录创建移至 FastAPI lifespan（main.py），避免导入时副作用
 
