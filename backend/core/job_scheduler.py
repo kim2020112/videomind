@@ -1,4 +1,9 @@
-"""Async scheduler that runs one Whisper subprocess at a time."""
+"""Async scheduler that runs one background job at a time.
+
+默认按 whisper 子进程执行；通过 handlers 可为其他 job_type 注册进程内处理器
+（如博主批量条目 batch_item）。全局单槽：同一时刻只有一个 PROCESSING 任务，
+因此处理器内禁止再 create_job 排队，否则会死锁。
+"""
 
 import asyncio
 import inspect
@@ -16,6 +21,18 @@ from core.logging_config import get_logger
 logger = get_logger(__name__)
 
 
+class JobCancelled(Exception):
+    """任务被请求取消。"""
+
+
+class WorkerFailed(Exception):
+    """worker 子进程失败。"""
+
+
+class WorkerInterrupted(Exception):
+    """服务停机导致 worker 中断，不记为失败。"""
+
+
 class JobScheduler:
     def __init__(
         self,
@@ -27,6 +44,7 @@ class JobScheduler:
         terminate_timeout: float = 5.0,
         on_completed: Callable | None = None,
         on_terminal: Callable | None = None,
+        handlers: dict[str, Callable] | None = None,
     ):
         self.work_dir = Path(work_dir or (TEMP_DIR / "background_jobs"))
         self.command_factory = command_factory or self._default_command
@@ -35,6 +53,7 @@ class JobScheduler:
         self.terminate_timeout = terminate_timeout
         self.on_completed = on_completed
         self.on_terminal = on_terminal
+        self.handlers = handlers or {}
         self._loop_task: asyncio.Task | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._current_job_id: str | None = None
@@ -72,32 +91,106 @@ class JobScheduler:
         return True
 
     async def _run_job(self, job: dict) -> None:
+        job_type = job.get("job_type") or "whisper"
+        handler = self.handlers.get(job_type)
+        if handler is not None:
+            await self._run_in_process(job, handler)
+            return
+
         job_id = job["task_id"]
         result_path = self.work_dir / f"{job_id}.json"
         result_path.parent.mkdir(parents=True, exist_ok=True)
         result_path.unlink(missing_ok=True)
         command = self.command_factory(job, result_path)
-        result = None
-        last_error = ""
         self._current_job_id = job_id
 
         try:
-            self._process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
+            result = await self.run_worker_subprocess(job_id, command)
+            job_store.update_job(job_id, status="generating", progress=96, message="正在整理结果")
+            if job_store.is_cancel_requested(job_id):
+                await self._finish_cancelled(job_id)
+                return
+            if self.on_completed:
+                completed = self.on_completed(job_store.get_job(job_id), result)
+                if inspect.isawaitable(completed):
+                    completed = await completed
+                if completed is not None:
+                    result = completed
+            if job_store.is_cancel_requested(job_id):
+                await self._finish_cancelled(job_id)
+                return
+            job_store.update_job(
+                job_id,
+                status="done",
+                progress=100,
+                message="处理完成",
+                result=result,
+                error=None,
             )
+            await self._notify_terminal(job_id, "done")
+        except JobCancelled:
+            await self._finish_cancelled(job_id)
+        except WorkerInterrupted:
+            return
+        except WorkerFailed as exc:
+            await self._finish_failed(job_id, str(exc))
+        except Exception as exc:
+            if not self._stopping:
+                logger.exception("Background job %s failed", job_id)
+                await self._finish_failed(job_id, str(exc))
+        finally:
+            self._process = None
+            self._current_job_id = None
+            result_path.unlink(missing_ok=True)
+
+    async def _run_in_process(self, job: dict, handler: Callable) -> None:
+        """进程内 handler 路径：handler(job, scheduler) 返回 result dict。"""
+        job_id = job["task_id"]
+        self._current_job_id = job_id
+        try:
+            if job_store.is_cancel_requested(job_id):
+                raise JobCancelled()
+            result = handler(job, self)
+            if inspect.isawaitable(result):
+                result = await result
+            if job_store.is_cancel_requested(job_id):
+                raise JobCancelled()
+            job_store.update_job(
+                job_id,
+                status="done",
+                progress=100,
+                message="处理完成",
+                result=result,
+                error=None,
+            )
+            await self._notify_terminal(job_id, "done")
+        except JobCancelled:
+            await self._finish_cancelled(job_id)
+        except Exception as exc:
+            if not self._stopping:
+                logger.exception("Background job %s failed", job_id)
+                await self._finish_failed(job_id, str(exc))
+        finally:
+            self._current_job_id = None
+
+    async def run_worker_subprocess(self, job_id: str, command: list[str]) -> dict:
+        """运行 JSON Lines worker 子进程并返回 result。
+
+        取消/停机/失败分别抛 JobCancelled/WorkerInterrupted/WorkerFailed，
+        状态写入由调用方统一处理。
+        """
+        self._process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        result = None
+        last_error = ""
+        try:
             while True:
                 if job_store.is_cancel_requested(job_id):
                     await self._terminate_process(self._process)
-                    job_store.update_job(
-                        job_id,
-                        status="cancelled",
-                        progress=0,
-                        message="任务已取消",
-                    )
-                    await self._notify_terminal(job_id, "cancelled")
-                    return
+                    raise JobCancelled()
 
                 try:
                     line = await asyncio.wait_for(
@@ -134,51 +227,20 @@ class JobScheduler:
 
             return_code = await self._process.wait()
             if self._stopping:
-                return
+                raise WorkerInterrupted()
             if return_code != 0 or result is None:
-                error = last_error or f"Whisper worker exited with code {return_code}"
-                job_store.update_job(job_id, status="failed", error=error, message="处理失败")
-                await self._notify_terminal(job_id, "failed", error)
-                return
-
-            job_store.update_job(job_id, status="generating", progress=96, message="正在整理结果")
-            if job_store.is_cancel_requested(job_id):
-                job_store.update_job(job_id, status="cancelled", progress=0, message="任务已取消")
-                await self._notify_terminal(job_id, "cancelled")
-                return
-            if self.on_completed:
-                completed = self.on_completed(job_store.get_job(job_id), result)
-                if inspect.isawaitable(completed):
-                    completed = await completed
-                if completed is not None:
-                    result = completed
-            if job_store.is_cancel_requested(job_id):
-                job_store.update_job(job_id, status="cancelled", progress=0, message="任务已取消")
-                await self._notify_terminal(job_id, "cancelled")
-                return
-            job_store.update_job(
-                job_id,
-                status="done",
-                progress=100,
-                message="处理完成",
-                result=result,
-                error=None,
-            )
-            await self._notify_terminal(job_id, "done")
-        except Exception as exc:
-            if not self._stopping:
-                logger.exception("Background job %s failed", job_id)
-                job_store.update_job(
-                    job_id,
-                    status="failed",
-                    error=str(exc),
-                    message="处理失败",
-                )
-                await self._notify_terminal(job_id, "failed", str(exc))
+                raise WorkerFailed(last_error or f"Whisper worker exited with code {return_code}")
+            return result
         finally:
             self._process = None
-            self._current_job_id = None
-            result_path.unlink(missing_ok=True)
+
+    async def _finish_cancelled(self, job_id: str) -> None:
+        job_store.update_job(job_id, status="cancelled", progress=0, message="任务已取消")
+        await self._notify_terminal(job_id, "cancelled")
+
+    async def _finish_failed(self, job_id: str, error: str) -> None:
+        job_store.update_job(job_id, status="failed", error=error, message="处理失败")
+        await self._notify_terminal(job_id, "failed", error)
 
     async def _terminate_process(self, process: asyncio.subprocess.Process) -> None:
         if process.returncode is not None:

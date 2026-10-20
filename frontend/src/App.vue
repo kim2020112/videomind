@@ -25,6 +25,8 @@ import { formatBytes } from './utils/resultFormatters.js'
 import { canMarkPartCached, markPartCached } from './utils/multipartState.js'
 
 const HistoryPage = defineAsyncComponent(() => import('./components/HistoryPage.vue'))
+const BloggersPage = defineAsyncComponent(() => import('./components/BloggersPage.vue'))
+const BloggerDetailPage = defineAsyncComponent(() => import('./components/BloggerDetailPage.vue'))
 const VideoPlayerModal = defineAsyncComponent(() => import('./components/VideoPlayerModal.vue'))
 const LoginModal = defineAsyncComponent(() => import('./components/LoginModal.vue'))
 
@@ -91,7 +93,14 @@ const showFullDescription = ref(false)
 const isHomeRoute = computed(() => route.name === 'home')
 const isHistoryRoute = computed(() => route.name === 'history')
 const isWorkspaceRoute = computed(() => route.name === 'workspace' || route.name === 'history-detail')
-const currentView = computed(() => isHistoryRoute.value ? 'history' : 'home')
+const isBloggersRoute = computed(() => route.name === 'bloggers')
+const isBloggerDetailRoute = computed(() => route.name === 'blogger-detail')
+const isBloggerArea = computed(() => isBloggersRoute.value || isBloggerDetailRoute.value)
+const currentView = computed(() => {
+  if (isHistoryRoute.value) return 'history'
+  if (isBloggerArea.value) return 'bloggers'
+  return 'home'
+})
 const canStart = computed(() => isLoggedIn.value || capabilities.value.guest_access_enabled)
 const requiresLogin = computed(() => capabilitiesLoaded.value && !canStart.value)
 const serviceChecking = computed(() => !capabilitiesLoaded.value)
@@ -132,6 +141,30 @@ async function goHome() {
 
 async function toggleHistory() {
   await router.push({ name: isHistoryRoute.value ? 'home' : 'history' })
+}
+
+async function toggleBloggers() {
+  await router.push({ name: isBloggerArea.value ? 'home' : 'bloggers' })
+}
+
+async function openBloggerDetail(item) {
+  await router.push({ name: 'blogger-detail', params: { id: String(item.id) } })
+}
+
+async function openWorkspaceFromBlogger(payload) {
+  url.value = payload.url
+  await router.push({
+    name: 'workspace',
+    query: { url: payload.url, tab: 'summary', part: '1' },
+  })
+  await handleParse({ syncRoute: false })
+  if (videoInfo.value && !error.value) {
+    handleSummarize(false)
+  }
+}
+
+function backToBloggers() {
+  router.push({ name: 'bloggers' })
 }
 
 function requestLogin({ continueParse = false } = {}) {
@@ -588,6 +621,7 @@ function handleUrlChange(value) {
       :currentView="currentView"
       :activeTaskCount="activeTaskCount"
       @toggle-history="toggleHistory"
+      @toggle-bloggers="toggleBloggers"
       @logout="handleLogout"
       @go-home="goHome"
       @request-login="requestLogin()"
@@ -596,8 +630,17 @@ function handleUrlChange(value) {
     <!-- 学习历史页 -->
     <HistoryPage v-if="isHistoryRoute" :activeTasks="activeTasks" @select-item="handleSelectHistory" />
 
+    <!-- 博主页 -->
+    <BloggersPage v-if="isBloggersRoute" @open-blogger="openBloggerDetail" />
+    <BloggerDetailPage
+      v-if="isBloggerDetailRoute"
+      :activeTasks="activeTasks"
+      @back="backToBloggers"
+      @open-workspace="openWorkspaceFromBlogger"
+    />
+
     <!-- 首页内容 -->
-    <template v-if="!isHistoryRoute">
+    <template v-if="!isHistoryRoute && !isBloggerArea">
 
     <HeroSection
       v-model:url="url"

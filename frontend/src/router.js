@@ -11,6 +11,8 @@ export const routes = [
   { path: '/workspace', name: 'workspace', component: RouteSurface },
   { path: '/history', name: 'history', component: RouteSurface },
   { path: '/history/:urlHash', name: 'history-detail', component: RouteSurface },
+  { path: '/bloggers', name: 'bloggers', component: RouteSurface },
+  { path: '/bloggers/:id', name: 'blogger-detail', component: RouteSurface },
 ]
 
 export function scrollBehavior(_to, _from, savedPosition) {

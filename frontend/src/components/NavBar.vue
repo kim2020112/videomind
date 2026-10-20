@@ -8,9 +8,9 @@ defineProps({
   currentView: { type: String, default: 'home' },
   activeTaskCount: { type: Number, default: 0 }
 })
-const emit = defineEmits(['toggle-history', 'go-home', 'logout', 'request-login'])
+const emit = defineEmits(['toggle-history', 'toggle-bloggers', 'go-home', 'logout', 'request-login'])
 
-const { user, usage, isLoggedIn, isAdmin, displayName, logout } = useAuth()
+const { user, usage, isLoggedIn, isAdmin, displayName, logout, guestSig } = useAuth()
 const showSettings = ref(false)
 const showMobileMenu = ref(false)
 
@@ -60,6 +60,18 @@ function handleMobileAction(action) {
           模型配置
         </button>
 
+        <button
+          v-if="isLoggedIn || guestSig"
+          class="btn-history"
+          :class="{ active: currentView === 'bloggers' }"
+          @click="$emit('toggle-bloggers')"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-history-icon">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-1.13a4 4 0 10-4-4 4 4 0 004 4zm6-4a4 4 0 11-4-4"/>
+          </svg>
+          博主
+        </button>
+
         <button v-if="isLoggedIn" class="btn-history" :class="{ active: currentView === 'history' }" @click="$emit('toggle-history')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-history-icon">
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
@@ -106,6 +118,12 @@ function handleMobileAction(action) {
               <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
             </svg>
             <span>模型配置</span>
+          </button>
+          <button class="mobile-menu-item" @click="handleMobileAction(() => $emit('toggle-bloggers'))">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-1.13a4 4 0 10-4-4 4 4 0 004 4zm6-4a4 4 0 11-4-4"/>
+            </svg>
+            <span>博主</span>
           </button>
           <button class="mobile-menu-item" @click="handleMobileAction(() => $emit('toggle-history'))">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

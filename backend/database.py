@@ -155,6 +155,126 @@ CREATE INDEX IF NOT EXISTS idx_background_jobs_guest_created
     ON background_jobs(guest_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_background_jobs_url_hash
     ON background_jobs(url_hash);
+
+CREATE TABLE IF NOT EXISTS blogger_creators (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL DEFAULT 'bilibili',
+    uid TEXT NOT NULL,
+    name TEXT DEFAULT '',
+    avatar TEXT DEFAULT '',
+    follower_count INTEGER DEFAULT 0,
+    video_count INTEGER DEFAULT 0,
+    last_synced_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_blogger_creators_platform_uid
+    ON blogger_creators(platform, uid);
+
+CREATE TABLE IF NOT EXISTS blogger_subs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    creator_id INTEGER NOT NULL REFERENCES blogger_creators(id) ON DELETE CASCADE,
+    user_id INTEGER,
+    guest_id TEXT,
+    alias TEXT DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_blogger_subs_user_creator
+    ON blogger_subs(user_id, creator_id) WHERE user_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_blogger_subs_guest_creator
+    ON blogger_subs(guest_id, creator_id) WHERE guest_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS blogger_videos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    creator_id INTEGER NOT NULL REFERENCES blogger_creators(id) ON DELETE CASCADE,
+    bvid TEXT NOT NULL,
+    title TEXT DEFAULT '',
+    cover TEXT DEFAULT '',
+    description TEXT DEFAULT '',
+    published_at INTEGER DEFAULT 0,
+    duration INTEGER DEFAULT 0,
+    page_count INTEGER DEFAULT 1,
+    last_seen_at TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_blogger_videos_bvid ON blogger_videos(bvid);
+CREATE INDEX IF NOT EXISTS idx_blogger_videos_creator_pub
+    ON blogger_videos(creator_id, published_at DESC);
+
+CREATE TABLE IF NOT EXISTS blogger_video_pages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id INTEGER NOT NULL REFERENCES blogger_videos(id) ON DELETE CASCADE,
+    cid INTEGER NOT NULL,
+    page INTEGER NOT NULL,
+    part_title TEXT DEFAULT '',
+    duration INTEGER DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_blogger_video_pages_video_cid
+    ON blogger_video_pages(video_id, cid);
+
+CREATE TABLE IF NOT EXISTS blogger_syncs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    creator_id INTEGER NOT NULL REFERENCES blogger_creators(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'queued',
+    page INTEGER NOT NULL DEFAULT 0,
+    found INTEGER NOT NULL DEFAULT 0,
+    expected INTEGER,
+    error TEXT,
+    error_code TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT,
+    finished_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_blogger_syncs_creator_created
+    ON blogger_syncs(creator_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS blogger_batches (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER,
+    guest_id TEXT,
+    creator_id INTEGER NOT NULL REFERENCES blogger_creators(id),
+    mode TEXT NOT NULL DEFAULT 'full',
+    selection_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'queued',
+    total INTEGER NOT NULL DEFAULT 0,
+    done_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_blogger_batches_owner_created
+    ON blogger_batches(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_blogger_batches_guest_created
+    ON blogger_batches(guest_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS blogger_batch_items (
+    id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL REFERENCES blogger_batches(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    url_hash TEXT NOT NULL,
+    bvid TEXT DEFAULT '',
+    cid INTEGER,
+    part_index INTEGER DEFAULT 1,
+    title TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'queued',
+    phase TEXT DEFAULT '',
+    job_id TEXT,
+    error TEXT,
+    error_code TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_blogger_batch_items_batch_url
+    ON blogger_batch_items(batch_id, url_hash);
+CREATE INDEX IF NOT EXISTS idx_blogger_batch_items_batch_position
+    ON blogger_batch_items(batch_id, position);
+CREATE INDEX IF NOT EXISTS idx_blogger_batch_items_job
+    ON blogger_batch_items(job_id);
 """
 
 
@@ -208,6 +328,19 @@ def init_db():
         # 迁移：添加 user_history.status 列
         try:
             conn.execute("ALTER TABLE user_history ADD COLUMN status TEXT DEFAULT 'done'")
+        except sqlite3.OperationalError:
+            pass
+        # 迁移：blogger_syncs 增量/取消/新增计数
+        try:
+            conn.execute("ALTER TABLE blogger_syncs ADD COLUMN mode TEXT NOT NULL DEFAULT 'incremental'")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE blogger_syncs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE blogger_syncs ADD COLUMN added INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass
         _invalidate_legacy_auth_sessions(conn)

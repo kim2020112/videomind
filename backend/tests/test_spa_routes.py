@@ -67,7 +67,7 @@ class SpaRouteTests(unittest.IsolatedAsyncioTestCase):
         cls.temp_dir.cleanup()
 
     async def test_vue_router_deep_links_return_the_spa_entrypoint(self):
-        for path in ("/workspace", "/history", "/history/example"):
+        for path in ("/workspace", "/history", "/history/example", "/bloggers", "/bloggers/example"):
             with self.subTest(path=path):
                 status, body = await asgi_get(self.app, path)
 

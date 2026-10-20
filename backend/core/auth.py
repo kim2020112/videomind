@@ -145,6 +145,23 @@ def check_usage_limit(user_id: int = None, guest_id: str = None, guest_sig: str 
     return (False, 0, 0)
 
 
+def check_usage_limit_by_id(user_id: int = None, guest_id: str = None) -> tuple[bool, int, int]:
+    """按身份 ID 检查额度（后台任务路径：签名已在 API 边界验过，不再验 guest_sig）。"""
+    if user_id:
+        user = get_user_by_id(user_id)
+        if not user:
+            return (False, 0, 0)
+        if user["role"] == "admin":
+            return (True, 0, 999999)
+        limit = user["daily_limit"] or USER_DAILY_LIMIT
+        used = get_today_usage(user_id=user_id)
+        return (used < limit, used, limit)
+    if guest_id:
+        used = get_today_usage(guest_id=guest_id)
+        return (used < GUEST_DAILY_LIMIT, used, GUEST_DAILY_LIMIT)
+    return (False, 0, 0)
+
+
 def log_usage(user_id: int = None, guest_id: str = None, action: str = "summary", status: str = "SUCCESS"):
     with get_db() as conn:
         conn.execute(

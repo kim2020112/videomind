@@ -5,7 +5,7 @@ from starlette.staticfiles import StaticFiles
 class SpaStaticFiles(StaticFiles):
     """Serve the Vue entrypoint for the application's history-mode routes."""
 
-    _SPA_ROUTE_ROOTS = {"workspace", "history"}
+    _SPA_ROUTE_ROOTS = {"workspace", "history", "bloggers"}
 
     async def get_response(self, path, scope):
         try:

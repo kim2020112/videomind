@@ -9,7 +9,18 @@ describe('router', () => {
       '/workspace',
       '/history',
       '/history/:urlHash',
+      '/bloggers',
+      '/bloggers/:id',
     ])
+  })
+
+  it('resolves a blogger detail route with id param', async () => {
+    const router = createAppRouter(createMemoryHistory())
+    await router.push('/bloggers/sub-123')
+    await router.isReady()
+
+    expect(router.currentRoute.value.name).toBe('blogger-detail')
+    expect(router.currentRoute.value.params.id).toBe('sub-123')
   })
 
   it('restores a history detail URL with query state', async () => {

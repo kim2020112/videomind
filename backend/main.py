@@ -24,6 +24,7 @@ from api.knowledge_routes import router as knowledge_router
 from api.auth_routes import router as auth_router
 from api.admin_routes import router as admin_router
 from api.health_routes import router as health_router
+from api.blogger_routes import router as blogger_router
 
 
 @asynccontextmanager
@@ -34,6 +35,11 @@ async def lifespan(app: FastAPI):
     from core.auth import ensure_admin, cleanup_expired_sessions
     ensure_admin()
     cleanup_expired_sessions()
+    # 2.1 恢复悬挂的博主目录同步与批量批次
+    from core.blogger.sync import recover_stale_syncs
+    from core.blogger.batches import reconcile_batches
+    recover_stale_syncs()
+    reconcile_batches()
     # 3. 日志
     logger.info(f"下载目录: {DOWNLOAD_DIR}")
     logger.info(f"临时目录: {TEMP_DIR}")
@@ -44,11 +50,18 @@ async def lifespan(app: FastAPI):
         status = "enabled" if avail else "disabled"
         logger.info(f"Feature {feat}: {status}")
     from core.background_pipeline import finalize_whisper_job, update_terminal_history
+    from core.blogger.batch_runner import run_batch_item
+    from core.blogger.batches import resolve_item_for_job
     from core.job_scheduler import JobScheduler
+
+    async def _on_terminal(job, status, error=None):
+        await update_terminal_history(job, status, error)
+        resolve_item_for_job(job, status, error)
 
     scheduler = JobScheduler(
         on_completed=finalize_whisper_job,
-        on_terminal=update_terminal_history,
+        on_terminal=_on_terminal,
+        handlers={"batch_item": run_batch_item},
     )
     app.state.job_scheduler = scheduler
     await scheduler.start()
@@ -88,6 +101,7 @@ app.include_router(knowledge_router)
 app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(health_router)
+app.include_router(blogger_router)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIST = os.path.join(os.path.dirname(BASE_DIR), "frontend", "dist")
