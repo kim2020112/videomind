@@ -22,12 +22,12 @@
 
 需要保留独立前端端口时，可由 Vite Preview 在 `:5173` 提供同一份 `frontend/dist`，并代理 `/api`、`/ws` 到 FastAPI。长期运行环境不使用 Vite 开发服务器，避免 HMR WebSocket 重连触发整页刷新。
 
-`backend/main.py` 在 `frontend/dist` 存在时直接挂载静态前端。Vue Router 的工作区与历史深链回退到 `index.html`，缺失的静态资源仍返回 404。后台任务调度器和 API 运行在同一 FastAPI 进程中，因此生产环境使用单个 Uvicorn worker。
+`backend/main.py` 在 `frontend/dist` 存在时直接挂载静态前端。Vue Router 的工作区、历史和博主深链回退到 `index.html`，缺失的静态资源仍返回 404。后台任务调度器和 API 运行在同一 FastAPI 进程中，因此生产环境使用单个 Uvicorn worker。
 
 ## 前端结构
 
 - `frontend/src/App.vue`：认证、能力、路由和工作台状态编排。
-- `frontend/src/router.js`：`/`、`/workspace`、`/history` 和历史详情路由。
+- `frontend/src/router.js`：`/`、`/workspace`、`/history`、历史详情、`/bloggers` 和博主详情路由。
 - `frontend/src/components/`：页面区域、Dialog、下载、视频和 AI 结果组件。
 - `frontend/src/composables/`：认证、能力、总结、下载、后台任务和管理员连接状态。
 
@@ -92,6 +92,14 @@ SQLite 保存用户、会话、视频、字幕、AI 输出、学习历史、缓�
 
 完整生成、部分 AI 产物和后台 Whisper 完成统一使用 generate-then-swap。摘要完整非空、结果可 JSON 序列化后，才在单个 `BEGIN IMMEDIATE` 事务中替换视频信息、字幕、Whisper、AI 缓存、当前身份历史和 `SUCCESS` 用量。空结果、异常或任一 SQL 失败都会保留旧共享缓存且不消耗额度。
 
+## 博主与批量生成
+
+博主功能拆分「共享目录」与「按身份订阅」：`blogger_creators`/`blogger_videos`/`blogger_video_pages` 全局共享（同一 UP 主只同步一次），`blogger_subs`/`blogger_batches`/`blogger_batch_items` 按 `user_id`/`guest_id` 归属，互不可见。退订只删订阅行，最后一个订阅者离开且无活跃任务时才清理共享目录。
+
+目录同步（`core/blogger/sync.py`）运行在独立线程池，不进重任务队列；2 秒全局限速 + 同页签名防死循环 + 空目录与预期不一致拒绝误判。B 站空间搜索接口（`/x/space/wbi/arc/search`）需要登录 Cookie（`BILIBILI_COOKIE` 含 SESSDATA）；未配置时明确报 `login` 而非静默失败。错误分类：`network` 自动重试 2 次（30s/120s）、`rate_limit` 重试 1 次（15 分钟）、`login` 暂停并提示配置 Cookie。
+
+批量条目是 `job_type="batch_item"` 的后台任务，每条目一 job：复用 `job_store` 的单槽队列、取消与崩溃恢复；`JobScheduler` 按 `job_type` 分发到进程内处理器 `core/blogger/batch_runner.py`——缓存命中直接复用，bvid+cid 已知时跳过 yt-dlp 解析快取 CC 字幕，无字幕才跑 Whisper 子进程（处理器内禁止再 create_job，单槽会死锁），AI 生成走 `background_pipeline.generate_full_from_subtitle`（与 Whisper 后完成共用），`generate-then-swap` 原子提交。AI 前有额度闸门，超限条目跳过并暂停整批。`AI_CACHE_KEEP`（默认 500）控制 AI 缓存保留条数，避免批量成果被 50 条旧上限淘汰。
+
 ## 后台任务
 
 任务状态流：
@@ -102,7 +110,7 @@ queued -> downloading -> transcribing -> generating -> done
 ```
 
 - `core/job_store.py`：任务持久化、原子领取、查询与取消。
-- `core/job_scheduler.py`：一次运行一个 Whisper 子进程。
+- `core/job_scheduler.py`：一次运行一个后台任务；`whisper` 走子进程，其他 `job_type` 由进程内 handler 执行。
 - `workers/whisper_worker.py`：通过 JSON Lines 报告进度和结果。
 - `core/background_pipeline.py`：生成后台结果，成功后交给原子提交层保存。
 - `core/generation_commit.py`：验证生成结果并原子替换缓存、字幕、历史和用量。
@@ -116,7 +124,7 @@ queued -> downloading -> transcribing -> generating -> done
 FastAPI lifespan 依次完成：
 
 1. 创建运行目录并初始化 SQLite 表。
-2. 创建可选管理员并清理过期 Session。
+2. 创建可选管理员并清理过期 Session，恢复悬挂的博主目录同步并调和批量批次。
 3. 检测 AI、Whisper、FFmpeg 与访客能力。
 4. 恢复并启动后台任务调度器。
 

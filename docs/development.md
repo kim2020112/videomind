@@ -22,9 +22,11 @@ cp backend/.env.example backend/.env
 | `AI_API_FORMAT` | `.env` 兜底协议，取值为 `anthropic` 或 `openai` |
 | `AI_API_KEY`、`AI_BASE_URL`、`AI_MODEL` | `.env` 兜底连接的凭据、地址和模型；有管理员运行时连接时由其覆盖 |
 | `FEATURE_AI`、`FEATURE_WHISPER` | 显式关闭可选功能 |
-| `BILIBILI_COOKIE` | 可选的 B 站字幕 Cookie；留空时使用匿名设备 Cookie |
+| `BILIBILI_COOKIE` | B 站 Cookie；字幕留空时用匿名设备 Cookie，博主目录同步必须含 SESSDATA 的登录 Cookie |
 | `ADMIN_USERNAME`、`ADMIN_PASSWORD` | 可选管理员初始化 |
 | `GUEST_SECRET` | 访客签名；保持默认值时访客入口关闭 |
+| `AI_CACHE_KEEP` | AI 缓存保留条数（按视频计，默认 500）；批量生成依赖较大值避免成果被淘汰 |
+| `AI_REQUEST_TIMEOUT`、`AI_STREAM_TIMEOUT` | AI 请求超时与流式空闲超时（秒） |
 | `DB_PATH`、`AI_CONFIG_PATH` | 持久化数据位置 |
 | `TEMP_DIR`、`DOWNLOAD_DIR`、`WHISPER_MODELS_DIR` | 运行目录 |
 | `CORS_ORIGINS` | 逗号分隔的精确跨域来源；留空仅同源，`*` 不生效 |
@@ -73,6 +75,7 @@ systemd、反向代理和备份策略属于部署环境，不在仓库内维护�
 | 视频解析与下载 | `backend/core/downloader.py`、`backend/api/routes.py` |
 | 字幕与转录 | `backend/core/pipeline/subtitle.py`、`backend/core/summarizer.py`、`backend/workers/` |
 | AI 流水线与运行时连接 | `backend/api/stream_routes.py`、`backend/core/pipeline/`、`backend/core/ai_config.py`、`backend/core/text_client.py`、`backend/prompts/` |
+| 博主订阅与批量生成 | `backend/api/blogger_routes.py`、`backend/core/blogger/`、`frontend/src/components/BloggersPage.vue`、`frontend/src/components/BloggerDetailPage.vue` |
 | 缓存与历史 | `backend/core/cache.py`、`backend/api/knowledge_routes.py` |
 | 前端路由与编排 | `frontend/src/router.js`、`frontend/src/App.vue` |
 | 前端组件与状态 | `frontend/src/components/`、`frontend/src/composables/` |
@@ -114,6 +117,7 @@ curl http://127.0.0.1:8000/api/capabilities
 - `/api/health/ready` 返回 503：检查 SQLite、临时目录和下载目录权限。
 - 前端 5173 无法访问：检查 Vite Preview 进程、构建产物、监听地址和防火墙。
 - B 站字幕临时不可用：查看后端日志中的平台错误码；不要直接改成“无字幕”回退。
+- 博主目录同步报 `login`：`BILIBILI_COOKIE` 未配置或缺少 SESSDATA；同步接口为登录态接口，不能用匿名设备 Cookie。
 - B 站无 CC 后转录出现 `HTTP 412`：确认解析结果含 `audio_stream_url`，并确认 worker 命令收到 `--audio-url`。旧 `video_info_cache` 没有该字段时应先刷新解析，不要直接让 worker 再次抓取视频页面。
 - 分 P 状态异常：同时检查精确 URL、`url_hash`、当前身份历史状态和非空 AI 缓存；不要把共享视频指纹当成分 P 唯一键。
 - 分 P 转录 ETA 异常：确认 canonical URL 保留 `p` 参数，并从 `parts` 中读取所选分 P 时长，而不是全集总时长。

@@ -13,6 +13,7 @@ VideoMind 是一个将在线视频转化为结构化学习资料的 Web 应用�
 - 基于字幕生成摘要、笔记、思维导图和关键问答。
 - 管理员可在运行时配置多个 OpenAI 或 Anthropic 兼容连接，发现或手动维护模型目录、测试模型并切换业务主力模型。
 - 保存标签、收藏、历史状态，并按当前身份标记已经学习且有 AI 缓存的分 P。
+- 订阅 B 站 UP 主（每个用户/访客各自独立的博主列表），浏览投稿目录并批量生成学习资料；批量条目复用缓存、原子提交与额度管控。目录同步需在 `backend/.env` 配置 `BILIBILI_COOKIE`（含 SESSDATA）。
 - 登录会话按浏览器窗口隔离，管理员和普通用户可以在不同窗口同时使用。
 - Whisper 任务持久化到 SQLite，由后端调度短生命周期子进程执行。
 - 已知平台的旧 HTTP 缩略图地址会在代理入口升级为 HTTPS。
@@ -62,7 +63,7 @@ npm --prefix frontend run dev -- --host 0.0.0.0
 
 ## 生产运行
 
-构建前端后，FastAPI 会自动挂载 `frontend/dist`，并为 `/workspace`、`/history` 和历史详情深链提供 SPA 回退：
+构建前端后，FastAPI 会自动挂载 `frontend/dist`，并为 `/workspace`、`/history`、历史详情和 `/bloggers` 深链提供 SPA 回退：
 
 ```bash
 npm --prefix frontend ci
