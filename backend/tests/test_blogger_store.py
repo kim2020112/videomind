@@ -154,6 +154,17 @@ class BloggerStoreTests(unittest.TestCase):
         self.assertEqual([11, 22], [row["cid"] for row in rows])
         self.assertEqual(2, store.get_video(video_id)["page_count"])
 
+    def test_delete_video_by_bvid_removes_video_and_pages(self):
+        creator_id = store.upsert_creator("bilibili", "100")
+        video_id = store.upsert_video(creator_id, {"bvid": "BV1lesson", "title": "课堂推广"})
+        store.replace_pages(video_id, [
+            {"cid": 11, "page": 1, "part_title": "试看", "duration": 60},
+        ])
+        self.assertTrue(store.delete_video_by_bvid("BV1lesson"))
+        self.assertIsNone(store.get_video_by_bvid("BV1lesson"))
+        self.assertFalse(store.has_pages(video_id))
+        self.assertFalse(store.delete_video_by_bvid("BV1lesson"))
+
     def test_recover_stale_syncs(self):
         creator_id = store.upsert_creator("bilibili", "100")
         sync_id = store.create_sync(creator_id, status="running")

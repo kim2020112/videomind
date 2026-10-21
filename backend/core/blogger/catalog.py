@@ -8,15 +8,14 @@ login / rate_limit / network / unavailable / api / invalid_input 分类，
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 import threading
 import time
-import uuid
 from urllib.parse import urlencode, urljoin, urlparse
 
 import httpx
 
+from core.bilibili import default_cookie
 from core.logging_config import get_logger
 
 logger = get_logger("blogger.catalog")
@@ -39,14 +38,6 @@ class CatalogError(ValueError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
-
-
-def default_cookie() -> str:
-    """与 core/summarizer.py 同源：优先 BILIBILI_COOKIE，缺省用匿名 buvid。"""
-    cookie = os.getenv("BILIBILI_COOKIE", "").strip()
-    if cookie:
-        return cookie
-    return f"buvid3={str(uuid.uuid4()).upper()}infoc; b_nut={int(time.time())}"
 
 
 def parse_creator_input(value: str) -> str:
@@ -107,6 +98,13 @@ def parse_length(value) -> int:
         return seconds
     except (ValueError, TypeError):
         return 0
+
+
+def is_lesson_entry(entry: dict) -> bool:
+    """B 站课堂付费课程的推广条目：非普通投稿，解析/下载均不可用。"""
+    if entry.get("is_lesson_video"):
+        return True
+    return "/cheese/" in (entry.get("jump_url") or "")
 
 
 class BilibiliCatalogClient:

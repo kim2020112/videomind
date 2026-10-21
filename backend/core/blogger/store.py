@@ -268,6 +268,19 @@ def get_video_by_bvid(bvid: str) -> dict | None:
         ).fetchone())
 
 
+def delete_video_by_bvid(bvid: str) -> bool:
+    """删除目录视频及其分P缓存（如误收的课堂推广条目）。"""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id FROM blogger_videos WHERE bvid = ?", (bvid,)
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute("DELETE FROM blogger_video_pages WHERE video_id = ?", (row["id"],))
+        conn.execute("DELETE FROM blogger_videos WHERE id = ?", (row["id"],))
+        return True
+
+
 def known_bvids(creator_id: int) -> set[str]:
     with get_db() as conn:
         rows = conn.execute(

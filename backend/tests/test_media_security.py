@@ -92,6 +92,7 @@ class MediaUrlValidationTests(unittest.TestCase):
         for url in (
             "https://hdslb.com/image.jpg",
             "https://i0.hdslb.com/image.jpg",
+            "https://archive.biliimg.com/bfs/archive/49db7b090795b5221119d08636901d62eef4475a.jpg",
             "https://rr1---sn.googlevideo.com/video.mp4",
         ):
             with self.subTest(url=url):
@@ -153,6 +154,10 @@ class MediaUrlValidationTests(unittest.TestCase):
         self.assertEqual(
             "https://www.bilibili.com/",
             routes._get_cdn_referer("https://i0.hdslb.com/image.jpg"),
+        )
+        self.assertEqual(
+            "https://www.bilibili.com/",
+            routes._get_cdn_referer("https://archive.biliimg.com/bfs/archive/x.jpg"),
         )
         self.assertIsNone(
             routes._get_cdn_referer("https://hdslb.com.evil.example/image.jpg")

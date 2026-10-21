@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 
 from core.ai_client import summarize, generate_notes, generate_mindmap, stream_summarize, stream_generate_notes, stream_chat, _chunk_summarize
+from core.bilibili import default_cookie
 from core.logging_config import get_logger
 
 
@@ -220,9 +221,7 @@ _BILIBILI_HEADERS = {
     ),
     'Accept': 'application/json, text/plain, */*',
 }
-_BILIBILI_COOKIE = os.getenv('BILIBILI_COOKIE', '').strip() or (
-    f"buvid3={str(uuid.uuid4()).upper()}infoc; b_nut={int(time.time())}"
-)
+_BILIBILI_COOKIE = default_cookie()
 _BILIBILI_HEADERS['Cookie'] = _BILIBILI_COOKIE
 
 

@@ -171,6 +171,33 @@ class BloggerSyncTests(unittest.TestCase):
         self.assertEqual("failed", record["status"])
         self.assertIn("重复", record["error"])
 
+    def test_skips_lesson_entries_and_purges_stale(self):
+        # 历史误收的课堂推广条目，同步后应被清理
+        store.upsert_video(self.creator_id, {"bvid": "BV1lesson0", "title": "课堂推广"})
+        lesson_flag = {
+            "bvid": "BV1lesson0", "title": "课堂推广", "pic": "", "description": "",
+            "created": 1700000000, "length": "00:00",
+            "is_lesson_video": 1,
+            "jump_url": "https://www.bilibili.com/cheese/play/ss475098271",
+        }
+        lesson_jump = {
+            "bvid": "BV1lesson1", "title": "另一个课堂条目", "pic": "", "description": "",
+            "created": 1700000001, "length": "00:00",
+            "jump_url": "https://www.bilibili.com/cheese/play/ss12345",
+        }
+        normal = _entries(0, 2)
+        FakeClient.pages = {1: ([lesson_flag, lesson_jump] + normal, 4)}
+        sync_id, retry = self._run()
+        self.assertIsNone(retry)
+        record = store.get_sync(sync_id)
+        self.assertEqual("complete", record["status"])
+        self.assertEqual(4, record["found"])
+        self.assertEqual(2, record["added"])
+        listed = store.list_videos(self.creator_id)
+        self.assertEqual(2, listed["total"])
+        bvids = {item["bvid"] for item in listed["items"]}
+        self.assertEqual({"BV100000", "BV100001"}, bvids)
+
     # ── 增量同步 ──
 
     def _seed_known(self, count: int, start: int = 0):

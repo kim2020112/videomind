@@ -20,6 +20,7 @@ from core.summarizer import (
     extract_bilibili_subtitle, extract_bilibili_subtitle_by_cid,
 )
 from core.cache import get_video_info_cache
+from core.bilibili import ydl_opts_for
 from core.logging_config import get_logger
 from core.video import canonical_video_url, is_bilibili_video
 
@@ -68,6 +69,7 @@ def _download_subtitle_content(url: str, lang: str, is_auto: bool) -> tuple[str,
         'subtitlesformat': 'srt/vtt/json3/best',
         'outtmpl': os.path.join(tmpdir, '%(id)s'),
     }
+    ydl_opts.update(ydl_opts_for(url))
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:

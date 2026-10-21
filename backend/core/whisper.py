@@ -12,6 +12,7 @@ import tempfile
 import shutil
 
 from config import WHISPER_MODEL, WHISPER_MODELS_DIR
+from core.bilibili import ydl_opts_for, ytdlp_error_message
 from core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -57,14 +58,7 @@ def _download_audio(url: str, *, audio_url: str | None = None) -> str:
         "no_warnings": True,
         "noplaylist": True,
     }
-    if audio_url and "bilibili.com" in url.lower():
-        ydl_opts["http_headers"] = {
-            "Referer": "https://www.bilibili.com/",
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"
-            ),
-        }
+    ydl_opts.update(ydl_opts_for(url, audio_url or ""))
 
     try:
         targets = [audio_url, url] if audio_url else [url]
@@ -84,7 +78,9 @@ def _download_audio(url: str, *, audio_url: str | None = None) -> str:
                     raise FileNotFoundError("音频下载后未找到输出文件")
             except Exception as exc:
                 last_error = exc
-        raise last_error or RuntimeError("音频下载失败")
+        if last_error is not None:
+            raise RuntimeError(ytdlp_error_message(last_error)) from last_error
+        raise RuntimeError("音频下载失败")
     except Exception:
         shutil.rmtree(tmpdir, ignore_errors=True)
         raise

@@ -17,6 +17,7 @@ from api.security import (
     require_media_identity,
     require_websocket_identity,
 )
+from core.bilibili import ydl_opts_for, ytdlp_error_message
 from api.media_security import (
     MEDIA_RESPONSE_SECURITY_HEADERS,
     fetch_thumbnail,
@@ -182,6 +183,7 @@ async def refresh_stream_url(url: str, request: Request):
         url = extract_url(url)
         ensure_public_http_url(url)
         ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True, 'noplaylist': True}
+        ydl_opts.update(ydl_opts_for(url))
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
         raw_formats = info.get('formats', [])
@@ -224,7 +226,7 @@ async def refresh_stream_url(url: str, request: Request):
             "stream_needs_audio": not combined and bool(audio),
         }
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"刷新失败: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"刷新失败: {ytdlp_error_message(e)}")
 
 
 @router.get("/api/video/stream")

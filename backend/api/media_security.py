@@ -16,6 +16,7 @@ from fastapi import HTTPException
 ALLOWED_MEDIA_DOMAINS = frozenset({
     "xhscdn.com",
     "hdslb.com",
+    "biliimg.com",
     "bilivideo.com",
     "bilibili.com",
     "douyinvod.com",
@@ -31,6 +32,7 @@ ALLOWED_MEDIA_DOMAINS = frozenset({
 CDN_REFERERS = {
     "xhscdn.com": "https://www.xiaohongshu.com/",
     "hdslb.com": "https://www.bilibili.com/",
+    "biliimg.com": "https://www.bilibili.com/",
     "bilivideo.com": "https://www.bilibili.com/",
     "bilibili.com": "https://www.bilibili.com/",
     "douyinvod.com": "https://www.douyin.com/",

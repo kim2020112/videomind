@@ -10,6 +10,7 @@ from asyncio import Queue
 
 from .models import VideoInfo, FormatOption, ProgressData, VideoPart, VideoChapter, SubtitleTrack
 from .video import selected_video_part_index, video_duration_for_url
+from .bilibili import ydl_opts_for, ytdlp_error_message
 
 # 下载清理策略
 _MAX_DOWNLOADS = 20       # 最多保留 20 个下载
@@ -270,6 +271,7 @@ class VideoDownloader:
             'noplaylist': True,
             'listsubtitles': True,
         }
+        ydl_opts.update(ydl_opts_for(url))
         last_err = None
         for attempt in range(3):
             try:
@@ -281,7 +283,7 @@ class VideoDownloader:
                 if attempt < 2:
                     time.sleep(2 * (2 ** attempt))
         else:
-            raise last_err
+            raise RuntimeError(ytdlp_error_message(last_err)) from last_err
 
         raw_formats = info.get('formats', [])
         formats = []
@@ -588,11 +590,15 @@ class VideoDownloader:
                 'fragment_retries': 3,
                 'concurrent_fragment_downloads': 4,
             }
+            ydl_opts.update(ydl_opts_for(part_url))
             if self.ffmpeg_location:
                 ydl_opts['ffmpeg_location'] = self.ffmpeg_location
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.extract_info(part_url, download=True)
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.extract_info(part_url, download=True)
+            except Exception as e:
+                raise RuntimeError(ytdlp_error_message(e)) from e
 
             candidates = [
                 f for f in _glob.glob(os.path.join(part_dir, '*'))
@@ -664,12 +670,16 @@ class VideoDownloader:
             'fragment_retries': 3,
             'concurrent_fragment_downloads': 4,
         }
+        ydl_opts.update(ydl_opts_for(url))
 
         if self.ffmpeg_location:
             ydl_opts['ffmpeg_location'] = self.ffmpeg_location
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.extract_info(url, download=True)
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.extract_info(url, download=True)
+        except Exception as e:
+            raise RuntimeError(ytdlp_error_message(e)) from e
 
         import glob as _glob
         _video_exts = {'.mp4', '.mkv', '.webm', '.flv', '.avi', '.m4v', '.mov'}

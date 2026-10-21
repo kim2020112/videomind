@@ -13,6 +13,7 @@ from core.blogger import store
 from core.blogger.catalog import (
     BilibiliCatalogClient,
     CatalogError,
+    is_lesson_entry,
     parse_length,
 )
 from core.logging_config import get_logger
@@ -159,6 +160,12 @@ def _run_sync(sync_id: int, creator_id: int, refresh_profile: bool) -> float | N
                 bvid = entry.get("bvid") or ""
                 if not bvid:
                     continue
+                found += 1
+                if is_lesson_entry(entry):
+                    # B 站课堂付费课程推广条目：非普通投稿，不入库并清理历史误收
+                    store.delete_video_by_bvid(bvid)
+                    known.discard(bvid)
+                    continue
                 is_new = bvid not in known
                 if is_new:
                     page_all_known = False
@@ -172,7 +179,6 @@ def _run_sync(sync_id: int, creator_id: int, refresh_profile: bool) -> float | N
                     "published_at": int(entry.get("created") or 0),
                     "duration": parse_length(entry.get("length")),
                 })
-                found += 1
 
             store.update_sync(sync_id, page=page, found=found, added=added)
             if not entries:
