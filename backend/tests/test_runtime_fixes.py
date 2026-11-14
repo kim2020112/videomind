@@ -159,7 +159,7 @@ class RuntimeFixTests(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.object(routes.downloader, "parse_info", side_effect=block))
             stack.enter_context(patch.object(routes, "save_video_info_cache"))
             stack.enter_context(patch.object(routes, "get_learned_part_indexes", return_value=set()))
-            stack.enter_context(patch.object(routes, "get_part_coverage", return_value={}))
+            stack.enter_context(patch.object(routes, "get_part_content", return_value={}))
             task = asyncio.create_task(routes.parse_video(ParseRequest(url=URL), object()))
             try:
                 for _ in range(50):

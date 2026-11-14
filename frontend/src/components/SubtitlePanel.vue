@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch } from 'vue'
 const props = defineProps({
   text: String, info: Object, title: String, busy: Boolean, error: String,
-  currentTime: Number, onFetch: Function, onSeek: Function,
+  currentTime: Number, onFetch: Function, onSeek: Function, onClear: Function, cleared: Boolean,
 })
 const expanded = ref(true)
 const copied = ref(false)
@@ -124,7 +124,7 @@ async function copy() {
     <div class="panel-heading">
       <div class="heading-copy">
         <h2>字幕与转录</h2>
-        <p>{{ text ? `${source} · ${language} · ${lines.length} 条` : '尚未获取视频字幕' }}</p>
+        <p>{{ text ? `${source} · ${language} · ${lines.length} 条` : cleared ? '字幕已清空，不会自动重新获取' : '尚未获取视频字幕' }}</p>
       </div>
       <div class="heading-actions">
         <button v-if="!text" type="button" :disabled="busy" @click="onFetch?.()">{{ busy ? '正在获取…' : '获取字幕' }}</button>
@@ -142,6 +142,7 @@ async function copy() {
           @mouseenter="showTooltip(action, $event)" @mouseleave="leaveTooltip"
           @focus="showTooltip(action, $event, true)" @blur="focusedTip = null"
           @click="action.id === 'copy' ? copy() : download(action.id)">{{ action.label }}</button>
+        <button v-if="onClear" type="button" class="clear-button" :disabled="busy" title="清空当前身份的字幕记录和有字幕标记，保留已整理资料；需要时可重新获取。" @click="onClear()">清空字幕</button>
         <span v-if="!timed">无完整时间信息，提供纯文本下载</span>
       </div>
       <span v-if="copied" class="sr-only" role="status">字幕全文已复制</span>
@@ -171,6 +172,8 @@ button { min-height: 36px; padding: .35rem .65rem; border: 1px solid var(--borde
 button:hover { border-color: var(--accent-blue); }
 button:disabled { opacity: .5; cursor: wait; }
 button:focus-visible, .subtitle-preview:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 3px; }
+.clear-button { color: var(--text-secondary); background: transparent; }
+.clear-button:hover { color: #fca5a5; border-color: #fca5a5; }
 .refresh-button { background: transparent; }
 .toggle-button { border-color: transparent; background: transparent; color: var(--accent-blue); }
 .subtitle-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: .6rem 0; font-size: .6875rem; color: var(--text-secondary); }

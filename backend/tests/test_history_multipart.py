@@ -346,12 +346,14 @@ print(json.dumps({'ai_urls': ai_urls, 'whisper_urls': whisper_urls}))
 import json
 from database import get_db
 from core.auth import add_user_history
-from core.cache import _url_hash, list_history_enhanced, save_video_info_cache
+from core.cache import _url_hash, list_history_enhanced, save_video_info_cache, save_cache
 from core.storage import initialize_storage
 
 initialize_storage()
 base_url = 'https://www.bilibili.com/video/BV1demo'
 part_two_url = f'{base_url}?p=2'
+for target in (base_url, part_two_url):
+    save_cache(target, result_json=json.dumps({'notes': 'Saved learning notes'}))
 save_video_info_cache(part_two_url, {
     'title': 'Demo course',
     'parts': [
@@ -492,6 +494,7 @@ class MultipartParseStateTests(unittest.IsolatedAsyncioTestCase):
             patch.object(routes.downloader, "parse_info", return_value=info),
             patch.object(routes, "save_video_info_cache"),
             patch.object(routes, "get_learned_part_indexes", return_value={2}),
+            patch.object(routes, "get_part_content", return_value={2: {"module_count": 1, "coverage": "partial"}}),
         ):
             parsed = await routes.parse_video(ParseRequest(url=url), object())
 
@@ -519,6 +522,7 @@ class MultipartParseStateTests(unittest.IsolatedAsyncioTestCase):
             patch.object(routes.downloader, "parse_info", return_value=info),
             patch.object(routes, "save_video_info_cache") as save_info,
             patch.object(routes, "get_learned_part_indexes", return_value={20}) as learned_parts,
+            patch.object(routes, "get_part_content", return_value={20: {"module_count": 1, "coverage": "partial"}}),
         ):
             parsed = await routes.parse_video(ParseRequest(url=short_url), object())
 

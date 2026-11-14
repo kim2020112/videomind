@@ -249,7 +249,7 @@ const {
   whisperEstimate,
   backgroundTask,
   fetchSubtitleText,
-  moduleStates, savedTargets = ref([]), workspaceCoverage, selectedTargets, descriptionSummary, submitting, visitError,
+  subtitleCleared = ref(false), clearSubtitle, moduleStates, savedTargets = ref([]), workspaceCoverage, selectedTargets, descriptionSummary, submitting, visitError,
   loadWorkspace, generateLearning, resumeTask, cancelTask,
   resetSummary,
 } = useLearning()
@@ -507,7 +507,7 @@ async function loadWorkspaceAndPrepareSubtitle() {
   const snapshot = await loadWorkspace(summarizeUrl.value)
   const taskStatus = snapshot?.task?.status
   const taskActive = ['queued', 'downloading', 'transcribing', 'generating', 'awaiting_confirmation'].includes(taskStatus)
-  if (!snapshot?.subtitle?.text && !taskActive && videoInfo.value) {
+  if (snapshot && !snapshot.subtitle_cleared && !snapshot.subtitle?.text && !taskActive && videoInfo.value) {
     handleFetchSubtitle()
   }
   return snapshot
@@ -702,7 +702,7 @@ function handleUrlChange(value) {
                     :streamingText="streamingText"
                     :subtitleText="subtitleText"
                     :isFetchingSubtitle="isFetchingSubtitle"
-                    :subtitleError="subtitleError" :visitError="visitError"
+                    :subtitleError="subtitleError" :visitError="visitError" :subtitleCleared="subtitleCleared" :onClearSubtitle="clearSubtitle"
                     :chatMessages="chatMessages"
                     :isChatStreaming="isChatStreaming"
                     :chatError="chatError"
@@ -826,7 +826,7 @@ function handleUrlChange(value) {
               :streamingText="streamingText"
               :subtitleText="subtitleText"
               :isFetchingSubtitle="isFetchingSubtitle"
-              :subtitleError="subtitleError" :visitError="visitError"
+              :subtitleError="subtitleError" :visitError="visitError" :subtitleCleared="subtitleCleared" :onClearSubtitle="clearSubtitle"
               :chatMessages="chatMessages"
               :isChatStreaming="isChatStreaming"
               :chatError="chatError"

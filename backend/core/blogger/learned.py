@@ -22,11 +22,25 @@ SUBTITLE_TEXT_SQL = """COALESCE((SELECT s.full_text FROM subtitles s JOIN videos
     WHERE sv.url=uh.url AND TRIM(s.full_text) != '' LIMIT 1),
     CASE WHEN COALESCE(ac.source,'') != 'description' THEN ac.subtitle_text END, '')"""
 
-SUBTITLE_SQL = """(
+SUBTITLE_SQL = """(COALESCE(uh.subtitle_cleared, 0) = 0 AND (
     EXISTS (SELECT 1 FROM subtitles s JOIN videos sv ON sv.id = s.video_id
             WHERE sv.url = uh.url AND TRIM(s.full_text) != '')
     OR (TRIM(COALESCE(ac.subtitle_text, '')) != '' AND COALESCE(ac.source, '') != 'description')
-)"""
+))"""
+
+
+def subtitle_condition(identity):
+    # Admin views may include other identities; a personal clear still takes
+    # precedence for the current viewer and for equivalent base/P1 URLs.
+    if identity.get("user_id") is not None:
+        owner, params = "sc.user_id = ?", [identity["user_id"]]
+    elif identity.get("guest_id"):
+        owner, params = "sc.guest_id = ?", [identity["guest_id"]]
+    else:
+        return SUBTITLE_SQL, []
+    return (f"({SUBTITLE_SQL} AND NOT EXISTS (SELECT 1 FROM user_history sc WHERE {owner} "
+            "AND sc.subtitle_cleared=1 AND vm_video_key(sc.url)=vm_video_key(uh.url) "
+            "AND vm_part_index(sc.url)=vm_part_index(uh.url)))", params)
 
 
 def _exists_sql(identity, condition):
@@ -45,13 +59,16 @@ def learned_exists_sql(identity, learned="all"):
 
 def subtitle_exists_sql(identity):
     _ensure_table()
-    return _exists_sql(identity, SUBTITLE_SQL)
+    condition, visibility_params = subtitle_condition(identity)
+    sql, params = _exists_sql(identity, condition)
+    return sql, [*params, *visibility_params]
 
 
 def content_by_bvid(identity, bvids):
     """Batch requested videos; filter by owner in SQL before decoding results."""
     _ensure_table()
     owner, params = _identity_clause(identity)
+    subtitle_sql, visibility_params = subtitle_condition(identity)
     wanted = list(set(bvids))
     result = {}
     with get_db() as conn:
@@ -60,10 +77,10 @@ def content_by_bvid(identity, bvids):
             batch = wanted[start:start + 200]
             placeholders = ','.join('?' for _ in batch)
             rows = conn.execute(
-                f"SELECT uh.url, ac.result_json, {SUBTITLE_SQL} AS has_subtitle, {SUBTITLE_TEXT_SQL} AS subtitle_text FROM user_history uh "
+                f"SELECT uh.url, ac.result_json, {subtitle_sql} AS has_subtitle, {SUBTITLE_TEXT_SQL} AS subtitle_text FROM user_history uh "
                 "LEFT JOIN ai_cache ac ON ac.url_hash=uh.url_hash "
                 f"WHERE {owner} AND vm_video_key(uh.url) IN ({placeholders})",
-                [*params, *(f"bilibili:{bvid}" for bvid in batch)],
+                [*visibility_params, *params, *(f"bilibili:{bvid}" for bvid in batch)],
             ).fetchall()
             for row in rows:
                 bvid = _extract_video_key(row["url"]).split(":", 1)[1]

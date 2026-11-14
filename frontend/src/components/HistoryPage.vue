@@ -542,7 +542,7 @@ fetchHistoryPage()
         <div v-else-if="!historyItems.length" class="history-empty">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="empty-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m5.231 13.481L15 17.25m-4.5-15H5.625c-.621 0-1.125.504-1.125 1.125v16.5c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9zm3.75 11.625a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z"/></svg>
           <span>暂无学习记录</span>
-          <span class="empty-hint">使用 AI 总结视频后，记录会自动保存到这里</span>
+          <span class="empty-hint">保存至少一种 AI 整理资料后，会出现在这里；仅获取字幕不计入学习历史</span>
         </div>
         <div v-else class="history-cards">
           <div v-for="item in historyItems" :key="item.id" class="history-page-card" :class="{ 'hp-card-selected': selectionMode && isItemSelected(item), 'hp-card-transcribing': isActiveItem(item) }">

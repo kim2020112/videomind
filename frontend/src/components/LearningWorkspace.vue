@@ -5,7 +5,7 @@ import SubtitlePanel from './SubtitlePanel.vue'
 defineOptions({ inheritAttrs: false })
 const props = defineProps({
   result: Object, loading: Boolean, error: String, subtitleText: String, subtitleInfo: Object,
-  subtitleError: String, visitError: String, videoTitle: String, backgroundTask: Object, currentVideoTime: Number,
+  subtitleError: String, visitError: String, subtitleCleared: Boolean, onClearSubtitle: Function, videoTitle: String, backgroundTask: Object, currentVideoTime: Number,
   moduleStates: { type: Object, default: () => ({}) },
   selectedTargets: { type: Array, default: () => ['summary', 'mindmap', 'notes', 'qa'] },
   submitting: Boolean, descriptionSummary: Object, descriptionAvailable: Boolean,
@@ -35,7 +35,7 @@ function status(target) {
   <div class="learning-workspace">
     <p v-if="visitError" role="status">{{ visitError }}</p>
     <SubtitlePanel :text="subtitleText" :info="subtitleInfo" :title="videoTitle" :busy="busy" :error="subtitleError"
-      :currentTime="currentVideoTime" :onFetch="refresh => onFetchSubtitle?.(Boolean(refresh))" :onSeek="onSeekVideo" />
+      :cleared="subtitleCleared" :onClear="onClearSubtitle" :currentTime="currentVideoTime" :onFetch="refresh => onFetchSubtitle?.(Boolean(refresh))" :onSeek="onSeekVideo" />
     <section v-if="taskVisible" class="learning-task" aria-label="后台任务" aria-live="polite">
       <strong>{{ backgroundTask.message || '等待后台处理' }}</strong>
       <template v-if="waiting">

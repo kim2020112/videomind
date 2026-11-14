@@ -56,6 +56,7 @@ def content_state(value=None, has_subtitle=False, subtitle_text=None):
 
 
 def register_content_functions(conn):
-    from core.cache import _extract_video_key
+    from core.cache import _extract_video_key, _extract_part_index
     conn.create_function("vm_video_key", 1, _extract_video_key, deterministic=True)
+    conn.create_function("vm_part_index", 1, _extract_part_index, deterministic=True)
     conn.create_function("vm_module_count", 1, lambda value: len(present_modules(value)), deterministic=True)

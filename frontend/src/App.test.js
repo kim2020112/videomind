@@ -195,6 +195,7 @@ describe('App workspace route restoration', () => {
   })
 
   it.each([
+    ['explicitly cleared subtitles', { subtitle: null, subtitle_cleared: true, task: null }],
     ['saved subtitles', { subtitle: { text: '已保存字幕' }, task: null }],
     ['an awaiting transcription task', { subtitle: null, task: { status: 'awaiting_confirmation' } }],
   ])('reuses %s without starting another fetch', async (_label, snapshot) => {

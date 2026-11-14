@@ -15,6 +15,7 @@ export function useLearning() {
   const isFetchingSubtitle = ref(false)
   const subtitleError = ref('')
   const visitError = ref('')
+  const subtitleCleared = ref(false)
   const subtitleInfo = ref(null)
   const mindmapMarkdown = ref('')
   const notesMarkdown = ref('')
@@ -41,9 +42,9 @@ export function useLearning() {
   let summaryDraft = ''
   let notesDraft = ''
 
-  async function request(path, body, signal) {
+  async function request(path, body, signal, method) {
     const response = await fetch(`/api${path}`, {
-      method: body ? 'POST' : 'GET', headers: { ...getAuthHeaders(), ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      method: method || (body ? 'POST' : 'GET'), headers: { ...getAuthHeaders(), ...(body ? { 'Content-Type': 'application/json' } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}), signal,
     })
     if (!response.ok) {
@@ -70,11 +71,12 @@ export function useLearning() {
     }
   }
 
-  async function readSnapshot(ticket = epoch) {
+  async function readSnapshot(ticket = epoch, incoming) {
     const url = currentUrl
-    const snapshot = await request(`/workspace?${new URLSearchParams({ url })}`)
+    const snapshot = incoming || await request(`/workspace?${new URLSearchParams({ url })}`)
     if (ticket !== epoch || url !== currentUrl) return null
     const sub = snapshot.subtitle
+    subtitleCleared.value = Boolean(snapshot.subtitle_cleared)
     subtitleText.value = sub?.text || ''
     subtitleInfo.value = sub
     subtitleSource.value = sub?.source || ''
@@ -207,6 +209,21 @@ export function useLearning() {
     }
   }
 
+  async function clearSubtitle() {
+    if (submitting.value || backgroundTask.value && (active.has(backgroundTask.value.status) || backgroundTask.value.status === 'awaiting_confirmation')) return
+    const ticket = epoch
+    submitting.value = true
+    subtitleError.value = ''
+    try {
+      const snapshot = await request('/workspace/subtitle', { url: currentUrl }, undefined, 'DELETE')
+      if (ticket !== epoch) return
+      await readSnapshot(ticket, snapshot)
+      visitError.value = ''
+    } catch (error) {
+      if (ticket === epoch) subtitleError.value = error.message
+    } finally { if (ticket === epoch) submitting.value = false }
+  }
+
   async function start(path, body) {
     if (submitting.value || backgroundTask.value && (active.has(backgroundTask.value.status) || backgroundTask.value.status === 'awaiting_confirmation')) return
     const ticket = epoch
@@ -287,6 +304,7 @@ export function useLearning() {
     currentUrl = ''
     for (const state of [summaryResult, subtitleInfo, notesSections, flashcards, backgroundTask, descriptionSummary]) state.value = null
     for (const state of [visitError, summarizeError, streamingText, subtitleText, subtitleError, mindmapMarkdown, notesMarkdown, generationStage, regeneratingMode, subtitleSource]) state.value = ''
+    subtitleCleared.value = false
     isSummarizing.value = false
     isFetchingSubtitle.value = false
     submitting.value = false
@@ -297,7 +315,7 @@ export function useLearning() {
   }
   onScopeDispose(() => { epoch += 1; subscription?.abort() })
   return { summaryResult, isSummarizing, summarizeError, streamingText, subtitleText, isFetchingSubtitle,
-    subtitleError, visitError, subtitleInfo, mindmapMarkdown, notesMarkdown, notesSections, flashcards, qaPairs,
+    subtitleError, visitError, subtitleCleared, clearSubtitle, subtitleInfo, mindmapMarkdown, notesMarkdown, notesSections, flashcards, qaPairs,
     generationStage, regeneratingMode, subtitleSource, isPartialSummary, whisperEstimate, backgroundTask,
     moduleStates, savedTargets, workspaceCoverage, selectedTargets, descriptionSummary, submitting, loadWorkspace, generateLearning,
     resumeTask, cancelTask, fetchSubtitleText, resetSummary }

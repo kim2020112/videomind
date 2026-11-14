@@ -22,7 +22,7 @@ from core.pipeline.qanda import run_qanda
 from core.features import is_whisper_available
 from core.video import canonical_video_url, video_duration_for_url
 from core.whisper import estimate_transcribe_time
-from core.content_state import decode_payload, content_state, present_modules
+from core.content_state import register_content_functions, decode_payload, content_state, present_modules
 
 TARGETS = ("summary", "mindmap", "notes", "qa")
 KEYS = {"summary": "result", "mindmap": "mindmap_markdown", "notes": "notes", "qa": "qa_pairs"}
@@ -357,9 +357,12 @@ def workspace(url, identity):
         task = job_store.get_job(row[0], user_id=identity.get("user_id"), guest_id=identity.get("guest_id")) if row else None
     # Old prompt versions stay readable. The metadata records only what is known.
     states = artifact_states(result, sub["full_text"] if sub else "")
+    cleared = subtitle_is_cleared(url, identity)
+    if cleared:
+        sub = None
     return {"url": url, "subtitle": {**sub, "text": sub["full_text"], "revision": revision(sub["full_text"])} if sub else None,
             "artifacts": result, "modules": states, "task": task,
-            "coverage": content_coverage(result, bool(sub))}
+            "coverage": content_coverage(result, bool(sub)), "subtitle_cleared": cleared}
 
 
 def record_visit(url, identity):
@@ -367,6 +370,7 @@ def record_visit(url, identity):
     sub = get_subtitle_from_db(url)
     cached = _get_cached_raw(url)
     has_subtitle = bool(sub and sub["full_text"].strip()) or bool(cached and cached.get("source") != "description" and (cached.get("subtitle_text") or "").strip())
+    has_subtitle = has_subtitle and not subtitle_is_cleared(url, identity)
     state = content_state(cached.get("result_json") if cached else None, has_subtitle)
     if not (has_subtitle or state["module_count"] or state["has_description_summary"]):
         return {"recorded": False, "content": state}
@@ -380,3 +384,47 @@ def record_visit(url, identity):
              info.get("extractor") or (cached or {}).get("platform", "")),
         )
     return {"recorded": True, "content": state}
+
+
+def _subtitle_owner_scope(conn, url, identity):
+    from core.cache import _extract_video_key, _extract_part_index
+    register_content_functions(conn)
+    owner, params = job_store._owner_clause(identity.get("user_id"), identity.get("guest_id"))
+    return (f"{owner} AND vm_video_key(url) = ? AND vm_part_index(url) = ?",
+            [*params, _extract_video_key(url), _extract_part_index(url)])
+
+
+def subtitle_is_cleared(url, identity):
+    with get_db() as conn:
+        where, params = _subtitle_owner_scope(conn, url, identity)
+        return bool(conn.execute(f"SELECT 1 FROM user_history WHERE {where} AND subtitle_cleared = 1 LIMIT 1", params).fetchone())
+
+
+def restore_subtitle(url, identity):
+    """Explicit acquisition makes the existing shared transcript visible again."""
+    with get_db() as conn:
+        where, params = _subtitle_owner_scope(conn, url, identity)
+        conn.execute(f"UPDATE user_history SET subtitle_cleared=0 WHERE {where}", params)
+
+
+def clear_subtitle(url, identity):
+    """Remove this identity's transcript association, preserving shared content."""
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        owner, owner_params = job_store._owner_clause(identity.get("user_id"), identity.get("guest_id"))
+        register_content_functions(conn)
+        from core.cache import _extract_video_key, _extract_part_index
+        active = conn.execute(
+            f"SELECT 1 FROM background_jobs WHERE {owner} AND vm_video_key(url)=? AND vm_part_index(url)=? "
+            "AND status IN ('queued','downloading','transcribing','generating','awaiting_confirmation') LIMIT 1",
+            [*owner_params, _extract_video_key(url), _extract_part_index(url)],
+        ).fetchone()
+        if active:
+            raise ValueError("当前视频任务尚未结束，请完成或取消后再清空字幕")
+        conn.execute(
+            "INSERT OR IGNORE INTO user_history(user_id,guest_id,url_hash,url,status,subtitle_cleared) VALUES (?,?,?,?,'done',1)",
+            (identity.get("user_id"), identity.get("guest_id"), _url_hash(url), url),
+        )
+        where, params = _subtitle_owner_scope(conn, url, identity)
+        conn.execute(f"UPDATE user_history SET subtitle_cleared=1 WHERE {where}", params)
+    return workspace(url, identity)

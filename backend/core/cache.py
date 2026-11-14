@@ -558,15 +558,17 @@ def get_part_content(url: str, user_id=None, guest_id=None, role="guest"):
     from core.blogger.learned import content_by_bvid
     key = _extract_video_key(url)
     if not key.startswith("bilibili:"):
-        from core.blogger.learned import _identity_clause, SUBTITLE_SQL, SUBTITLE_TEXT_SQL
+        from core.blogger.learned import _identity_clause, subtitle_condition, SUBTITLE_TEXT_SQL
         from core.content_state import content_state, register_content_functions
-        owner, params = _identity_clause({"user_id": user_id, "guest_id": guest_id, "role": role})
+        identity = {"user_id": user_id, "guest_id": guest_id, "role": role}
+        owner, params = _identity_clause(identity)
+        subtitle_sql, visibility_params = subtitle_condition(identity)
         with _get_db() as conn:
             register_content_functions(conn)
             rows = conn.execute(
-                f"SELECT uh.url, ac.result_json, {SUBTITLE_SQL} AS has_subtitle, {SUBTITLE_TEXT_SQL} AS subtitle_text "
+                f"SELECT uh.url, ac.result_json, {subtitle_sql} AS has_subtitle, {SUBTITLE_TEXT_SQL} AS subtitle_text "
                 f"FROM user_history uh LEFT JOIN ai_cache ac ON ac.url_hash=uh.url_hash WHERE {owner} AND vm_video_key(uh.url)=?",
-                [*params, key],
+                [*visibility_params, *params, key],
             ).fetchall()
         return {_extract_part_index(r["url"]): content_state(r["result_json"], r["has_subtitle"], r["subtitle_text"]) for r in rows}
     return content_by_bvid({"user_id": user_id, "guest_id": guest_id, "role": role}, [key.split(":", 1)[1]]).get(key.split(":", 1)[1], {})
@@ -675,7 +677,7 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
                           user_id: int = None, guest_id: str = None,
                           role: str = "guest") -> dict:
     """增强版历史列表：支持搜索、标签过滤、平台过滤，多P视频自动合并。按用户隔离。Admin 看全局。"""
-    conditions = []
+    conditions = ["vm_module_count(ac.result_json) > 0"]
     params = []
 
     is_admin = (role == "admin")
@@ -717,6 +719,8 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
     # 统一查询：从 user_history 出发，LEFT JOIN ai_cache
     # 用 CASE WHEN 处理空字符串（COALESCE 对 '' 不回退）
     with _get_db() as conn:
+        from core.content_state import register_content_functions
+        register_content_functions(conn)
         rows = conn.execute(f"""
             SELECT DISTINCT uh.url_hash,
                    CASE WHEN ac.url IS NOT NULL AND ac.url != '' THEN ac.url ELSE uh.url END as url,
@@ -834,15 +838,17 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
 
     # Saved content is independent of the last task's status.
     from core.content_state import content_state
-    from core.blogger.learned import SUBTITLE_SQL, SUBTITLE_TEXT_SQL
+    from core.blogger.learned import subtitle_condition, SUBTITLE_TEXT_SQL
+    subtitle_sql, visibility_params = subtitle_condition({"user_id": user_id, "guest_id": guest_id})
     states = {}
     if page_hashes:
         with _get_db() as conn:
+            register_content_functions(conn)
             for start in range(0, len(page_hashes), 50):
                 batch = page_hashes[start:start + 50]
                 rows = conn.execute(
-                    f"SELECT uh.url_hash, ac.result_json, {SUBTITLE_SQL} AS has_subtitle, {SUBTITLE_TEXT_SQL} AS subtitle_text "
-                    f"FROM user_history uh LEFT JOIN ai_cache ac ON ac.url_hash = uh.url_hash WHERE uh.url_hash IN ({','.join('?' for _ in batch)})", batch,
+                    f"SELECT uh.url_hash, ac.result_json, {subtitle_sql} AS has_subtitle, {SUBTITLE_TEXT_SQL} AS subtitle_text "
+                    f"FROM user_history uh LEFT JOIN ai_cache ac ON ac.url_hash = uh.url_hash WHERE uh.url_hash IN ({','.join('?' for _ in batch)})", [*visibility_params, *batch],
                 ).fetchall()
                 for row in rows:
                     states[row["url_hash"]] = content_state(row["result_json"], row["has_subtitle"], row["subtitle_text"])
@@ -918,17 +924,19 @@ def get_learning_stats(user_id: int = None, guest_id: str = None, role: str = "g
         }
 
     # 统一从 user_history 出发，LEFT JOIN ai_cache（和 list_history_enhanced 一致）
-    user_filter = ""
+    user_filter = "WHERE EXISTS (SELECT 1 FROM ai_cache hc WHERE hc.url_hash=uh.url_hash AND vm_module_count(hc.result_json)>0)"
     user_params = []
     if not is_admin:
         if user_id:
-            user_filter = "WHERE uh.user_id = ?"
+            user_filter += " AND uh.user_id = ?"
             user_params = [user_id]
         elif guest_id:
-            user_filter = "WHERE uh.guest_id = ?"
+            user_filter += " AND uh.guest_id = ?"
             user_params = [guest_id]
 
     with _conn() as conn:
+        from core.content_state import register_content_functions
+        register_content_functions(conn)
         total_videos = conn.execute(
             f"SELECT COUNT(*) FROM user_history uh {user_filter}", user_params
         ).fetchone()[0]

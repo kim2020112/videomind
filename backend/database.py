@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS user_history (
     platform TEXT DEFAULT '',
     is_favorite INTEGER DEFAULT 0,
     status TEXT DEFAULT 'done',
+    subtitle_cleared INTEGER NOT NULL DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_history_user ON user_history(user_id, created_at DESC);
@@ -343,6 +344,11 @@ def init_db():
         # 迁移：添加 user_history.status 列
         try:
             conn.execute("ALTER TABLE user_history ADD COLUMN status TEXT DEFAULT 'done'")
+        except sqlite3.OperationalError:
+            pass
+        # Per-identity subtitle removal leaves shared cache and AI artifacts intact.
+        try:
+            conn.execute("ALTER TABLE user_history ADD COLUMN subtitle_cleared INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass
         # 迁移：blogger_syncs 增量/取消/新增计数

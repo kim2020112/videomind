@@ -86,6 +86,7 @@ def submit(req, identity, targets):
     info = get_video_info_cache(url) or {}
     add_user_history(**owner(identity), url_hash=_url_hash(url), url=url,
                      title=info.get("title", ""), platform=info.get("extractor", ""), status=job["status"])
+    learning.restore_subtitle(url, identity)
     return job
 
 
@@ -99,6 +100,17 @@ async def get_workspace(request: Request, url: str = Query(...)):
 async def visit_workspace(req: VisitRequest, request: Request):
     identity = require_identity(request)
     return await run_in_threadpool(lambda: learning.record_visit(normalize(req.url), identity))
+
+
+@router.delete("/workspace/subtitle")
+async def clear_workspace_subtitle(req: VisitRequest, request: Request):
+    identity = require_identity(request)
+    def clear():
+        try:
+            return learning.clear_subtitle(normalize(req.url), identity)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+    return await run_in_threadpool(clear)
 
 
 @router.post("/subtitle/prepare")
@@ -179,7 +191,10 @@ async def task_events(task_id: str, request: Request, after: int = Query(0, ge=0
 async def subtitle_text(request: Request, url: str, lang: str = ""):
     identity = require_identity(request)
     url = normalize(url)
-    sub = learning.workspace(url, identity)["subtitle"]
+    snapshot = learning.workspace(url, identity)
+    sub = snapshot["subtitle"]
+    if snapshot["subtitle_cleared"]:
+        return {"text": "", "subtitle_cleared": True, "lang": lang, "name": ""}
     if sub:
         return {**sub, "lang": sub["language"], "name": sub["source"]}
     task = submit(PrepareRequest(url=url, lang=lang), identity, [])

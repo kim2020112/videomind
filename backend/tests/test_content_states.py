@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import config
 import database
-from core import cache, learning
+from core import cache, learning, job_store
 from core.auth import add_user_history
 from core.blogger import store, learned
 from core.content_state import content_state
@@ -27,7 +27,7 @@ class ContentStateTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         path = Path(self.tmp.name) / 'test.db'
-        for module in (database, config):
+        for module in (database, config, job_store):
             patcher = patch.object(module, 'DB_PATH', path)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -126,3 +126,105 @@ class ContentStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, state['module_count'])
         self.assertEqual(['notes'], state['stale_modules'])
         self.assertEqual([], content_state(payload, True, '旧字幕')['stale_modules'])
+
+    def test_subtitle_only_and_description_are_not_learning_history(self):
+        self.save(text='只有字幕')
+        self.save(URL+'?p=2', {'description_summary': {'summary': '简介摘要'}}, source='description')
+        for role in ('guest', 'admin'):
+            result = cache.list_history_enhanced(**A, role=role)
+            self.assertEqual(0, result['total'])
+        self.assertEqual(0, cache.get_learning_stats(**A)['total_videos'])
+        self.save(URL+'?p=3', {'notes': '已整理笔记'}, status='failed')
+        result = cache.list_history_enhanced(**A)
+        self.assertEqual(1, result['total'])
+        self.assertEqual(URL+'?p=3', result['items'][0]['url'])
+        self.assertEqual(1, result['items'][0]['content']['module_count'])
+        self.assertEqual(1, cache.get_learning_stats(**A)['total_videos'])
+        self.assertEqual(1, cache.list_history_enhanced(**A, limit=1)['total'])
+
+    async def test_clear_subtitle_is_personal_idempotent_and_survives_visits(self):
+        store.upsert_video(self.creator, {'bvid': 'BV1state', 'title': '视频'})
+        self.save(text='共享字幕')
+        learning.record_visit(URL, B)
+        with patch.object(learning_routes, 'require_identity', return_value=A), patch.object(learning_routes, 'normalize', return_value=URL):
+            for _ in range(2):
+                result = await learning_routes.clear_workspace_subtitle(learning_routes.VisitRequest(url=URL), Request())
+                self.assertTrue(result['subtitle_cleared'])
+                self.assertIsNone(result['subtitle'])
+        learning.record_visit(URL, A)
+        self.assertTrue(learning.workspace(URL, A)['subtitle_cleared'])
+        self.assertIsNone(learning.workspace(URL, A)['subtitle'])
+        self.assertEqual('共享字幕', learning.workspace(URL, B)['subtitle']['text'])
+        listing = await self.listing()
+        self.assertEqual([], listing['items'][0]['subtitle_parts'])
+        self.assertEqual(0, listing['subtitle_total'])
+        self.assertEqual(0, cache.list_history_enhanced(**A)['total'])
+        self.assertEqual(0, (await self.listing(has_subtitle='1'))['total'])
+        with database.get_db() as conn:
+            self.assertEqual('共享字幕', conn.execute('SELECT subtitle_text FROM ai_cache').fetchone()[0])
+            for table in ('background_jobs', 'usage_logs', 'learning_usage'):
+                self.assertEqual(0, conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0])
+
+    def test_clear_keeps_ai_artifacts_favorite_and_other_parts(self):
+        payload = {'notes': '保留笔记', '_artifacts': {'notes': {'subtitle_revision': learning.revision('字幕'), 'prompt_version': learning.prompt_version('notes')}}}
+        self.save(payload=payload, text='字幕')
+        self.save(URL+'?p=1', payload, '字幕')
+        self.save(URL+'?p=2', {'mindmap_markdown': '# P2'}, 'P2字幕')
+        with database.get_db() as conn:
+            conn.execute("UPDATE user_history SET is_favorite=1, status='failed'")
+        result = learning.clear_subtitle(URL+'?p=1', A)
+        self.assertIsNone(result['subtitle'])
+        self.assertEqual('保留笔记', result['artifacts']['notes'])
+        self.assertFalse(result['modules']['notes']['stale'])
+        self.assertTrue(learning.workspace(URL, A)['subtitle_cleared'])
+        self.assertFalse(learning.workspace(URL+'?p=2', A)['subtitle_cleared'])
+        content = learned.content_by_bvid(A, ['BV1state'])['BV1state']
+        self.assertFalse(content[1]['has_subtitle'])
+        self.assertTrue(content[2]['has_subtitle'])
+        self.assertEqual(1, content[1]['module_count'])
+        history = cache.list_history_enhanced(**A)
+        self.assertEqual(1, history['total'])
+        with database.get_db() as conn:
+            self.assertEqual(0, conn.execute("SELECT COUNT(*) FROM user_history WHERE is_favorite!=1 OR status!='failed'").fetchone()[0])
+
+    async def test_clear_rejects_an_active_task_without_changing_state(self):
+        self.save(text='字幕')
+        from core import job_store
+        task = job_store.create_job(cache._url_hash(URL), URL, **A, payload={'targets': []}, job_type='learning')
+        with patch.object(learning_routes, 'require_identity', return_value=A), patch.object(learning_routes, 'normalize', return_value=URL):
+            from fastapi import HTTPException
+            with self.assertRaises(HTTPException) as raised:
+                await learning_routes.clear_workspace_subtitle(learning_routes.VisitRequest(url=URL), Request())
+        self.assertEqual(409, raised.exception.status_code)
+        self.assertFalse(learning.workspace(URL, A)['subtitle_cleared'])
+        self.assertEqual('queued', job_store.get_job(task)['status'])
+
+    async def test_explicit_acquisition_restores_cleared_subtitle_without_charging(self):
+        self.save(text='共享字幕')
+        learning.clear_subtitle(URL, A)
+        with patch.object(learning_routes, 'require_identity', return_value=A), patch.object(learning_routes, 'normalize', return_value=URL):
+            response = await learning_routes.prepare_subtitle(learning_routes.PrepareRequest(url=URL), Request())
+        self.assertEqual(202, response.status_code)
+        self.assertFalse(learning.workspace(URL, A)['subtitle_cleared'])
+        self.assertEqual('共享字幕', learning.workspace(URL, A)['subtitle']['text'])
+        with database.get_db() as conn:
+            self.assertEqual(0, conn.execute('SELECT COUNT(*) FROM usage_logs').fetchone()[0])
+
+    def test_admin_clear_overrides_other_identities_in_global_catalog(self):
+        self.save(text='字幕')
+        learning.record_visit(URL, B)
+        learning.clear_subtitle(URL, A)
+        admin = {**A, 'role': 'admin'}
+        self.assertFalse(learned.content_by_bvid(admin, ['BV1state'])['BV1state'][1]['has_subtitle'])
+        self.assertTrue(learned.content_by_bvid(B, ['BV1state'])['BV1state'][1]['has_subtitle'])
+        store.upsert_video(self.creator, {'bvid': 'BV1state', 'title': '视频'})
+        self.assertEqual(0, learned.video_counts(admin, [self.creator])[self.creator]['subtitle_count'])
+
+    def test_migration_preserves_existing_rows_and_defaults(self):
+        self.save(text='旧字幕')
+        with database.get_db() as conn:
+            conn.execute('ALTER TABLE user_history DROP COLUMN subtitle_cleared')
+        database.init_db()
+        self.assertFalse(learning.subtitle_is_cleared(URL, A))
+        with database.get_db() as conn:
+            self.assertEqual(1, conn.execute('SELECT COUNT(*) FROM user_history').fetchone()[0])

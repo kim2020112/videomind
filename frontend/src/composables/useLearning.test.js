@@ -55,4 +55,29 @@ describe('durable learning workspace', () => {
     expect(fetch).toHaveBeenCalledTimes(1)
   })
 
+  it('clears subtitles using the returned snapshot while retaining AI materials', async () => {
+    const cleared = { ...snapshot(), subtitle: null, subtitle_cleared: true }
+    const fetch = vi.fn((url, options) => Promise.resolve(Response.json(options?.method === 'DELETE' ? cleared : url.endsWith('/visit') ? { recorded: true } : snapshot())))
+    vi.stubGlobal('fetch', fetch)
+    const state = setup()
+    await state.loadWorkspace('https://example.com/video')
+    await state.clearSubtitle()
+    const call = fetch.mock.calls.find(([, options]) => options.method === 'DELETE')
+    expect(call[0]).toBe('/api/workspace/subtitle')
+    expect(JSON.parse(call[1].body)).toEqual({ url: 'https://example.com/video' })
+    expect(state.subtitleText.value).toBe('')
+    expect(state.subtitleCleared.value).toBe(true)
+    expect(state.summaryResult.value.summary).toBe('已有摘要')
+    expect(state.submitting.value).toBe(false)
+  })
+  it('retains subtitles and reports an error if clearing is rejected', async () => {
+    vi.stubGlobal('fetch', vi.fn((url, options) => Promise.resolve(options?.method === 'DELETE' ? Response.json({ detail: '当前视频任务尚未结束' }, { status: 409 }) : Response.json(url.endsWith('/visit') ? { recorded: true } : snapshot()))))
+    const state = setup()
+    await state.loadWorkspace('https://example.com/video')
+    await state.clearSubtitle()
+    expect(state.subtitleText.value).toBe('字幕原文')
+    expect(state.subtitleCleared.value).toBe(false)
+    expect(state.subtitleError.value).toContain('任务尚未结束')
+  })
+
 })
