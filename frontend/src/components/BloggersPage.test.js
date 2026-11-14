@@ -47,7 +47,7 @@ describe('BloggersPage', () => {
     const wrapper = await mountPage(vi.fn().mockResolvedValue(okJson({ bloggers: [blogger()] })))
     expect(wrapper.text()).toContain('测试UP')
     expect(wrapper.text()).toContain('34 投稿')
-    expect(wrapper.text()).toContain('已学 5')
+    expect(wrapper.text()).toContain('已整理 5')
 
     await wrapper.find('.blogger-card').trigger('click')
     expect(wrapper.emitted('open-blogger')[0][0].id).toBe(7)

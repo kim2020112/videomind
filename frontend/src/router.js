@@ -15,7 +15,8 @@ export const routes = [
   { path: '/bloggers/:id', name: 'blogger-detail', component: RouteSurface },
 ]
 
-export function scrollBehavior(_to, _from, savedPosition) {
+export function scrollBehavior(to, _from, savedPosition) {
+  if (to.name === 'blogger-detail') return false
   return savedPosition || { left: 0, top: 0 }
 }
 

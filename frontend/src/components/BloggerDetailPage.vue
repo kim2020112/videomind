@@ -1,8 +1,11 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useBloggers } from '../composables/useBloggers.js'
 import { thumbnailSrc } from '../utils/thumbnail.js'
+import { useAuth } from '../composables/useAuth.js'
+import { bloggerContextKey, saveBloggerContext, readBloggerContext } from '../utils/bloggerNavigation.js'
+import ContentBadges from './ContentBadges.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 
 const props = defineProps({
@@ -13,7 +16,7 @@ const emit = defineEmits(['back', 'open-workspace'])
 const route = useRoute()
 const router = useRouter()
 const {
-  bloggers, videos, videosTotal, videosLearnedTotal, videosHasMore, videosLoading,
+  bloggers, videos, videosTotal, videosLearnedTotal, videosSubtitleTotal, videosMatchedTotal, videosHasMore, videosLoading,
   pages, pagesLoading, batches, currentBatch, batchLoading, pending, error,
   listBloggers, updateBlogger, syncBlogger, cancelSync, listVideos, listPages,
   createBatch, listBatches, getBatch, batchAction,
@@ -25,6 +28,13 @@ const blogger = computed(() => bloggers.value.find(item => String(item.id) === s
 
 const PAGE_SIZE = 20
 const searchQuery = ref('')
+const subtitleOnly = ref(false)
+const restoredVideoId = ref(null)
+const missingVideo = ref(null)
+const auth = useAuth()
+const identityKey = computed(() => auth.user?.value?.id ? `user:${auth.user.value.id}` : `guest:${auth.guestId?.value || 'local'}`)
+let disposed = false
+let loadEpoch = 0
 const learnedFilter = ref('all') // all | learned | unlearned
 const selectionMode = ref(false)
 const selected = ref(new Set())
@@ -34,6 +44,7 @@ const editingAlias = ref(false)
 const aliasValue = ref('')
 const toast = ref(null)
 let toastTimer = null
+let restoreTimer = null
 
 function showToast(message, type = 'error') {
   toast.value = { message, type }
@@ -71,7 +82,7 @@ function statusLabel(item) {
   switch (item.status) {
     case 'queued': return '排队中'
     case 'running': return phaseLabel(item.phase)
-    case 'done': return item.phase === 'reused' ? '已学过 · 复用缓存' : '完成'
+    case 'done': return item.phase === 'reused' ? '已整理过 · 复用缓存' : '完成'
     case 'failed': return item.error ? `失败 · ${item.error}` : '失败'
     case 'skipped': return item.error_code === 'usage_limit' ? '额度已用完 · 跳过' : '已跳过'
     case 'cancelled': return '已取消'
@@ -148,7 +159,10 @@ function taskForItem(item) {
 function syncRouteQuery() {
   const query = {}
   if (searchQuery.value) query.q = searchQuery.value
+  if (subtitleOnly.value) query.has_subtitle = '1'
   if (learnedFilter.value !== 'all') query.learned = learnedFilter.value
+  const page = Math.max(1, Math.ceil(videos.value.length / PAGE_SIZE))
+  if (page > 1) query.page = String(page)
   router.replace({ name: 'blogger-detail', params: { id: subId.value }, query })
 }
 
@@ -156,32 +170,47 @@ function currentQueryState() {
   return {
     q: typeof route.query.q === 'string' ? route.query.q : '',
     learned: ['learned', 'unlearned'].includes(route.query.learned) ? route.query.learned : 'all',
+    subtitle: route.query.has_subtitle === '1',
   }
 }
 
-async function refreshVideos({ append = false } = {}) {
-  await listVideos(subId.value, {
+async function refreshVideos({ append = false, anchorId } = {}) {
+  return await listVideos(subId.value, {
     q: searchQuery.value,
     learned: learnedFilter.value,
+    has_subtitle: subtitleOnly.value ? '1' : undefined,
+    anchor_id: anchorId,
     limit: PAGE_SIZE,
     offset: append ? videos.value.length : 0,
   }, { append })
 }
 
 async function handleSearch() {
-  syncRouteQuery()
+  expandedVideoId.value = null
+  missingVideo.value = null
   await refreshVideos()
+  syncRouteQuery()
 }
 
 async function setLearnedFilter(value) {
   if (learnedFilter.value === value) return
   learnedFilter.value = value
-  syncRouteQuery()
+  expandedVideoId.value = null
+  missingVideo.value = null
   await refreshVideos()
+  syncRouteQuery()
 }
 
 async function loadMore() {
   await refreshVideos({ append: true })
+  syncRouteQuery()
+}
+
+async function toggleSubtitleOnly() {
+  expandedVideoId.value = null
+  missingVideo.value = null
+  await refreshVideos()
+  syncRouteQuery()
 }
 
 // ── alias ──
@@ -266,7 +295,7 @@ async function handleCreateBatch() {
   const videoIds = [...selected.value]
   if (!videoIds.length) return showToast('请先勾选要处理的投稿')
   if (!await requestConfirmation(
-    `将为 ${videoIds.length} 个投稿批量生成学习资料（摘要/笔记/思维导图/问答），已学过的内容会自动跳过。继续？`,
+    `将为 ${videoIds.length} 个投稿批量生成学习资料（摘要/笔记/思维导图/问答），已整理过的内容会自动跳过。继续？`,
     '批量生成',
   )) return
   try {
@@ -309,8 +338,27 @@ async function openBatch(batch) {
   startBatchPolling(batch.id, () => getBatch(batch.id))
 }
 
-function openWorkspace(item) {
-  emit('open-workspace', { url: item.url, title: item.title })
+async function openWorkspace(item, videoId = item.id) {
+  const query = { ...route.query }
+  if (searchQuery.value) query.q = searchQuery.value
+  else delete query.q
+  if (subtitleOnly.value) query.has_subtitle = '1'
+  if (learnedFilter.value !== 'all') query.learned = learnedFilter.value
+  else delete query.learned
+  if (!subtitleOnly.value) delete query.has_subtitle
+  const page = Math.max(1, Math.ceil(videos.value.length / PAGE_SIZE))
+  if (page > 1) query.page = String(page)
+  else delete query.page
+  const returnTo = router.resolve({ name: 'blogger-detail', params: { id: subId.value }, query,
+    hash: `#video-${videoId}` }).fullPath
+  const index = videos.value.findIndex(v => v.id === videoId)
+  const context = { videoId, index, loadedCount: videos.value.length, expandedVideoId: expandedVideoId.value,
+    offset: document.getElementById(`video-${videoId}`)?.getBoundingClientRect().top ?? 100,
+    neighbors: videos.value.slice(Math.max(0, index - 2), index + 4).map(v => v.id) }
+  saveBloggerContext(bloggerContextKey(identityKey.value, subId.value, currentQueryState()), context)
+  // Persist the anchor in the history entry that browser Back will revisit.
+  await router.replace(returnTo)
+  if (!disposed) emit('open-workspace', { url: item.url, title: item.title, returnTo })
 }
 
 function backToList() {
@@ -318,12 +366,59 @@ function backToList() {
   emit('back')
 }
 
+async function restorePosition(context, anchorId, ticket) {
+  await nextTick()
+  if (disposed || ticket !== loadEpoch) return
+  let target = videos.value.find(v => v.id === anchorId)
+  if (!target && anchorId) {
+    missingVideo.value = { id: anchorId }
+    target = context?.neighbors.map(id => videos.value.find(v => v.id === id)).find(Boolean)
+      || videos.value[Math.min(context?.index || 0, Math.max(0, videos.value.length - 1))]
+  }
+  if (context?.expandedVideoId && videos.value.some(v => v.id === context.expandedVideoId)) {
+    expandedVideoId.value = context.expandedVideoId
+    await listPages(subId.value, context.expandedVideoId)
+    await nextTick()
+  }
+  if (disposed || ticket !== loadEpoch) return
+  const element = target && document.getElementById(`video-${target.id}`)
+  if (element) {
+    restoredVideoId.value = target.id
+    clearTimeout(restoreTimer)
+    restoreTimer = setTimeout(() => { restoredVideoId.value = null }, 3000)
+    const offset = Math.max(88, Math.min(context?.offset ?? 160, window.innerHeight - 120))
+    window.scrollTo({ top: Math.max(0, window.scrollY + element.getBoundingClientRect().top - offset), behavior: 'instant' })
+  } else window.scrollTo({ top: 0, behavior: 'instant' })
+}
+
 async function loadAll() {
+  const ticket = ++loadEpoch
   const state = currentQueryState()
   searchQuery.value = state.q
   learnedFilter.value = state.learned
-  await Promise.all([listBloggers(), refreshVideos(), listBatches(subId.value)])
+  subtitleOnly.value = state.subtitle
+  expandedVideoId.value = null
+  missingVideo.value = null
+  const anchorId = /^#video-\d+$/.test(route.hash) ? Number(route.hash.slice(7)) : null
+  const context = anchorId ? readBloggerContext(bloggerContextKey(identityKey.value, subId.value, state)) : null
+  const saved = context?.videoId === anchorId ? context : null
+  const requestedPage = Number(route.query.page)
+  let restorePages = Number.isInteger(requestedPage) ? Math.max(1, Math.min(100, requestedPage)) : 1
+  const [, result] = await Promise.all([listBloggers(), refreshVideos({ anchorId }), listBatches(subId.value)])
+  if (disposed || ticket !== loadEpoch) return
+  if (Number.isInteger(result?.anchor_index)) restorePages = Math.max(restorePages, Math.ceil((result.anchor_index + 1) / PAGE_SIZE))
+  if (saved) restorePages = Math.max(restorePages, Math.ceil(saved.loadedCount / PAGE_SIZE))
+  for (let page = 1; page < restorePages && videosHasMore.value; page += 1) {
+    if (disposed || ticket !== loadEpoch || !await refreshVideos({ append: true })) return
+  }
   ensureSyncPolling()
+  await restorePosition(saved, anchorId, ticket)
+}
+
+async function revealMissingVideo() {
+  const id = missingVideo.value?.id
+  if (!id) return
+  await router.replace({ name: 'blogger-detail', params: { id: subId.value }, hash: `#video-${id}` })
 }
 
 watch(subId, async () => {
@@ -331,15 +426,14 @@ watch(subId, async () => {
   await loadAll()
 })
 
-watch(() => route.query, async (next, prev) => {
-  if (String(route.params.id) !== subId.value) return
-  const nextQ = typeof next.q === 'string' ? next.q : ''
-  const nextLearned = ['learned', 'unlearned'].includes(next.learned) ? next.learned : 'all'
-  if (nextQ === searchQuery.value && nextLearned === learnedFilter.value) return
-  searchQuery.value = nextQ
-  learnedFilter.value = nextLearned
-  await refreshVideos()
+watch(() => [route.query.q, route.query.learned, route.query.has_subtitle], async () => {
+  if (route.name !== 'blogger-detail' || !subId.value) return
+  const state = currentQueryState()
+  if (state.q === searchQuery.value && state.learned === learnedFilter.value && state.subtitle === subtitleOnly.value) return
+  await loadAll()
 })
+watch(identityKey, loadAll)
+onBeforeUnmount(() => { disposed = true; loadEpoch += 1; clearTimeout(toastTimer); clearTimeout(restoreTimer) })
 
 onMounted(loadAll)
 </script>
@@ -373,7 +467,7 @@ onMounted(loadAll)
             </template>
           </div>
           <p v-if="blogger" class="detail-subtitle">
-            {{ blogger.follower_count || 0 }} 粉丝 · {{ videosTotal }} 个投稿 · 已学 {{ videosLearnedTotal }}
+            {{ blogger.follower_count || 0 }} 粉丝 · {{ videosMatchedTotal }} 个投稿 · 有字幕 {{ videosSubtitleTotal }} · 已整理 {{ videosLearnedTotal }}
           </p>
         </div>
       </header>
@@ -411,9 +505,10 @@ onMounted(loadAll)
         <button class="btn-ghost" @click="handleSearch">搜索</button>
         <div class="filter-chips">
           <button class="filter-chip" :class="{ active: learnedFilter === 'all' }" @click="setLearnedFilter('all')">全部</button>
-          <button class="filter-chip" :class="{ active: learnedFilter === 'learned' }" @click="setLearnedFilter('learned')">已学</button>
-          <button class="filter-chip" :class="{ active: learnedFilter === 'unlearned' }" @click="setLearnedFilter('unlearned')">未学</button>
+          <button class="filter-chip" :class="{ active: learnedFilter === 'learned' }" @click="setLearnedFilter('learned')">已整理</button>
+          <button class="filter-chip" :class="{ active: learnedFilter === 'unlearned' }" @click="setLearnedFilter('unlearned')">未整理</button>
         </div>
+        <label class="subtitle-filter"><input v-model="subtitleOnly" type="checkbox" @change="toggleSubtitleOnly" />仅看有字幕</label>
         <div class="toolbar-spacer"></div>
         <select v-model="batchMode" class="mode-select" aria-label="批量模式">
           <option value="full">完整学习资料</option>
@@ -436,19 +531,22 @@ onMounted(loadAll)
         </template>
       </section>
 
+      <div v-if="missingVideo" class="return-notice" role="status">刚才的视频状态已更新，不在当前筛选中。
+        <button class="btn-ghost btn-ghost--sm" @click="revealMissingVideo">查看该视频</button>
+      </div>
       <div v-if="videosLoading && !videos.length" class="detail-empty">
         <div class="loading-spinner"></div>
       </div>
       <div v-else-if="!videos.length" class="detail-empty">
         <p class="empty-hint">
-          {{ learnedFilter !== 'all' || searchQuery ? '没有匹配的投稿' : '还没有投稿目录' }}
+          {{ learnedFilter !== 'all' || subtitleOnly || searchQuery ? '没有匹配的投稿' : '还没有投稿目录' }}
         </p>
-        <p v-if="learnedFilter === 'all' && !searchQuery" class="empty-sub">点上方「同步」拉取该 UP 主的投稿</p>
+        <p v-if="learnedFilter === 'all' && !subtitleOnly && !searchQuery" class="empty-sub">点上方「同步」拉取该 UP 主的投稿</p>
       </div>
 
       <template v-else>
         <div class="video-list">
-          <article v-for="item in videos" :key="item.id" class="video-card" :class="{ 'video-card--selected': selected.has(item.id) }">
+          <article v-for="item in videos" :id="`video-${item.id}`" :key="item.id" class="video-card" :class="{ 'video-card--selected': selected.has(item.id), 'video-card--restored': restoredVideoId === item.id }">
             <label v-if="selectionMode" class="video-check">
               <input type="checkbox" :checked="selected.has(item.id)" @change="toggleSelect(item.id)" />
             </label>
@@ -472,10 +570,9 @@ onMounted(loadAll)
             <div class="video-main" @click="toggleExpand(item)">
               <h3 class="video-title">
                 <span class="video-title-text">{{ item.title }}</span>
-                <span v-if="item.is_learned" class="chip chip--ok">
-                  已学{{ item.learned_parts?.length > 1 ? ` ${item.learned_parts.length}P` : '' }}
-                </span>
+
               </h3>
+              <ContentBadges :content="item.content" :total-parts="item.page_count || 1" :subtitle-parts="item.subtitle_parts" :organized-parts="item.organized_parts" />
               <p class="video-meta">
                 <span>{{ formatDate(item.published_at) }}</span>
                 <span v-if="taskForItem(item)" class="task-live">{{ taskForItem(item).message || taskForItem(item).status }}</span>
@@ -497,8 +594,8 @@ onMounted(loadAll)
                 <div v-for="part in pages" :key="part.cid" class="part-row">
                   <span class="part-index">P{{ part.page }}</span>
                   <span class="part-title">{{ part.part_title || item.title }}</span>
-                  <span v-if="part.is_learned" class="chip chip--ok">已学</span>
-                  <button class="btn-ghost btn-ghost--sm" @click="emit('open-workspace', { url: part.url, title: item.title })">工作台</button>
+                  <ContentBadges :content="part.content" />
+                  <button class="btn-ghost btn-ghost--sm" @click="openWorkspace({ ...part, title: item.title }, item.id)">工作台</button>
                 </div>
               </template>
             </div>
@@ -506,7 +603,7 @@ onMounted(loadAll)
         </div>
 
         <div class="list-footer">
-          <span class="list-count">已学 {{ videosLearnedTotal }} / 共 {{ videosTotal }}</span>
+          <span class="list-count">共 {{ videosMatchedTotal }} · 有字幕 {{ videosSubtitleTotal }} · 已整理 {{ videosLearnedTotal }}</span>
           <button v-if="videosHasMore" class="btn-ghost" :disabled="videosLoading" @click="loadMore">
             {{ videosLoading ? '加载中…' : `加载更多（已显示 ${videos.length}）` }}
           </button>
@@ -571,6 +668,10 @@ onMounted(loadAll)
 </template>
 
 <style scoped>
+.subtitle-filter { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: .82rem; cursor: pointer; min-height: 44px; }
+.return-notice { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 12px; color: var(--text-secondary); }
+.video-card--restored { border-color: var(--accent-cyan); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-cyan) 25%, transparent); }
+.video-main > .content-badges { margin-top: 6px; }
 .blogger-detail {
   min-height: calc(100vh - 60px);
   background: var(--bg-primary);
@@ -783,4 +884,18 @@ onMounted(loadAll)
 .toast-leave-active { animation: toast-out 0.2s ease-in; }
 @keyframes toast-in { from { opacity: 0; transform: translateX(-50%) translateY(1rem); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
 @keyframes toast-out { from { opacity: 1; transform: translateX(-50%) translateY(0); } to { opacity: 0; transform: translateX(-50%) translateY(1rem); } }
+</style>
+
+<style scoped>
+@media (max-width: 600px) {
+  .blogger-detail { padding: 5rem 1rem 2rem; }
+  .detail-header { align-items: flex-start; flex-direction: column; }
+  .video-thumb { width: 96px; height: 54px; }
+  .video-main { min-width: 0; flex-basis: calc(100% - 112px); }
+  .video-actions { width: 100%; justify-content: flex-end; }
+  .part-row { flex-wrap: wrap; gap: 8px; }
+  .part-title { min-width: 100px; }
+  .filter-chip { min-height: 44px; }
+  .list-footer { flex-wrap: wrap; }
+}
 </style>

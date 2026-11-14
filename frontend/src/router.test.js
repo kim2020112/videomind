@@ -37,5 +37,6 @@ describe('router', () => {
   it('uses saved positions and otherwise starts at the top', () => {
     expect(scrollBehavior({}, {}, { left: 4, top: 80 })).toEqual({ left: 4, top: 80 })
     expect(scrollBehavior({}, {}, null)).toEqual({ left: 0, top: 0 })
+    expect(scrollBehavior({ name: 'blogger-detail' }, {}, { top: 20 })).toBe(false)
   })
 })

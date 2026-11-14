@@ -11,6 +11,8 @@ export function useBloggers() {
   const videos = ref([])
   const videosTotal = ref(0)
   const videosLearnedTotal = ref(0)
+  const videosSubtitleTotal = ref(0)
+  const videosMatchedTotal = ref(0)
   const videosHasMore = ref(false)
   const videosLoading = ref(false)
   const pages = ref([])
@@ -162,7 +164,9 @@ export function useBloggers() {
       const items = data.items || []
       videos.value = append ? [...videos.value, ...items] : items
       videosTotal.value = data.total || 0
-      videosLearnedTotal.value = data.learned_total || 0
+      videosLearnedTotal.value = data.organized_total ?? data.learned_total ?? 0
+      videosSubtitleTotal.value = data.subtitle_total || 0
+      videosMatchedTotal.value = data.matched_total ?? data.total ?? 0
       videosHasMore.value = videos.value.length < videosTotal.value
       return data
     } catch (err) {
@@ -271,7 +275,7 @@ export function useBloggers() {
 
   return {
     bloggers, bloggersLoading, bloggersError,
-    videos, videosTotal, videosLearnedTotal, videosHasMore, videosLoading,
+    videos, videosTotal, videosLearnedTotal, videosSubtitleTotal, videosMatchedTotal, videosHasMore, videosLoading,
     pages, pagesLoading, batches, currentBatch, batchLoading, pending, error,
     listBloggers, previewBlogger, addBlogger, updateBlogger, removeBlogger,
     getDeletionPreview, syncBlogger, getSyncStatus, cancelSync,

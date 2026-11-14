@@ -282,7 +282,7 @@ onMounted(async () => {
           <option value="recent">最近添加</option>
           <option value="followers">粉丝数</option>
           <option value="catalog">投稿数</option>
-          <option value="learned">已学数</option>
+          <option value="learned">已整理数</option>
         </select>
       </div>
 
@@ -342,7 +342,8 @@ onMounted(async () => {
             <p class="blogger-stats">
               <span class="stat-chip">{{ item.follower_count || 0 }} 粉丝</span>
               <span class="stat-chip">{{ item.catalog_count ?? 0 }} 投稿</span>
-              <span class="stat-chip stat-chip--learned">已学 {{ item.learned_count ?? 0 }}</span>
+              <span class="stat-chip">有字幕 {{ item.subtitle_count ?? 0 }}</span>
+              <span class="stat-chip stat-chip--learned">已整理 {{ item.organized_count ?? item.learned_count ?? 0 }}</span>
             </p>
             <p class="blogger-sync" :class="syncTone(item)">
               <span class="sync-dot"></span>{{ syncLabel(item) }}

@@ -3,6 +3,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { createMemoryHistory } from 'vue-router'
 import { createRouter } from 'vue-router'
 import BloggerDetailPage from './BloggerDetailPage.vue'
+import { bloggerContextKey, saveBloggerContext } from '../utils/bloggerNavigation.js'
 import { routes } from '../router.js'
 
 vi.mock('../composables/useAuth.js', () => ({
@@ -33,6 +34,7 @@ async function mountPage(fetchMock, initialRoute = '/bloggers/7') {
   vi.stubGlobal('fetch', fetchMock)
   const router = await makeRouter(initialRoute)
   const wrapper = mount(BloggerDetailPage, {
+    attachTo: document.body,
     props: { activeTasks: [] },
     global: { plugins: [router], stubs: { teleport: true } },
   })
@@ -43,6 +45,115 @@ async function mountPage(fetchMock, initialRoute = '/bloggers/7') {
 describe('BloggerDetailPage', () => {
   beforeEach(() => {
     vi.unstubAllGlobals()
+    sessionStorage.clear()
+    window.scrollTo = vi.fn()
+    Element.prototype.scrollIntoView = vi.fn()
+  })
+
+  it('restores loaded pages and includes filters and video position in the workspace origin', async () => {
+    const fetchMock = vi.fn().mockImplementation((url) => {
+      if (url.includes('/videos')) {
+        const offset = Number(new URL(url, 'http://localhost').searchParams.get('offset'))
+        return Promise.resolve(okJson({ total: 45, learned_total: 0,
+          items: Array.from({ length: 20 }, (_, index) => {
+            const id = offset + index + 1
+            return video(id, `BV${id}`, `视频${id}`)
+          }),
+        }))
+      }
+      if (url.includes('/batches')) return Promise.resolve(okJson({ batches: [] }))
+      return Promise.resolve(okJson({ bloggers: [{ id: 7, name: 'UP主', sync_status: 'complete' }] }))
+    })
+    const { wrapper, router } = await mountPage(fetchMock, '/bloggers/7?q=相机&learned=unlearned&page=2#video-25')
+    expect(wrapper.findAll('.video-card')).toHaveLength(40)
+    expect(fetchMock.mock.calls.filter(([url]) => url.includes('/videos')).map(([url]) => new URL(url, 'http://localhost').searchParams.get('offset'))).toEqual(['0', '20'])
+    await wrapper.find('#video-25 .video-actions button').trigger('click')
+    await flushPromises()
+    const payload = wrapper.emitted('open-workspace')[0][0]
+    const target = new URL(payload.returnTo, 'http://localhost')
+    expect(target.pathname).toBe('/bloggers/7')
+    expect(target.searchParams.get('q')).toBe('相机')
+    expect(target.searchParams.get('learned')).toBe('unlearned')
+    expect(target.searchParams.get('page')).toBe('2')
+    expect(target.hash).toBe('#video-25')
+    expect(router.currentRoute.value.hash).toBe('#video-25')
+    wrapper.unmount()
+  })
+
+  it('retains the parent video position when opening a multipart video', async () => {
+    const fetchMock = vi.fn().mockImplementation((url) => {
+      if (url.includes('/pages')) return Promise.resolve(okJson({ pages: [{ cid: 55, page: 2, part_title: '第二集', url: 'https://www.bilibili.com/video/BV1aaa?p=2' }] }))
+      if (url.includes('/videos')) return Promise.resolve(okJson({ total: 1, items: [video(9, 'BV1aaa', '课程', { page_count: 2 })] }))
+      if (url.includes('/batches')) return Promise.resolve(okJson({ batches: [] }))
+      return Promise.resolve(okJson({ bloggers: [{ id: 7, name: 'UP主', sync_status: 'complete' }] }))
+    })
+    const { wrapper } = await mountPage(fetchMock)
+    await wrapper.find('.video-main').trigger('click')
+    await flushPromises()
+    await wrapper.find('.part-row button').trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('open-workspace')[0][0]).toMatchObject({
+      url: 'https://www.bilibili.com/video/BV1aaa?p=2', returnTo: '/bloggers/7#video-9',
+    })
+    wrapper.unmount()
+  })
+
+  it('restores the saved anchor offset and expanded parts after a workspace reload', async () => {
+    const key = bloggerContextKey('guest:local', '7', { q: '', learned: 'all' })
+    saveBloggerContext(key, { videoId: 9, index: 0, loadedCount: 1, expandedVideoId: 9, offset: 240, neighbors: [9] })
+    const rect = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({ top: 700 })
+    const fetchMock = vi.fn((url) => {
+      if (url.includes('/pages')) return Promise.resolve(okJson({ pages: [{ cid: 4, page: 2, part_title: '第二集' }] }))
+      if (url.includes('/videos')) return Promise.resolve(okJson({ total: 1, anchor_index: 0, items: [video(9, 'BV1aaa', '课程', { page_count: 2 })] }))
+      if (url.includes('/batches')) return Promise.resolve(okJson({ batches: [] }))
+      return Promise.resolve(okJson({ bloggers: [] }))
+    })
+    const { wrapper } = await mountPage(fetchMock, '/bloggers/7#video-9')
+    expect(wrapper.find('.parts-panel').exists()).toBe(true)
+    expect(wrapper.find('#video-9').classes()).toContain('video-card--restored')
+    expect(window.scrollTo).toHaveBeenLastCalledWith({ top: 460, behavior: 'instant' })
+    wrapper.unmount()
+    rect.mockRestore()
+  })
+
+  it('keeps filters when the previous video no longer matches, then reveals it on request', async () => {
+    const fetchMock = vi.fn((url) => {
+      if (url.includes('/videos')) {
+        const filtered = url.includes('learned=unlearned')
+        return Promise.resolve(okJson({ total: 1, anchor_index: filtered ? null : 0,
+          items: [video(filtered ? 10 : 9, 'BV1aaa', '课程')] }))
+      }
+      if (url.includes('/batches')) return Promise.resolve(okJson({ batches: [] }))
+      return Promise.resolve(okJson({ bloggers: [] }))
+    })
+    const { wrapper, router } = await mountPage(fetchMock, '/bloggers/7?learned=unlearned#video-9')
+    expect(wrapper.find('.return-notice').text()).toContain('不在当前筛选中')
+    expect(router.currentRoute.value.query.learned).toBe('unlearned')
+    await wrapper.find('.return-notice button').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query.learned).toBeUndefined()
+    expect(wrapper.find('#video-9').exists()).toBe(true)
+    expect(wrapper.find('.return-notice').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('combines subtitle and organized filters and preserves both in the origin', async () => {
+    const fetchMock = vi.fn((url) => {
+      if (url.includes('/videos')) return Promise.resolve(okJson({ total: 1, items: [video(9, 'BV1aaa', '课程')] }))
+      if (url.includes('/batches')) return Promise.resolve(okJson({ batches: [] }))
+      return Promise.resolve(okJson({ bloggers: [] }))
+    })
+    const { wrapper, router } = await mountPage(fetchMock)
+    await wrapper.findAll('.filter-chip')[2].trigger('click')
+    await flushPromises()
+    await wrapper.find('.subtitle-filter input').setValue(true)
+    await flushPromises()
+    expect(router.currentRoute.value.query).toMatchObject({ learned: 'unlearned', has_subtitle: '1' })
+    expect(fetchMock.mock.calls.some(([url]) => url.includes('learned=unlearned') && url.includes('has_subtitle=1'))).toBe(true)
+    await wrapper.find('.video-actions button').trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('open-workspace')[0][0].returnTo).toContain('has_subtitle=1')
+    wrapper.unmount()
   })
 
   it('appends on load more without replacing existing items', async () => {
@@ -60,7 +171,7 @@ describe('BloggerDetailPage', () => {
     const { wrapper } = await mountPage(fetchMock)
 
     expect(wrapper.findAll('.video-card')).toHaveLength(2)
-    expect(wrapper.text()).toContain('已学 1 / 共 3')
+    expect(wrapper.text()).toContain('共 3 · 有字幕 0 · 已整理 1')
 
     await wrapper.find('.list-footer .btn-ghost').trigger('click')
     await flushPromises()
