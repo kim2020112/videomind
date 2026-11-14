@@ -2,6 +2,7 @@
 import { ref, watch, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth.js'
+import ContentBadges from './ContentBadges.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 
 const { getAuthHeaders } = useAuth()
@@ -64,7 +65,7 @@ function formatRemaining(task) {
   return `已转录 ${em} 分 ${es} 秒，即将完成`
 }
 
-const activeStatuses = new Set(['queued', 'downloading', 'transcribing', 'generating'])
+const activeStatuses = new Set(['queued', 'downloading', 'transcribing', 'generating', 'awaiting_confirmation'])
 
 function isActiveItem(item) {
   return Boolean(getTaskForUrl(item.url_hash)) || activeStatuses.has(item.status)
@@ -73,6 +74,7 @@ function isActiveItem(item) {
 function taskStageLabel(task, item) {
   const status = task?.status || item.status
   return {
+    awaiting_confirmation: '等待确认语音转录',
     queued: '等待后台处理',
     downloading: '正在下载音频',
     transcribing: 'Whisper 转录中',
@@ -153,7 +155,7 @@ function toggleTaskDetail(item) {
 }
 
 async function cancelTask(taskId) {
-  if (!await requestConfirmation('确定要取消此转录任务？', '停止转录')) return
+  if (!await requestConfirmation('确定要取消此转录任务？', '取消任务')) return
   cancelingTaskId.value = taskId
   try {
     const res = await fetch(`/api/tasks/${taskId}/cancel`, { method: 'POST', headers: getAuthHeaders() })
@@ -576,7 +578,7 @@ fetchHistoryPage()
               </div>
               <div class="hp-task-actions">
                 <button class="hp-btn-cancel" @click.stop="cancelTask(getTaskForUrl(item.url_hash)?.task_id)" :disabled="cancelingTaskId === getTaskForUrl(item.url_hash)?.task_id">
-                  {{ cancelingTaskId === getTaskForUrl(item.url_hash)?.task_id ? '取消中...' : '停止转录' }}
+                  {{ cancelingTaskId === getTaskForUrl(item.url_hash)?.task_id ? '取消中...' : '取消任务' }}
                 </button>
                 <button class="hp-btn-delete-task" @click.stop="deleteTranscribingItem(item)">
                   删除记录
@@ -584,18 +586,23 @@ fetchHistoryPage()
               </div>
             </div>
             <div v-if="item.status === 'failed'" class="hp-failed-badge">
-              <span>转录失败</span>
+              <span>处理失败，可打开详情重试</span>
             </div>
+            <ContentBadges v-if="!item.is_multipart" :content="item.content" />
+            <ContentBadges v-else :total-parts="item.total_parts || item.parts_count"
+              :subtitle-parts="item.parts.filter(p => p.content?.has_subtitle).map(p => p.part_index)"
+              :organized-parts="item.parts.filter(p => p.content?.module_count).map(p => p.part_index)" />
             <!-- 多P标识 -->
             <button v-if="item.is_multipart" type="button" class="hp-multipart-badge" @click="toggleGroup(item.id)" :aria-expanded="Boolean(expandedGroups[item.id])">
               <svg :class="['hp-expand-icon', { expanded: expandedGroups[item.id] }]" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/></svg>
-              已学习 {{ item.total_parts ? `${item.parts_count}/${item.total_parts}` : item.parts_count }}P · {{ expandedGroups[item.id] ? '点击关闭' : '点击展开' }}
+              已有记录 {{ item.total_parts ? `${item.parts_count}/${item.total_parts}` : item.parts_count }}P · {{ expandedGroups[item.id] ? '点击关闭' : '点击展开' }}
             </button>
             <!-- 多P分P列表 -->
             <div v-if="item.is_multipart && expandedGroups[item.id]" class="hp-parts-list">
               <button v-for="part in item.parts" :key="part.id" type="button" class="hp-part-item" @click="selectHistory(part)">
                 <span class="hp-part-index">P{{ part.part_index ?? '?' }}</span>
                 <span class="hp-part-title">{{ part.part_title || part.part_info || '未知分P' }}</span>
+                <ContentBadges :content="part.content" />
                 <span v-if="part.part_duration" class="hp-part-time">{{ formatDuration(part.part_duration) }}</span>
               </button>
             </div>

@@ -1,12 +1,12 @@
 <script setup>
 import { ref, computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useDownloader } from './composables/useDownloader.js'
 import NavBar from './components/NavBar.vue'
 import HeroSection from './components/HeroSection.vue'
 import FeaturesSection from './components/FeaturesSection.vue'
 import FooterSection from './components/FooterSection.vue'
-import AiSummary from './components/AiSummary.vue'
+import AiSummary from './components/LearningWorkspace.vue'
 import ResultWorkspace from './components/ResultWorkspace.vue'
 import DesktopWorkspace from './components/DesktopWorkspace.vue'
 import VideoSidebar from './components/VideoSidebar.vue'
@@ -15,14 +15,13 @@ import VideoContextPanel from './components/VideoContextPanel.vue'
 import DownloadTools from './components/DownloadTools.vue'
 import DownloadHistoryPanel from './components/DownloadHistoryPanel.vue'
 import TaskProgressDock from './components/TaskProgressDock.vue'
-import { useSummary } from './composables/useSummary.js'
+import { useLearning } from './composables/useLearning.js'
 import { useChat } from './composables/useChat.js'
 import { useQa } from './composables/useQa.js'
 import { useAuth } from './composables/useAuth.js'
 import { useTaskPoller } from './composables/useTaskPoller.js'
 import { useCapabilities } from './composables/useCapabilities.js'
 import { formatBytes } from './utils/resultFormatters.js'
-import { canMarkPartCached, markPartCached } from './utils/multipartState.js'
 
 const HistoryPage = defineAsyncComponent(() => import('./components/HistoryPage.vue'))
 const BloggersPage = defineAsyncComponent(() => import('./components/BloggersPage.vue'))
@@ -96,9 +95,15 @@ const isWorkspaceRoute = computed(() => route.name === 'workspace' || route.name
 const isBloggersRoute = computed(() => route.name === 'bloggers')
 const isBloggerDetailRoute = computed(() => route.name === 'blogger-detail')
 const isBloggerArea = computed(() => isBloggersRoute.value || isBloggerDetailRoute.value)
+const bloggerReturnTarget = computed(() => {
+  const target = route.query.returnTo
+  if (typeof target !== 'string' || !/^\/bloggers\/\d+(?:[?#]|$)/.test(target)) return null
+  const resolved = router.resolve(target)
+  return resolved.name === 'blogger-detail' ? resolved.fullPath : null
+})
 const currentView = computed(() => {
   if (isHistoryRoute.value) return 'history'
-  if (isBloggerArea.value) return 'bloggers'
+  if (isBloggerArea.value || (isWorkspaceRoute.value && bloggerReturnTarget.value)) return 'bloggers'
   return 'home'
 })
 const canStart = computed(() => isLoggedIn.value || capabilities.value.guest_access_enabled)
@@ -123,9 +128,7 @@ function openVideoModal() {
 function handleSeekVideo(seconds) {
   if (!showVideoModal.value) {
     openVideoModal()
-    nextTick(() => {
-      setTimeout(() => videoPlayerRef.value?.seekTo(seconds), 300)
-    })
+    nextTick(() => videoPlayerRef.value?.seekTo(seconds))
   } else {
     videoPlayerRef.value?.seekTo(seconds)
   }
@@ -155,12 +158,12 @@ async function openWorkspaceFromBlogger(payload) {
   url.value = payload.url
   await router.push({
     name: 'workspace',
-    query: { url: payload.url, tab: 'summary', part: '1' },
+    query: {
+      url: payload.url, tab: 'summary', part: '1',
+      returnTo: payload.returnTo || route.fullPath,
+    },
   })
   await handleParse({ syncRoute: false })
-  if (videoInfo.value && !error.value) {
-    handleSummarize(false)
-  }
 }
 
 function backToBloggers() {
@@ -189,9 +192,6 @@ async function handleSelectHistory(item) {
     query: { url: item.url, tab: 'summary', part: '1' },
   })
   await handleParse({ syncRoute: false })
-  if (videoInfo.value && !error.value) {
-    handleSummarize(false)
-  }
 }
 
 async function restoreRouteState() {
@@ -249,10 +249,10 @@ const {
   whisperEstimate,
   backgroundTask,
   fetchSubtitleText,
-  summarizeVideoStream,
-  summarizeVideo,
+  moduleStates, savedTargets = ref([]), workspaceCoverage, selectedTargets, descriptionSummary, submitting, visitError,
+  loadWorkspace, generateLearning, resumeTask, cancelTask,
   resetSummary,
-} = useSummary()
+} = useLearning()
 
 const {
   chatMessages,
@@ -283,29 +283,21 @@ function toggleQaExpand(index) {
   }
 }
 
-const liveBackgroundTask = computed(() => {
-  if (!backgroundTask.value?.task_id) return backgroundTask.value
-  return activeTasks.value.find(task => task.task_id === backgroundTask.value.task_id) || backgroundTask.value
-})
+const liveBackgroundTask = computed(() => backgroundTask.value)
 
-let backgroundTaskSeenActive = false
-watch(() => backgroundTask.value?.task_id, () => {
-  backgroundTaskSeenActive = false
-})
-watch(activeTasks, tasks => {
-  const taskId = backgroundTask.value?.task_id
-  if (!taskId) return
-  if (tasks.some(task => task.task_id === taskId)) {
-    backgroundTaskSeenActive = true
-  } else if (backgroundTaskSeenActive) {
-    backgroundTask.value = null
-    backgroundTaskSeenActive = false
-  }
-})
+watch([workspaceCoverage, savedTargets, subtitleText], ([coverage]) => {
+  if (!videoInfo.value?.parts?.length) return
+  videoInfo.value = { ...videoInfo.value, parts: videoInfo.value.parts.map(part => part.index === currentSummarizePart.value
+    ? { ...part, coverage, content: { has_subtitle: Boolean(subtitleText.value), modules: savedTargets.value, module_count: savedTargets.value.length }, is_cached: ['partial', 'complete'].includes(coverage) } : part) }
+}, { deep: true })
 
 watch([isLoggedIn, guestSig], ([loggedIn, signature]) => {
   if (loggedIn || signature) startPolling()
   else stopPolling()
+  resetSummary()
+  resetChat()
+  resetQa()
+  if ((loggedIn || signature) && videoInfo.value && isWorkspaceRoute.value) loadWorkspace(summarizeUrl.value)
 })
 
 watch(activeTab, (tab) => {
@@ -334,55 +326,17 @@ watch(() => route.query.url, async (routeUrl) => {
 })
 
 async function handleSummarize(force = false) {
-  if (!videoInfo.value) return
-  try {
-    await summarizeVideoStream(summarizeUrl.value, null, force, 'full')
-    if (canMarkPartCached({
-      summaryResult: summaryResult.value,
-      backgroundTask: backgroundTask.value,
-      summaryError: summarizeError.value,
-    }) && videoInfo.value?.parts?.length) {
-      videoInfo.value = {
-        ...videoInfo.value,
-        parts: markPartCached(videoInfo.value.parts, currentSummarizePart.value),
-      }
-    }
-  } catch (e) { /* handled by useSummary */ }
+  if (videoInfo.value) await generateLearning(selectedTargets.value, force)
 }
-
-async function handleRegenerateSummary() {
-  if (!videoInfo.value) return
-  try {
-    await summarizeVideoStream(summarizeUrl.value, null, true, 'summary')
-  } catch (e) { /* handled by useSummary */ }
+async function handleGenerateTargets(targets, force = false, source = 'subtitle') {
+  if (videoInfo.value) await generateLearning(targets, force, source)
 }
-
-async function handleRegenerateMindmap() {
-  if (!videoInfo.value) return
-  try {
-    await summarizeVideoStream(summarizeUrl.value, null, true, 'mindmap')
-  } catch (e) { /* handled by useSummary */ }
-}
-
-async function handleRegenerateNotes() {
-  if (!videoInfo.value) return
-  try {
-    await summarizeVideoStream(summarizeUrl.value, null, true, 'notes')
-  } catch (e) { /* handled by useSummary */ }
-}
-
-async function handleRegenerateSubtitle() {
-  if (!videoInfo.value) return
-  try {
-    await summarizeVideoStream(summarizeUrl.value, null, true, 'subtitle')
-  } catch (e) { /* handled by useSummary */ }
-}
-
-async function handleFetchSubtitle() {
-  if (!videoInfo.value) return
-  try {
-    await fetchSubtitleText(summarizeUrl.value)
-  } catch (e) { /* handled by useSummary */ }
+function handleRegenerateSummary() { return handleGenerateTargets(['summary'], true) }
+function handleRegenerateMindmap() { return handleGenerateTargets(['mindmap'], true) }
+function handleRegenerateNotes() { return handleGenerateTargets(['notes'], true) }
+function handleRegenerateSubtitle() { return handleFetchSubtitle(true) }
+function handleFetchSubtitle(refresh = false) {
+  if (videoInfo.value) return fetchSubtitleText(summarizeUrl.value, '', Boolean(refresh))
 }
 
 async function switchSummarizePart(partIndex) {
@@ -398,12 +352,9 @@ async function switchSummarizePart(partIndex) {
     }
   }
   activeTab.value = 'summary'
-  // 清除旧分P的字幕文本，避免显示上一分P的内容
-  subtitleText.value = ''
+  resetChat()
   resetQa()
-  await handleSummarize(false)
-  // 总结完成后自动获取当前分P的字幕
-  fetchSubtitleText(summarizeUrl.value).catch(() => {})
+  await loadWorkspaceAndPrepareSubtitle()
 }
 
 function handleSendQuestion(question) {
@@ -411,11 +362,11 @@ function handleSendQuestion(question) {
 }
 
 function handleGenerateQa() {
-  generateQa(subtitleText.value, videoInfo.value?.title || '', summarizeUrl.value, false)
+  handleGenerateTargets(['qa'])
 }
 
 function handleRegenerateQa() {
-  generateQa(subtitleText.value, videoInfo.value?.title || '', summarizeUrl.value, true)
+  handleGenerateTargets(['qa'], true)
 }
 
 // 选中分P的总时长（秒）
@@ -543,12 +494,23 @@ async function handleParse({ syncRoute = true } = {}) {
       currentSummarizePart.value = parseInt(pMatch[1])
     }
     await syncWorkspaceRoute({ replace: true })
+    await loadWorkspaceAndPrepareSubtitle()
   } catch (e) {
     error.value = e.message || '解析失败，请检查链接是否有效'
   } finally {
     loading.value = false
     await scrollToResult()
   }
+}
+
+async function loadWorkspaceAndPrepareSubtitle() {
+  const snapshot = await loadWorkspace(summarizeUrl.value)
+  const taskStatus = snapshot?.task?.status
+  const taskActive = ['queued', 'downloading', 'transcribing', 'generating', 'awaiting_confirmation'].includes(taskStatus)
+  if (!snapshot?.subtitle?.text && !taskActive && videoInfo.value) {
+    handleFetchSubtitle()
+  }
+  return snapshot
 }
 
 async function handlePartSelect(part) {
@@ -562,6 +524,10 @@ async function handlePartSelect(part) {
   reset()
   try {
     await parseVideo(partUrl)
+    currentSummarizePart.value = part.index
+    resetChat()
+    resetQa()
+    await loadWorkspaceAndPrepareSubtitle()
   } catch (e) {
     error.value = e.message || '解析失败'
   } finally {
@@ -642,6 +608,15 @@ function handleUrlChange(value) {
     <!-- 首页内容 -->
     <template v-if="!isHistoryRoute && !isBloggerArea">
 
+    <nav v-if="isWorkspaceRoute && bloggerReturnTarget" class="workspace-origin" aria-label="返回来源">
+      <RouterLink :to="bloggerReturnTarget" class="workspace-back-link">
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="m12 19-7-7 7-7m-7 7h14" />
+        </svg>
+        返回博主视频列表
+      </RouterLink>
+    </nav>
+
     <HeroSection
       v-model:url="url"
       :loading="loading"
@@ -711,6 +686,14 @@ function handleUrlChange(value) {
               <AiWorkspace>
                 <div class="video-card desktop-ai-card">
                   <AiSummary
+                    v-model:selectedTargets="selectedTargets"
+                    :moduleStates="moduleStates"
+                    :descriptionSummary="descriptionSummary"
+                    :descriptionAvailable="Boolean(videoInfo?.description?.trim())"
+                    :submitting="submitting"
+                    :onGenerateTargets="handleGenerateTargets"
+                    :onResumeTask="resumeTask"
+                    :onCancelTask="cancelTask"
                     :result="summaryResult"
                     :loading="isSummarizing"
                     :regeneratingMode="regeneratingMode"
@@ -719,7 +702,7 @@ function handleUrlChange(value) {
                     :streamingText="streamingText"
                     :subtitleText="subtitleText"
                     :isFetchingSubtitle="isFetchingSubtitle"
-                    :subtitleError="subtitleError"
+                    :subtitleError="subtitleError" :visitError="visitError"
                     :chatMessages="chatMessages"
                     :isChatStreaming="isChatStreaming"
                     :chatError="chatError"
@@ -789,7 +772,7 @@ function handleUrlChange(value) {
           <div class="tab-bar">
             <button class="tab-button" :class="{ active: activeTab === 'summary' }" @click="activeTab = 'summary'">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="tab-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" /></svg>
-              AI 总结
+              字幕与学习资料
             </button>
             <button class="tab-button" :class="{ active: activeTab === 'download' }" @click="activeTab = 'download'">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="tab-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 11l5 5m0 0l5-5m-5 5V3" /></svg>
@@ -827,6 +810,14 @@ function handleUrlChange(value) {
           <!-- Tab: AI 总结 -->
           <div v-show="activeTab === 'summary'">
             <AiSummary
+                    v-model:selectedTargets="selectedTargets"
+                    :moduleStates="moduleStates"
+                    :descriptionSummary="descriptionSummary"
+                    :descriptionAvailable="Boolean(videoInfo?.description?.trim())"
+                    :submitting="submitting"
+                    :onGenerateTargets="handleGenerateTargets"
+                    :onResumeTask="resumeTask"
+                    :onCancelTask="cancelTask"
               :result="summaryResult"
               :loading="isSummarizing"
               :regeneratingMode="regeneratingMode"
@@ -835,7 +826,7 @@ function handleUrlChange(value) {
               :streamingText="streamingText"
               :subtitleText="subtitleText"
               :isFetchingSubtitle="isFetchingSubtitle"
-              :subtitleError="subtitleError"
+              :subtitleError="subtitleError" :visitError="visitError"
               :chatMessages="chatMessages"
               :isChatStreaming="isChatStreaming"
               :chatError="chatError"
@@ -895,6 +886,7 @@ function handleUrlChange(value) {
       :streamUrl="videoStreamUrl"
       :audioStreamUrl="videoInfo?.audio_stream_url || ''"
       :streamNeedsAudio="videoInfo?.stream_needs_audio || false"
+      :streamExpiresAt="videoInfo?.stream_expires_at || 0"
       :playbackRate="videoPlaybackRate"
       :videoTitle="videoInfo?.title || ''"
       :videoUrl="videoInfo?.webpage_url || ''"
@@ -923,6 +915,27 @@ function handleUrlChange(value) {
 .desktop-results-container {
   width: 100%;
 }
+
+.workspace-origin {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 0.75rem 1.25rem 0;
+}
+
+.workspace-back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  color: var(--text-secondary);
+  border-radius: 8px;
+  padding: 0 0.5rem;
+  text-decoration: none;
+}
+
+.workspace-back-link svg { width: 20px; height: 20px; }
+.workspace-back-link:hover { color: var(--text-primary); background: var(--bg-card); }
+.workspace-back-link:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
 
 .video-card {
   background: var(--bg-card);

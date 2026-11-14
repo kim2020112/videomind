@@ -7,6 +7,7 @@ const props = defineProps({
   streamUrl: String,
   audioStreamUrl: String,
   streamNeedsAudio: Boolean,
+  streamExpiresAt: { type: Number, default: 0 },
   playbackRate: { type: Number, default: 1 },
   videoTitle: String,
   visible: Boolean,
@@ -22,6 +23,8 @@ const isRefreshing = ref(false)
 const loadError = ref(false)
 const audioBlocked = ref(false)
 const isPlaying = ref(false)
+const pendingSeek = ref(null)
+const resumeAfterLoad = ref(false)
 const { getAuthHeaders, getAuthQueryParams } = useAuth()
 const rates = [1, 1.5, 2]
 
@@ -106,22 +109,37 @@ async function onVideoError() {
     if (!data.stream_url) throw new Error('no stream')
     currentUrl.value = toProxyUrl(data.stream_url)
     currentAudioUrl.value = data.audio_stream_url && data.stream_needs_audio ? toProxyUrl(data.audio_stream_url) : ''
-    await nextTick()
+    if (snapshot) {
+      pendingSeek.value = snapshot.time
+      resumeAfterLoad.value = !snapshot.paused
+    }
     if (videoRef.value && snapshot) {
-      videoRef.value.currentTime = snapshot.time
       videoRef.value.volume = snapshot.volume
       videoRef.value.muted = snapshot.muted
       applyRate(snapshot.rate)
-      if (!snapshot.paused) await playMedia()
     }
   } catch { loadError.value = true } finally { isRefreshing.value = false }
 }
 
 function seekTo(seconds) {
-  if (!videoRef.value) return
-  videoRef.value.currentTime = seconds
+  if (!Number.isFinite(seconds) || seconds < 0) return
+  pendingSeek.value = seconds
+  resumeAfterLoad.value = true
+  applyPendingSeek()
+}
+
+function applyPendingSeek() {
+  const video = videoRef.value
+  if (!video || pendingSeek.value === null || video.readyState < 1) return
+  try {
+    video.currentTime = pendingSeek.value
+    pendingSeek.value = null
+  } catch { return }
   syncAudioTime()
-  if (videoRef.value.paused) playMedia()
+  if (resumeAfterLoad.value) {
+    resumeAfterLoad.value = false
+    playMedia()
+  }
 }
 function setRate(rate) {
   emit('playback-rate-change', rate)
@@ -134,7 +152,11 @@ watch(() => props.visible, visible => {
     currentAudioUrl.value = props.streamNeedsAudio ? toProxyUrl(props.audioStreamUrl) : ''
     loadError.value = false
     audioBlocked.value = false
-    nextTick(() => applyRate())
+    nextTick(() => {
+      applyRate()
+      const expired = props.streamExpiresAt > 0 && props.streamExpiresAt <= Date.now() / 1000 + 60
+      if (!props.streamUrl || expired) onVideoError()
+    })
   } else pauseMedia()
 }, { immediate: true })
 watch(() => [props.streamUrl, props.audioStreamUrl, props.streamNeedsAudio], () => {
@@ -151,10 +173,10 @@ defineExpose({ seekTo })
 <template>
   <BaseDialog :visible="visible" :title-id="'video-player-title'" :close-label="`关闭视频播放器${videoTitle ? `：${videoTitle}` : ''}`" size="video" :close-on-overlay="false" @close="emit('close')">
     <h2 id="video-player-title" class="sr-only">{{ videoTitle || '视频播放器' }}</h2>
-    <div v-if="isRefreshing" class="video-modal-status" aria-live="polite">刷新播放链接…</div>
-    <div v-else-if="loadError" class="video-modal-status error" role="alert"><p>播放链接已失效</p><button type="button" class="video-modal-retry" @click="onVideoError">重试</button></div>
+    <div v-if="loadError" class="video-modal-status error" role="alert"><p>播放链接已失效</p><button type="button" class="video-modal-retry" @click="onVideoError">重试</button></div>
     <div v-else class="video-stage">
-      <video ref="videoRef" :src="currentUrl" controls autoplay class="video-modal-player" @play="onPlay" @pause="onPause" @seeking="onSeeking" @timeupdate="onTimeUpdate" @volumechange="onVolumeChange" @ended="onEnded" @error="onVideoError" />
+      <div v-if="isRefreshing" class="video-modal-status video-modal-status--loading" aria-live="polite">刷新播放链接…</div>
+      <video ref="videoRef" :src="currentUrl" controls autoplay class="video-modal-player" @loadedmetadata="applyPendingSeek" @play="onPlay" @pause="onPause" @seeking="onSeeking" @timeupdate="onTimeUpdate" @volumechange="onVolumeChange" @ended="onEnded" @error="onVideoError" />
       <audio v-if="streamNeedsAudio && currentAudioUrl" ref="audioRef" :src="currentAudioUrl" preload="auto" @error="onVideoError" />
       <div class="rate-control" role="group" aria-label="播放速度">
         <button v-for="rate in rates" :key="rate" type="button" :aria-pressed="playbackRate === rate" @click="setRate(rate)">{{ rate }}×</button>
@@ -170,6 +192,7 @@ defineExpose({ seekTo })
 .video-modal-player { width: 100%; height: 100%; object-fit: contain; }
 audio { display: none; }
 .video-modal-status { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .75rem; color: var(--text-secondary); }
+.video-modal-status--loading { position: absolute; inset: 0; z-index: 2; background: rgba(0,0,0,.72); pointer-events: none; }
 .video-modal-status.error { color: #fca5a5; }
 .video-modal-retry, .audio-enable { min-height: 44px; padding: .5rem 1rem; border: 1px solid rgba(148,163,184,.3); border-radius: 8px; background: rgba(148,163,184,.1); color: var(--text-secondary); cursor: pointer; }
 .rate-control { position: absolute; top: .75rem; left: .75rem; display: flex; gap: 2px; }

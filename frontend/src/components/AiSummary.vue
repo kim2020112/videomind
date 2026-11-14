@@ -57,6 +57,8 @@ function onNotesClick(e) {
 }
 
 const props = defineProps({
+  workspaceMode: Boolean,
+  moduleStates: { type: Object, default: () => ({}) },
   result: Object,
   loading: Boolean,
   regeneratingMode: String,
@@ -98,6 +100,15 @@ const props = defineProps({
   onSeekVideo: Function,
   currentVideoTime: { type: Number, default: 0 },
 })
+
+function moduleLoading(target) {
+  return props.workspaceMode ? ['queued', 'generating'].includes(props.moduleStates[target]?.status) : props.loading && (!props.regeneratingMode || props.regeneratingMode === target)
+}
+
+function partCoverageLabel(part) {
+  if (part.content?.module_count) return `已整理 · ${part.content.module_count}/4`
+  return { complete: '已整理 · 4/4', partial: '已整理', subtitle: '有字幕' }[part.coverage] || (part.is_cached ? '已整理' : '')
+}
 
 const isLimitError = computed(() => props.error && props.error.includes('免费次数'))
 
@@ -252,14 +263,14 @@ function handleRegenerateQa() {
 
 function handleTabSubtitle() {
   activeSubTab.value = 'subtitle'
-  if (!props.subtitleText && !props.isFetchingSubtitle && props.onFetchSubtitle) {
+  if (!props.workspaceMode && !props.subtitleText && !props.isFetchingSubtitle && props.onFetchSubtitle) {
     props.onFetchSubtitle()
   }
 }
 
 function handleTabQA() {
   activeSubTab.value = 'qa'
-  if (!props.subtitleText && !props.isFetchingSubtitle && props.onFetchSubtitle) {
+  if (!props.workspaceMode && !props.subtitleText && !props.isFetchingSubtitle && props.onFetchSubtitle) {
     props.onFetchSubtitle()
   }
 }
@@ -324,27 +335,37 @@ function injectMindmapStyle(svgEl) {
   svgEl.insertBefore(styleEl, svgEl.firstChild)
 }
 
-watch(() => props.mindmapMarkdown, async (val) => {
-  if (val) {
+let mindmapRenderEpoch = 0
+watch([() => props.mindmapMarkdown, activeSubTab], async ([md, tab]) => {
+  const ticket = ++mindmapRenderEpoch
+  if (md && tab === 'mindmap') {
     await nextTick()
-    await renderMindmap(val)
+    await renderMindmap(md, ticket)
   }
-})
+}, { immediate: true })
 
-async function renderMindmap(md) {
-  if (!mindmapSvg.value) return
+async function renderMindmap(md, ticket) {
+  const svg = mindmapSvg.value
+  if (!svg?.isConnected || activeSubTab.value !== 'mindmap') return
   try {
     const { Transformer, Markmap } = await loadMarkmap()
-    if (!mindmapSvg.value || md !== props.mindmapMarkdown) return
-    if (markmapInstance) {
-      markmapInstance.destroy?.()
-      markmapInstance = null
-    }
-    mindmapSvg.value.innerHTML = ''
-    const transformer = new Transformer()
-    const { root } = transformer.transform(md)
-    markmapInstance = Markmap.create(mindmapSvg.value, { autoFit: true, duration: 0 }, root)
-    injectMindmapStyle(mindmapSvg.value)
+    if (ticket !== mindmapRenderEpoch || mindmapSvg.value !== svg || !svg.isConnected) return
+    markmapInstance?.svg?.interrupt?.()
+    markmapInstance?.destroy?.()
+    svg.innerHTML = ''
+    const { root } = new Transformer().transform(md)
+    // Supplying data to create() launches an unobserved fit promise, which can
+    // outlive navigation. Await rendering and fit explicitly while still visible.
+    const instance = Markmap.create(svg, { autoFit: false, duration: 0 })
+    markmapInstance = instance
+    instance.zoom.extent(() => {
+      const { width, height } = svg.getBoundingClientRect()
+      return [[0, 0], [width, height]]
+    })
+    await instance.setData(root)
+    if (ticket !== mindmapRenderEpoch || !svg.isConnected || activeSubTab.value !== 'mindmap') return
+    injectMindmapStyle(svg)
+    await instance.fit()
   } catch (e) {
     console.warn('思维导图渲染失败:', e)
   }
@@ -353,13 +374,15 @@ async function renderMindmap(md) {
 function onFullscreenChange() {
   isFullscreen.value = !!document.fullscreenElement
   nextTick(() => {
-    if (markmapInstance) markmapInstance.fit()
+    if (markmapInstance && mindmapSvg.value?.isConnected && activeSubTab.value === 'mindmap') markmapInstance.fit().catch(e => console.warn('思维导图缩放失败:', e))
   })
 }
 
 onMounted(() => document.addEventListener('fullscreenchange', onFullscreenChange))
 onUnmounted(() => {
   document.removeEventListener('fullscreenchange', onFullscreenChange)
+  mindmapRenderEpoch += 1
+  markmapInstance?.svg?.interrupt?.()
   if (markmapInstance) {
     markmapInstance.destroy?.()
     markmapInstance = null
@@ -785,7 +808,7 @@ function downloadNotes() {
 <template>
   <div class="ai-summary">
     <!-- 未开始状态 -->
-    <div v-if="!result && !loading && !error" class="summary-trigger">
+    <div v-if="!workspaceMode && !result && !loading && !error" class="summary-trigger">
       <button @click="handleStart" class="summarize-btn">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="summarize-icon">
           <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z" />
@@ -853,15 +876,15 @@ function downloadNotes() {
             learned: part.is_cached,
           }"
           :aria-current="currentSummarizePart === part.index ? 'true' : undefined"
-          :aria-label="`${part.is_cached ? '已学习，' : ''}切换到 P${part.index} ${part.title}`"
+          :aria-label="`${partCoverageLabel(part)}，切换到 P${part.index} ${part.title}`"
           @click="onSwitchPart && onSwitchPart(part.index)"
         >
           <div class="part-info">
             <span class="part-index">P{{ part.index }}</span>
             <span class="part-title">{{ part.title }}</span>
-            <span v-if="part.is_cached" class="part-learned" title="已有学习缓存">
+            <span v-if="partCoverageLabel(part)" class="part-learned" :title="partCoverageLabel(part)">
               <span class="part-learned-icon" aria-hidden="true">✓</span>
-              <span>已学习</span>
+              <span>{{ partCoverageLabel(part) }}</span>
             </span>
             <span v-if="loading && currentSummarizePart === part.index" class="parts-spinner"></span>
             <span v-if="part.duration" class="part-duration">{{ formatDuration(part.duration) }}</span>
@@ -871,7 +894,7 @@ function downloadNotes() {
     </div>
 
     <!-- 结果展示区（含 4 个子 Tab） -->
-    <div v-if="(result || loading) && !backgroundTask" class="summary-content">
+    <div v-if="workspaceMode || ((result || loading) && !backgroundTask)" class="summary-content">
 
       <!-- 子 Tab 栏 -->
       <div class="sub-tab-bar">
@@ -879,7 +902,7 @@ function downloadNotes() {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="sub-tab-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" /></svg>
           摘要
         </button>
-        <button class="sub-tab-btn" :class="{ active: activeSubTab === 'subtitle' }" @click="handleTabSubtitle">
+        <button v-if="!workspaceMode" class="sub-tab-btn" :class="{ active: activeSubTab === 'subtitle' }" @click="handleTabSubtitle">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="sub-tab-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg>
           字幕
         </button>
@@ -905,13 +928,14 @@ function downloadNotes() {
           @click="handleTabQA"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="sub-tab-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" /></svg>
-          问答
+          {{ workspaceMode ? '精选问答' : '问答' }}
         </button>
+        <button v-if="workspaceMode" class="sub-tab-btn" :class="{ active: activeSubTab === 'chat' }" @click="activeSubTab = 'chat'">自由提问</button>
       </div>
 
       <!-- Tab: 摘要 -->
       <div v-show="activeSubTab === 'summary'" class="sub-tab-panel">
-        <div v-if="loading && (!regeneratingMode || regeneratingMode === 'summary') && !streamingText && !result?.summary" class="loading-skeleton">
+        <div v-if="moduleLoading('summary') && !streamingText && !result?.summary" class="loading-skeleton">
           <div class="skeleton-line skeleton-title"></div>
           <div class="skeleton-line skeleton-long"></div>
           <div class="skeleton-line skeleton-medium"></div>
@@ -944,7 +968,7 @@ function downloadNotes() {
           </div>
           <button v-if="!loading" @click="handleRegenerateSummary" class="regenerate-btn">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="regenerate-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" /></svg>
-            重新生成摘要
+            {{ result?.summary ? '重新生成摘要' : '生成摘要' }}
           </button>
         </div>
       </div>
@@ -1023,13 +1047,13 @@ function downloadNotes() {
             <svg ref="mindmapSvg" class="mindmap-svg" :style="isFullscreen ? 'height: 100%' : 'min-height: 500px'"></svg>
           </div>
         </div>
-        <div v-else-if="loading && (!regeneratingMode || regeneratingMode === 'mindmap')" class="mindmap-loading">
+        <div v-else-if="moduleLoading('mindmap')" class="mindmap-loading">
           <div class="skeleton-line skeleton-long"></div>
           <div class="skeleton-line skeleton-medium"></div>
           <p class="loading-text">正在生成思维导图...</p>
         </div>
         <div v-else class="mindmap-empty">
-          <template v-if="result">
+          <template v-if="result || workspaceMode">
             <p>尚未生成思维导图</p>
             <button @click="handleRegenerateMindmap" :disabled="loading" class="regenerate-btn regenerate-btn--primary">
               <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/></svg>
@@ -1045,14 +1069,14 @@ function downloadNotes() {
 
       <!-- Tab: 学习笔记 -->
       <div v-show="activeSubTab === 'notes'" class="sub-tab-panel">
-        <div v-if="!notesMarkdown && loading && (!regeneratingMode || regeneratingMode === 'notes')" class="notes-loading">
+        <div v-if="!notesMarkdown && moduleLoading('notes')" class="notes-loading">
           <div class="skeleton-line skeleton-long"></div>
           <div class="skeleton-line skeleton-medium"></div>
           <p class="loading-text">正在生成学习笔记...</p>
         </div>
         <div v-else-if="notesMarkdown" class="notes-section">
           <div class="notes-toolbar">
-            <span v-if="loading && (!regeneratingMode || regeneratingMode === 'notes')" class="notes-streaming-badge">生成中...</span>
+            <span v-if="moduleLoading('notes')" class="notes-streaming-badge">生成中...</span>
             <button @click="copyNotes" class="notes-action-btn">
               <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z"/><path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 3H9a3 3 0 01-3-3z"/></svg>
               复制
@@ -1068,7 +1092,7 @@ function downloadNotes() {
           <div class="notes-content prose prose-invert prose-sm max-w-none" v-html="notesHtml" @click="onNotesClick"></div>
         </div>
         <div v-else class="notes-empty">
-          <template v-if="result">
+          <template v-if="result || workspaceMode">
             <p>尚未生成学习笔记</p>
             <button @click="handleRegenerateNotes" :disabled="loading" class="regenerate-btn regenerate-btn--primary">
               <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/></svg>
@@ -1082,16 +1106,16 @@ function downloadNotes() {
       </div>
 
       <!-- Tab: 问答 -->
-      <div v-show="activeSubTab === 'qa'" class="sub-tab-panel">
+      <div v-show="activeSubTab === 'qa' || (workspaceMode && activeSubTab === 'chat')" class="sub-tab-panel">
         <div class="qa-container">
           <!-- 模式切换 -->
-          <div class="qa-mode-bar">
+          <div v-if="!workspaceMode" class="qa-mode-bar">
             <button class="qa-mode-btn" :class="{ active: qaMode === 'generated' }" @click="qaMode = 'generated'">精选问答</button>
             <button class="qa-mode-btn" :class="{ active: qaMode === 'chat' }" @click="qaMode = 'chat'">自由提问</button>
           </div>
 
           <!-- 精选问答模式 -->
-          <div v-show="qaMode === 'generated'" class="qa-mode-panel">
+          <div v-show="workspaceMode ? activeSubTab === 'qa' : qaMode === 'generated'" class="qa-mode-panel">
             <!-- 无字幕 -->
             <div v-if="!subtitleText && !isFetchingSubtitle" class="chat-need-subtitle">
               <p>请先加载字幕文本以使用问答功能</p>
@@ -1099,16 +1123,16 @@ function downloadNotes() {
             </div>
             <template v-else>
               <!-- 生成中 -->
-              <div v-if="isQaGenerating" class="qa-loading">
+              <div v-if="isQaGenerating || moduleLoading('qa')" class="qa-loading">
                 <div class="skeleton-line skeleton-long"></div>
                 <div class="skeleton-line skeleton-medium"></div>
                 <p class="loading-text">正在生成关键问答对...</p>
               </div>
               <!-- 空状态 -->
               <div v-else-if="!qaPairs.length && !qaError" class="qa-empty">
-                <template v-if="result">
+                <template v-if="result || workspaceMode">
                   <p>尚未生成关键问答</p>
-                  <button @click="onGenerateQa" :disabled="!subtitleText" class="regenerate-btn regenerate-btn--primary">
+                  <button @click="onGenerateQa" :disabled="!subtitleText || loading" class="regenerate-btn regenerate-btn--primary">
                     <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path fill-rule="evenodd" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" clip-rule="evenodd"/></svg>
                     生成关键问答
                   </button>
@@ -1139,7 +1163,7 @@ function downloadNotes() {
                     <div class="qa-pair-answer-content prose prose-invert prose-sm max-w-none" v-html="cachedMarkdown(pair.answer)"></div>
                   </div>
                 </div>
-                <button @click="handleRegenerateQa" :disabled="isQaGenerating" class="regenerate-btn">
+                <button @click="handleRegenerateQa" :disabled="isQaGenerating || loading" class="regenerate-btn">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="regenerate-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" /></svg>
                   重新生成
                 </button>
@@ -1148,7 +1172,7 @@ function downloadNotes() {
           </div>
 
           <!-- 自由提问模式 -->
-          <div v-show="qaMode === 'chat'" class="qa-mode-panel">
+          <div v-show="workspaceMode ? activeSubTab === 'chat' : qaMode === 'chat'" class="qa-mode-panel">
             <div class="chat-container">
               <div v-if="!subtitleText && !isFetchingSubtitle" class="chat-need-subtitle">
                 <p>请先加载字幕文本以使用问答功能</p>
@@ -1168,13 +1192,14 @@ function downloadNotes() {
                 <div class="chat-input-row">
                   <textarea
                     v-model="chatInput"
+                    aria-label="基于视频字幕提问"
                     class="chat-input"
                     placeholder="基于视频字幕提问..."
                     rows="2"
                     :disabled="isChatStreaming"
                     @keydown.enter.exact.prevent="sendChat"
                   ></textarea>
-                  <button @click="sendChat" :disabled="isChatStreaming || !chatInput.trim()" class="chat-send-btn">
+                  <button @click="sendChat" :disabled="isChatStreaming || !chatInput.trim()" class="chat-send-btn" aria-label="发送问题">
                     <svg v-if="!isChatStreaming" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="send-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
                     <svg v-else class="send-icon spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" /></svg>
                   </button>
@@ -1698,7 +1723,8 @@ function downloadNotes() {
 .notes-content :deep(strong) { color: #F8FAFC; font-weight: 600; }
 .notes-content :deep(a) { color: var(--accent-blue); }
 .notes-content :deep(hr) { border-color: var(--border); margin: 1rem 0; }
-.notes-content :deep(.notes-timestamp) {
+.notes-content :deep(.notes-timestamp),
+.summary-text :deep(.notes-timestamp) {
   display: inline-flex;
   align-items: center;
   padding: 0 0.375rem;
@@ -1708,12 +1734,16 @@ function downloadNotes() {
   border-radius: 4px;
   font-size: 0.8125rem;
   font-variant-numeric: tabular-nums;
-  color: #93C5FD;
+  color: #BFDBFE;
   font-family: inherit;
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 2px;
   cursor: pointer;
   transition: background 0.15s;
 }
-.notes-content :deep(.notes-timestamp:hover) {
+.notes-content :deep(.notes-timestamp:hover),
+.summary-text :deep(.notes-timestamp:hover) {
   background: rgba(59, 130, 246, 0.25);
 }
 .notes-loading { display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 2rem; }

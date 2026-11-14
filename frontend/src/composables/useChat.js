@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+import { ref, onScopeDispose } from 'vue'
 import { useAuth } from './useAuth.js'
 
 const API_BASE = '/api'
@@ -8,9 +8,14 @@ export function useChat() {
   const chatMessages = ref([])
   const isChatStreaming = ref(false)
   const chatError = ref('')
+  let controller = null
+  let requestId = 0
 
   async function sendQuestion(subtitleContext, question) {
     if (!subtitleContext || !question.trim()) return
+    if (isChatStreaming.value) return
+    const ticket = ++requestId
+    controller = new AbortController()
 
     chatMessages.value.push({ role: 'user', content: question.trim() })
     const placeholderIdx = chatMessages.value.length
@@ -29,6 +34,7 @@ export function useChat() {
         method: 'POST',
         headers: getAuthHeaders(),
         body: JSON.stringify({ subtitle_text: subtitleContext, question: question.trim(), history }),
+        signal: controller.signal,
       })
 
       if (!response.ok) {
@@ -43,6 +49,7 @@ export function useChat() {
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
+        if (ticket !== requestId) { await reader.cancel(); return }
         buffer += decoder.decode(value, { stream: true })
 
         const lines = buffer.split('\n')
@@ -61,19 +68,26 @@ export function useChat() {
         }
       }
     } catch (e) {
-      chatError.value = e.message || '问答失败'
-      chatMessages.value[placeholderIdx].content = '[回答失败，请重试]'
+      if (ticket === requestId && e.name !== 'AbortError') {
+        chatError.value = e.message || '问答失败'
+        if (chatMessages.value[placeholderIdx]) chatMessages.value[placeholderIdx].content = '[回答失败，请重试]'
+      }
     } finally {
-      isChatStreaming.value = false
+      if (ticket === requestId) { isChatStreaming.value = false; controller = null }
       refreshUsage()
     }
   }
 
   function resetChat() {
+    requestId += 1
+    controller?.abort()
+    controller = null
     chatMessages.value = []
     isChatStreaming.value = false
     chatError.value = ''
   }
+
+  onScopeDispose(() => { requestId += 1; controller?.abort() })
 
   return { chatMessages, isChatStreaming, chatError, sendQuestion, resetChat }
 }

@@ -13,6 +13,7 @@ const stageLabel = computed(() => {
   const task = primaryTask.value
   if (!task) return ''
   return task.message || {
+    awaiting_confirmation: '等待确认语音转录',
     queued: '等待后台处理',
     downloading: '正在下载音频',
     transcribing: '正在转录字幕',

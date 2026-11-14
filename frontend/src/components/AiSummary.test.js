@@ -18,7 +18,7 @@ describe('AiSummary multipart learning state', () => {
     const rows = wrapper.findAll('.part-row')
     expect(rows).toHaveLength(2)
     expect(rows[0].classes()).toContain('learned')
-    expect(rows[0].get('.part-learned').text()).toContain('已学习')
+    expect(rows[0].get('.part-learned').text()).toContain('已整理')
     expect(rows[1].classes()).toContain('active')
     expect(rows[1].find('.part-learned').exists()).toBe(false)
   })
