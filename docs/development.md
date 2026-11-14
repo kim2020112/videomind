@@ -25,7 +25,7 @@ cp backend/.env.example backend/.env
 | `BILIBILI_COOKIE` | B 站 Cookie；字幕留空时用匿名设备 Cookie，博主目录同步必须含 SESSDATA 的登录 Cookie |
 | `ADMIN_USERNAME`、`ADMIN_PASSWORD` | 可选管理员初始化 |
 | `GUEST_SECRET` | 访客签名；保持默认值时访客入口关闭 |
-| `AI_CACHE_KEEP` | AI 缓存保留条数（按视频计，默认 500）；批量生成依赖较大值避免成果被淘汰 |
+| `AI_CACHE_KEEP` | AI 缓存软上限（按视频计，默认 500）；历史和收藏中的成果受保护，可超过此值，清理不删除字幕与视频记录 |
 | `AI_REQUEST_TIMEOUT`、`AI_STREAM_TIMEOUT` | AI 请求超时与流式空闲超时（秒） |
 | `DB_PATH`、`AI_CONFIG_PATH` | 持久化数据位置 |
 | `TEMP_DIR`、`DOWNLOAD_DIR`、`WHISPER_MODELS_DIR` | 运行目录 |
@@ -76,6 +76,8 @@ systemd、反向代理和备份策略属于部署环境，不在仓库内维护�
 | 字幕与转录 | `backend/core/pipeline/subtitle.py`、`backend/core/summarizer.py`、`backend/workers/` |
 | AI 流水线与运行时连接 | `backend/api/stream_routes.py`、`backend/core/pipeline/`、`backend/core/ai_config.py`、`backend/core/text_client.py`、`backend/prompts/` |
 | 博主订阅与批量生成 | `backend/api/blogger_routes.py`、`backend/core/blogger/`、`frontend/src/components/BloggersPage.vue`、`frontend/src/components/BloggerDetailPage.vue` |
+| 独立字幕与学习任务 | `backend/api/learning_routes.py`、`backend/core/learning.py`、`frontend/src/composables/useLearning.js` |
+| 内容标签与列表定位 | `backend/core/content_state.py`、`backend/core/blogger/learned.py`、`frontend/src/components/ContentBadges.vue`、`frontend/src/utils/bloggerNavigation.js` |
 | 缓存与历史 | `backend/core/cache.py`、`backend/api/knowledge_routes.py` |
 | 前端路由与编排 | `frontend/src/router.js`、`frontend/src/App.vue` |
 | 前端组件与状态 | `frontend/src/components/`、`frontend/src/composables/` |
@@ -86,11 +88,8 @@ systemd、反向代理和备份策略属于部署环境，不在仓库内维护�
 # 后端 unittest 套件
 env PYTHONPATH=backend .venv/bin/python -B -m unittest discover -s backend/tests -v
 
-# AI 连接配置 pytest 用例
-env PYTHONPATH=backend .venv/bin/python -B -m pytest \
-  backend/tests/test_ai_config.py \
-  backend/tests/test_ai_config_v3.py \
-  backend/tests/test_ai_connections.py -q
+# 后端完整回归（包含 pytest 与 unittest 用例）
+env PYTHONPATH=backend .venv/bin/python -B -m pytest backend/tests -q
 
 # 前端全部测试
 npm --prefix frontend run test:run
@@ -104,6 +103,8 @@ git diff --check
 ```
 
 测试必须使用临时数据库，不得读写开发或生产数据库。涉及缓存、身份、后台任务或路由的修复应补回归测试，并先确认测试能复现旧行为。
+
+博主列表回归需覆盖：字幕浏览后返回出现“有字幕”、生成部分模块后显示“已整理 · n/4”、失败重试保留已有标记、工作台刷新和浏览器后退恢复原视频/分 P、筛选后原视频移出时的提示，以及访客/用户之间的状态隔离。浏览器验收还应覆盖桌面/手机无横向溢出，导图加载期间返回不产生异常。
 
 ## 运行排错
 
@@ -120,7 +121,7 @@ curl http://127.0.0.1:8000/api/capabilities
 - 博主目录同步报 `login`：`BILIBILI_COOKIE` 未配置或缺少 SESSDATA；同步接口为登录态接口，不能用匿名设备 Cookie。
 - 解析/下载报 HTTP 412：B 站风控拦截无 Cookie 的服务端请求；`core/bilibili.py` 会把 `BILIBILI_COOKIE` 写成 Netscape cookiefile 供 yt-dlp 使用，Cookie 失效或未配置时会提示更新。
 - B 站无 CC 后转录出现 `HTTP 412`：确认解析结果含 `audio_stream_url`，并确认 worker 命令收到 `--audio-url`。旧 `video_info_cache` 没有该字段时应先刷新解析，不要直接让 worker 再次抓取视频页面。
-- 分 P 状态异常：同时检查精确 URL、`url_hash`、当前身份历史状态和非空 AI 缓存；不要把共享视频指纹当成分 P 唯一键。
+- 分 P 状态异常：同时检查精确 URL、`url_hash`、当前身份历史归属及已保存的有效字幕/模块，失败任务不应抹掉已有资料状态；不要把共享视频指纹当成分 P 唯一键。
 - 分 P 转录 ETA 异常：确认 canonical URL 保留 `p` 参数，并从 `parts` 中读取所选分 P 时长，而不是全集总时长。
 
 ## Git 与文档

@@ -29,9 +29,17 @@
 - `frontend/src/App.vue`：认证、能力、路由和工作台状态编排。
 - `frontend/src/router.js`：`/`、`/workspace`、`/history`、历史详情、`/bloggers` 和博主详情路由。
 - `frontend/src/components/`：页面区域、Dialog、下载、视频和 AI 结果组件。
-- `frontend/src/composables/`：认证、能力、总结、下载、后台任务和管理员连接状态。
+- `frontend/src/composables/`：认证、能力、学习工作区、下载、后台任务和管理员连接状态。
 
-工作台 URL 保存当前视频链接、标签页和分 P。刷新、前进后退或打开历史详情时，前端从路由查询参数恢复状态。History、管理员设置、视频播放器和 markmap 等较重功能按需加载。
+工作区先展示独立的字幕面板，再提供摘要、导图、笔记和精选问答四个可选模块。字幕加载后默认展开；手动收起只隐藏正文，复制和下载始终保留在外层。格式说明仅在悬停或键盘聚焦时显示，支持 Esc 关闭及视口边缘避让。字幕 TXT 下载不依赖时间轴；仅在每条字幕都有有效起止时间时提供 SRT/VTT。历史页和分 P 切换只读取快照，不自动触发生成。
+
+工作台 URL 保存当前视频链接、标签页和分 P。刷新、前进后退或打开历史详情时，前端从路由查询参数恢复状态。History、管理员设置、视频播放器和 markmap 等较重功能按需加载。导图仅在标签页可见时渲染，页面离开后不再执行异步缩放。
+
+博主列表进入工作区时，URL 的 `returnTo` 保存站内博主详情路径、搜索、学习状态筛选、已加载页和视频锚点。工作区的「返回博主视频列表」在刷新、标签页或分 P 切换后保留；返回列表重新读取学习状态并定位原视频。列表组件独立负责滚动恢复，路由不竞争滚动；sessionStorage 按身份、博主和筛选保存卡片距视口顶部的位置、相邻项、已加载数及展开分 P。服务端的 anchor_index 按当前筛选和排序定位，避免同步新投稿后页码偏移。原视频离开筛选时保留筛选并提示，可一键查看原视频。
+
+`core/content_state.py` 统一字幕和四种已保存模块的判定，任务失败不覆盖已有内容状态；空 JSON、空模块及简介摘要不计入已整理数。博主卡片、视频列表、分 P 和历史共用此口径，字幕筛选可以与整理筛选叠加。`POST /api/workspace/visit` 在读到共享缓存后幂等登记身份记录，不更新已有状态或收藏，不创建任务或消耗额度；GET 快照保持只读。
+
+视频解析和播放地址刷新通过 Starlette 的受限线程池执行，包括同步短链解析、DNS、yt-dlp 与数据库读取，避免外部平台慢请求阻塞 API 事件循环。下载器统一使用 `DOWNLOAD_DIR`。
 
 ## AI 连接与文本客户端
 
@@ -45,11 +53,11 @@
 
 登录和注册会创建不透明的 `session_id`。前端将它保存在 `sessionStorage`，使登录状态在刷新后保留，同时隔离不同浏览器窗口。
 
-普通 HTTP 请求只从 `Authorization: Bearer <session_id>` 读取登录凭据。Cookie 和普通 HTTP 查询参数不参与认证，`/api/auth/me` 也不会回传凭据。视频流和下载 WebSocket 因浏览器原生元素不能设置自定义请求头，P0 期间仍允许显式 `session_id` 查询参数；后续由短期 ticket 替换。
+普通 HTTP 请求只从 `Authorization: Bearer <session_id>` 读取登录凭据。Cookie 和普通 HTTP 查询参数不参与认证，`/api/auth/me` 也不会回传凭据。视频流和下载 WebSocket 因浏览器原生元素不能设置自定义请求头，目前允许显式 `session_id` 查询参数。
 
 访客设备 ID 与签名保存在 `localStorage`，只有配置了非默认 `GUEST_SECRET` 时才开放访客能力。普通 HTTP 使用 `X-Guest-Id` / `X-Guest-Sig`，视频流和 WebSocket 可使用对应查询参数。显式 Bearer 或 query Session 一旦出现就必须独立验证成功；格式错误、过期或不存在时直接拒绝，不能降级到另一组 Session 或访客身份。
 
-迁移 `20260713_invalidate_legacy_auth_sessions` 在一个 `BEGIN IMMEDIATE` 事务中删除旧 Session 并写入版本标记，只执行一次。部署 P0 后所有已登录用户必须重新登录。
+迁移 `20260713_invalidate_legacy_auth_sessions` 在一个 `BEGIN IMMEDIATE` 事务中删除旧 Session 并写入版本标记，只执行一次。该迁移首次执行后，旧登录会话失效，用户需重新登录。
 
 ## 媒体代理安全
 
@@ -59,12 +67,12 @@
 
 ## 字幕管线
 
-字幕获取顺序为：
+独立字幕任务和学习资料任务共用字幕获取管线，顺序为：
 
 1. SQLite 已缓存字幕。
 2. B 站 CC 或其他平台原生字幕。
 3. yt-dlp 可用字幕。
-4. Whisper 本地转录。
+4. 用户确认后的 Whisper 本地转录。
 
 B 站 CC 查询使用三态语义：
 
@@ -72,7 +80,7 @@ B 站 CC 查询使用三态语义：
 - `absent`：平台成功响应并明确没有字幕。
 - `unavailable`：限流、网络、登录要求或无效响应导致无法可靠判断。
 
-只有 `absent` 才允许进入 Whisper 或无字幕回退；`unavailable` 返回可重试错误，避免把平台故障误判为视频没有字幕。多分 P 视频使用所选分 P 的精确 `cid`，不会静默回退到 P1。
+只有平台明确返回 `absent` 时才向用户请求 Whisper 确认；`unavailable` 返回可重试错误，不会触发转录或简介摘要。多分 P 视频使用所选分 P 的精确 `cid`，不会静默回退到 P1。
 
 短链解析完成后，缓存、字幕和学习状态统一使用 yt-dlp 返回的规范 `webpage_url`，并保留原始 `p` 参数。基础多分 P URL 可展示全集总时长；明确选择分 P 后，Whisper 时长上限、ETA 和进度使用该分 P 自身时长。
 
@@ -83,14 +91,18 @@ SQLite 保存用户、会话、视频、字幕、AI 输出、学习历史、缓�
 主要缓存：
 
 - `video_info_cache`：按精确 URL 哈希保存视频与分 P 元数据。
-- `ai_cache`：按精确 URL 哈希保存完整 AI 学习结果。
+- `ai_cache`：按精确 URL 哈希保存已成功的各学习模块及其独立来源和版本元数据。
+- `learning_events`：保存后台任务事件，供刷新和 SSE 游标续读。
+- `learning_usage`：按任务保留一次额度预留/成功扣费记录，支持任务恢复时防重复扣费。
 - `whisper_cache`：按精确 URL 哈希保存本地转录结果。
 
 同一 B 站视频的分组指纹只用于保留策略和非分 P 旧链接兼容，不是缓存唯一身份。读取缓存不会批量改写 URL、哈希或用户历史，删除一个分 P 也不会删除相邻分 P。
 
-“已学习”是当前身份的派生状态，不写入共享视频元数据。只有当前用户或访客的 `user_history.status = done`，并且同一 URL 存在非空 AI 缓存时，对应分 P 才显示为已学习。成功重试会把该身份原有的失败历史更新为 `done`。
+`AI_CACHE_KEEP` 是 AI 缓存的软上限。任何身份的学习历史引用或收藏标记都会保护对应 AI 成果；受保护资料可超过上限。仅淘汰未受保护的旧 AI 缓存，不级联删除字幕、视频、标签或任务事件。成功生成先在同一事务写入历史，再执行淘汰。聊天及纯文本问答结束时按操作 ID 释放预占额度，启动时回收没有可恢复任务的残留预占。
 
-完整生成、部分 AI 产物和后台 Whisper 完成统一使用 generate-then-swap。摘要完整非空、结果可 JSON 序列化后，才在单个 `BEGIN IMMEDIATE` 事务中替换视频信息、字幕、Whisper、AI 缓存、当前身份历史和 `SUCCESS` 用量。空结果、异常或任一 SQL 失败都会保留旧共享缓存且不消耗额度。
+“有字幕”表示缓存中有可读原文；“已整理 · n/4”只统计摘要、导图、笔记和问答的有效内容；“简介摘要”独立标记，不计入视频全文整理。状态由当前身份的历史和该 URL 的实际内容派生，不以任务成功与否作为覆盖依据，也不写入共享视频元数据。普通身份只看自己的记录，管理员沿用跨身份查看已保存内容的权限。每个模块单独记录字幕修订、提示词版本和模型；旧版本仍可阅读，字幕或提示词变化只让相关模块标记为过期。
+
+每个模块独立生成并事务性合并到已有缓存，因此部分失败会保留本次成功模块和之前的成果。读取缓存、字幕获取与 Whisper 转录不收费；生成操作只预留一次额度，在首个新模块成功写入同一事务时扣费，同一操作的后续模块、断线重试和恢复不会重复扣费。用户显式新建的生成或强制重新生成操作在保存新成果时单独计费。空结果、异常或 SQL 失败不会替换该模块旧内容。简介摘要单独保存并注明 `description` 来源，不伪装成基于字幕的结果。
 
 ## 博主与批量生成
 
@@ -98,15 +110,18 @@ SQLite 保存用户、会话、视频、字幕、AI 输出、学习历史、缓�
 
 目录同步（`core/blogger/sync.py`）运行在独立线程池，不进重任务队列；2 秒全局限速 + 同页签名防死循环 + 空目录与预期不一致拒绝误判。B 站空间搜索接口（`/x/space/wbi/arc/search`）需要登录 Cookie（`BILIBILI_COOKIE` 含 SESSDATA）；未配置时明确报 `login` 而非静默失败。错误分类：`network` 自动重试 2 次（30s/120s）、`rate_limit` 重试 1 次（15 分钟）、`login` 暂停并提示配置 Cookie。B 站课堂付费课程的推广条目（vlist `is_lesson_video` 或 `jump_url` 指向 `/cheese/`）不是普通投稿，同步时跳过入库并清理历史误收，避免批量生成和工作台解析失败。
 
-批量条目是 `job_type="batch_item"` 的后台任务，每条目一 job：复用 `job_store` 的单槽队列、取消与崩溃恢复；`JobScheduler` 按 `job_type` 分发到进程内处理器 `core/blogger/batch_runner.py`——缓存命中直接复用，bvid+cid 已知时跳过 yt-dlp 解析快取 CC 字幕，无字幕才跑 Whisper 子进程（处理器内禁止再 create_job，单槽会死锁），AI 生成走 `background_pipeline.generate_full_from_subtitle`（与 Whisper 后完成共用），`generate-then-swap` 原子提交。AI 前有额度闸门，超限条目跳过并暂停整批。`AI_CACHE_KEEP`（默认 500）控制 AI 缓存保留条数，避免批量成果被 50 条旧上限淘汰。
+批量条目是 `job_type="batch_item"` 的后台任务，每条目一 job：复用 `job_store` 的单槽队列、取消与崩溃恢复；`JobScheduler` 按 `job_type` 分发到进程内处理器 `core/blogger/batch_runner.py`——缓存命中直接复用，bvid+cid 已知时跳过 yt-dlp 解析快取 CC 字幕，无字幕才跑 Whisper 子进程（处理器内禁止再 create_job，单槽会死锁），AI 生成走 `background_pipeline.generate_full_from_subtitle`（与 Whisper 后完成共用），`generate-then-swap` 原子提交。AI 前有额度闸门，超限条目跳过并暂停整批。批量成果写入所属身份的学习历史后，同样受到缓存淘汰保护。
 
 ## 后台任务
+
+`GET /api/workspace?url=...` 返回只读快照；`POST /api/subtitle/prepare` 创建独立字幕任务；`POST /api/learning/generate` 接受 `summary`、`mindmap`、`notes`、`qa` 的所选组合；`GET /api/tasks/{id}/events?after=...` 以持久事件 ID 续读 SSE。平台无字幕时任务进入 `awaiting_confirmation`，确认接口恢复原任务并继续转录与生成。页面卸载只关闭 SSE，不取消后台工作。
 
 任务状态流：
 
 ```text
 queued -> downloading -> transcribing -> generating -> done
-                                         `-> failed / cancelled
+            |                                  `-> partial / failed / cancelled
+            `-> awaiting_confirmation -> queued（用户确认后恢复）
 ```
 
 - `core/job_store.py`：任务持久化、原子领取、查询与取消。
@@ -115,7 +130,7 @@ queued -> downloading -> transcribing -> generating -> done
 - `core/background_pipeline.py`：生成后台结果，成功后交给原子提交层保存。
 - `core/generation_commit.py`：验证生成结果并原子替换缓存、字幕、历史和用量。
 
-服务启动时会恢复被中断的任务；取消会终止当前子进程并清理临时结果。业务失败进入终态，不无限重试。
+学习任务会在每个模块保存后持久化检查点；服务重启后跳过已保存模块并继续未完成的模块。事件记录按保留期清理；取消会终止当前子进程并清理临时结果。模块业务失败进入可单独重试的终态，不无限重试。
 
 视频解析结果会分别保留播放流和最佳音频流。提交 Whisper 任务时，解析信息随任务 payload 持久化；仍有效的音频直链通过 `--audio-url` 传给 worker。worker 优先直接下载音频 CDN，避免 B 站在短时间内重复抓取视频页面触发 `412`；直链缺失或失效时才回退到原视频 URL。旧缓存没有音频直链时，B 站任务会先刷新解析信息再入队。
 

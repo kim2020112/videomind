@@ -5,15 +5,22 @@ VideoMind 是一个将在线视频转化为结构化学习资料的 Web 应用�
 ## 主要能力
 
 - 解析多平台视频信息并提供下载选项。
-- 优先使用平台原生字幕；没有字幕时可选用本地 Whisper 转录。
+- 字幕是独立获取、阅读、复制和下载的原文资料；有完整时间轴时提供 SRT/VTT，没有则提供 TXT。
+- 字幕获取后默认展开；收起正文仍可复制或下载，悬停或聚焦格式按钮可查看用途说明。
+- 平台明确没有可下载字幕时，会询问是否启动 Whisper 语音转录；网络或限流失败可重试。
 - B 站字幕区分“可用、明确没有、暂时不可用”，接口限流或临时失败不会误启动 Whisper 或生成简介总结。
 - B 站多分 P 视频按用户所选分 P 的精确 `cid` 获取字幕。
 - B 站短链在解析后统一为规范视频 URL；转录限制与 ETA 使用所选分 P 时长，而不是整套视频总时长。
 - B 站确实没有可下载字幕时才进入 Whisper；后台任务复用解析阶段取得的音频直链，避免重复抓取视频页面。
-- 基于字幕生成摘要、笔记、思维导图和关键问答。
+- 摘要、思维导图、学习笔记和精选问答可分别选择生成；默认全选，也可单独补生成或重试失败模块。
+- 后台生成可跨页面和刷新继续；每个生成操作最多计 1 次额度，只有新资料成功保存时才计费，读取缓存和字幕提取不计费。
+- 无法取得视频全文时，可单独选择根据视频简介生成摘要，结果会标明来源且不混入字幕摘要缓存。
 - 管理员可在运行时配置多个 OpenAI 或 Anthropic 兼容连接，发现或手动维护模型目录、测试模型并切换业务主力模型。
-- 保存标签、收藏、历史状态，并按当前身份标记已经学习且有 AI 缓存的分 P。
+- 保存标签、收藏、历史状态，并按当前身份展示分 P 的字幕缓存和已整理资料。
 - 订阅 B 站 UP 主（每个用户/访客各自独立的博主列表），浏览投稿目录并批量生成学习资料；批量条目复用缓存、原子提交与额度管控。目录同步需在 `backend/.env` 配置 `BILIBILI_COOKIE`（含 SESSDATA）。
+- 从博主视频列表进入工作区后，可直接返回原列表，并恢复搜索、整理状态/字幕筛选、已加载页、展开的分 P 和原视频滚动位置；刷新工作区或浏览器后退仍可返回。
+- 视频自动标记“有字幕”“已整理 · n/4”或“简介摘要”；多分 P 分别统计有字幕和已整理的比例。仅浏览共享缓存也会记录当前身份，不触发生成或扣额度。
+- 学习历史或收藏中的 AI 成果不会因缓存数量超限被自动淘汰；缓存清理不删除字幕、视频记录或标签。
 - 登录会话按浏览器窗口隔离，管理员和普通用户可以在不同窗口同时使用。
 - Whisper 任务持久化到 SQLite，由后端调度短生命周期子进程执行。
 - 已知平台的旧 HTTP 缩略图地址会在代理入口升级为 HTTPS。
@@ -88,11 +95,8 @@ npm --prefix frontend run preview -- --host 0.0.0.0 --port 5173
 # 后端 unittest 套件
 env PYTHONPATH=backend .venv/bin/python -B -m unittest discover -s backend/tests -v
 
-# AI 连接配置的 pytest 用例
-env PYTHONPATH=backend .venv/bin/python -B -m pytest \
-  backend/tests/test_ai_config.py \
-  backend/tests/test_ai_config_v3.py \
-  backend/tests/test_ai_connections.py -q
+# 后端完整回归（同时包含 unittest 与 pytest 用例）
+env PYTHONPATH=backend .venv/bin/python -B -m pytest backend/tests -q
 
 # 前端测试与生产构建
 npm --prefix frontend run test:run
