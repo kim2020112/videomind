@@ -374,7 +374,7 @@ print(json.dumps({
         self.assertEqual([1, 2], payload["part_indexes"])
         self.assertEqual(["Part one", "Part two"], payload["part_titles"])
 
-    def test_learned_parts_require_current_user_done_history_and_ai_cache(self):
+    def test_learned_parts_require_current_user_saved_content_despite_failed_retry(self):
         payload = self.run_json(
             """
 import json
@@ -404,7 +404,7 @@ print(json.dumps({
 }))
 """
         )
-        self.assertEqual([1], payload["user_7"])
+        self.assertEqual([1, 2], payload["user_7"])
         self.assertEqual([4], payload["user_8"])
 
     def test_successful_retry_promotes_existing_failed_history(self):

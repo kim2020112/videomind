@@ -32,6 +32,9 @@ async def cancel_task(task_id: str, request: Request):
     if not request_cancel(task_id, **owner):
         raise HTTPException(status_code=409, detail="任务已结束，无法取消")
     updated = get_job(task_id, **owner)
+    if updated and updated["status"] == "cancelled":
+        from core.learning import release_usage
+        release_usage(task_id)
     await update_terminal_history(updated, "cancelled")
     status = "cancelled" if updated and updated["status"] == "cancelled" else "cancelling"
     return {"status": status, "task_id": task_id}

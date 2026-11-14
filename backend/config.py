@@ -65,7 +65,7 @@ REGISTRATION_ENABLED = os.getenv("REGISTRATION_ENABLED", "true").lower() == "tru
 GUEST_SECRET = os.getenv("GUEST_SECRET", DEFAULT_GUEST_SECRET)
 GUEST_DAILY_LIMIT = int(os.getenv("GUEST_DAILY_LIMIT", "3"))
 USER_DAILY_LIMIT = int(os.getenv("USER_DAILY_LIMIT", "20"))
-# AI 缓存保留条数：批量生成场景需要比单视频更高的上限，否则成果会被淘汰吞掉
+# AI 缓存软上限（按视频计）；学习历史和收藏中的成果受到保护，可超过此值
 AI_CACHE_KEEP = max(10, int(os.getenv("AI_CACHE_KEEP", "500")))
 
 # 目录创建移至 FastAPI lifespan（main.py），避免导入时副作用

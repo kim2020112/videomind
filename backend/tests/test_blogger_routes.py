@@ -130,7 +130,7 @@ class BloggerRouteTests(unittest.IsolatedAsyncioTestCase):
             )
             conn.execute(
                 "INSERT INTO ai_cache (url_hash, url, result_json, created_at, updated_at) "
-                "VALUES (?, ?, '{}', '2026-01-01', '2026-01-01')",
+                "VALUES (?, ?, '{\"result\":{\"summary\":\"已有摘要\"}}', '2026-01-01', '2026-01-01')",
                 (_url_hash(url), url),
             )
 
@@ -291,7 +291,7 @@ class BloggerRouteTests(unittest.IsolatedAsyncioTestCase):
             )
             conn.execute(
                 "INSERT INTO ai_cache (url_hash, url, result_json, created_at, updated_at) "
-                "VALUES (?, ?, '{}', '2026-01-01', '2026-01-01')",
+                "VALUES (?, ?, '{\"result\":{\"summary\":\"已有摘要\"}}', '2026-01-01', '2026-01-01')",
                 (_url_hash(url), url),
             )
             video_row = conn.execute(
@@ -335,7 +335,7 @@ class BloggerRouteTests(unittest.IsolatedAsyncioTestCase):
             )
             conn.execute(
                 "INSERT INTO ai_cache (url_hash, url, result_json, created_at, updated_at) "
-                "VALUES (?, ?, '{}', '2026-01-01', '2026-01-01')",
+                "VALUES (?, ?, '{\"result\":{\"summary\":\"已有摘要\"}}', '2026-01-01', '2026-01-01')",
                 (_url_hash(url), url),
             )
 

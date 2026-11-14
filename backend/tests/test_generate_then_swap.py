@@ -42,6 +42,70 @@ async def consume_stream(response) -> bytes:
 
 
 class StreamingGenerateThenSwapTests(unittest.IsolatedAsyncioTestCase):
+    async def test_summary_retry_after_initial_model_failure_runs_full_generation(self):
+        info = VideoInfo(title="New title", webpage_url=URL, duration=60)
+        result = {"summary": "Summary from the replacement model", "chapters": []}
+        with ExitStack() as stack:
+            mocks = self._patch_full_pipeline(stack, info, [])
+            stack.enter_context(patch.object(stream_routes, "get_cached", return_value=None))
+            stack.enter_context(patch.object(stream_routes, "_get_cached_raw", return_value=None))
+            run_summary = stack.enter_context(patch.object(
+                stream_routes, "run_summary", side_effect=[
+                    [PipelineEvent("warn", {"message": "API key expired (401)"})],
+                    [PipelineEvent("result", result)],
+                ],
+            ))
+            partial = stack.enter_context(patch.object(stream_routes, "_handle_partial", new_callable=AsyncMock))
+
+            failed = await stream_routes.summarize_stream(SummarizeRequest(url=URL), object())
+            self.assertIn(b'"type": "error"', await consume_stream(failed))
+            mocks["commit_full_generation"].assert_not_called()
+
+            retried = await stream_routes.summarize_stream(
+                SummarizeRequest(url=URL, force=True, mode="summary"), object(),
+            )
+            body = await consume_stream(retried)
+
+        self.assertIn(b'"type": "done"', body)
+        self.assertNotIn(b'"type": "error"', body)
+        self.assertEqual(2, run_summary.call_count)
+        partial.assert_not_called()
+        mocks["commit_full_generation"].assert_called_once()
+        self.assertEqual(result, mocks["commit_full_generation"].call_args.kwargs["result"]["result"])
+
+    async def test_artifact_generation_without_usable_cached_subtitles_runs_full_pipeline(self):
+        info = VideoInfo(title="New title", webpage_url=URL, duration=60)
+        for mode in ("summary", "mindmap", "notes"):
+            for force in (False, True):
+                for cached in (None, {**OLD_CACHE, "subtitle_text": " \n "}):
+                    with self.subTest(mode=mode, force=force, cached=bool(cached)), ExitStack() as stack:
+                        mocks = self._patch_full_pipeline(
+                            stack, info, [PipelineEvent("result", {"summary": "Valid summary"})],
+                        )
+                        stack.enter_context(patch.object(stream_routes, "get_cached", return_value=cached))
+                        stack.enter_context(patch.object(stream_routes, "_get_cached_raw", return_value=cached))
+                        response = await stream_routes.summarize_stream(
+                            SummarizeRequest(url=URL, force=force, mode=mode), object(),
+                        )
+                        body = await consume_stream(response)
+                        self.assertIn(b'"type": "done"', body)
+                        mocks["commit_full_generation"].assert_called_once()
+
+    async def test_partial_retry_uses_existing_raw_cache_after_prompt_version_change(self):
+        info = VideoInfo(title="New title", webpage_url=URL, duration=60)
+        with ExitStack() as stack:
+            mocks = self._patch_full_pipeline(stack, info, [])
+            stack.enter_context(patch.object(stream_routes, "get_cached", return_value=None))
+            stack.enter_context(patch.object(stream_routes, "_get_cached_raw", return_value=OLD_CACHE))
+            partial = stack.enter_context(patch.object(stream_routes, "_handle_partial", new_callable=AsyncMock))
+            req = SummarizeRequest(url=URL, force=True, mode="summary")
+            response = await stream_routes.summarize_stream(req, object())
+
+        self.assertIs(response, partial.return_value)
+        self.assertEqual("summary", partial.call_args.args[0].mode)
+        self.assertEqual(OLD_CACHE, partial.call_args.args[1])
+        mocks["commit_full_generation"].assert_not_called()
+
     async def test_mindmap_failure_warns_and_still_commits_notes_and_finishes(self):
         info = VideoInfo(title="New title", webpage_url=URL, duration=60)
         with ExitStack() as stack:
@@ -455,6 +519,7 @@ class BackgroundGenerateThenSwapTests(unittest.IsolatedAsyncioTestCase):
         }
 
         with (
+            patch.object(background_pipeline, "_replace_history"),
             patch.object(background_pipeline, "_load_video_info", AsyncMock(return_value=info)),
             patch.object(background_pipeline, "save_video_info_cache", create=True) as save_video_info,
             patch.object(

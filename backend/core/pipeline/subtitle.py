@@ -17,7 +17,7 @@ import tempfile as _tempfile
 from database import get_subtitle_from_db, save_subtitle_to_db
 from core.summarizer import (
     clean_subtitle_text, _clean_danmaku_xml,
-    extract_bilibili_subtitle, extract_bilibili_subtitle_by_cid,
+    extract_bilibili_subtitle, extract_bilibili_subtitle_by_cid, extract_subtitle_segments,
 )
 from core.cache import get_video_info_cache
 from core.bilibili import ydl_opts_for
@@ -40,17 +40,30 @@ def extract_bvid(url: str) -> str | None:
 
 def _select_subtitle_lang(subtitles, preferred: str = None):
     """选择最佳字幕语言。优先中文，其次英文，最后取第一个。"""
+    def normalize(language):
+        value = (language or "").lower().replace("_", "-")
+        return value[3:] if value.startswith("ai-") else value
+
     if preferred:
+        wanted = normalize(preferred)
         for sub in subtitles:
-            if sub.lang == preferred or sub.lang.startswith(preferred):
+            language = normalize(sub.lang)
+            if language == wanted or language.startswith(wanted):
                 return sub
     for sub in subtitles:
-        if sub.lang.startswith('zh') or sub.lang.startswith('zh-Hans'):
+        if normalize(sub.lang).startswith("zh"):
             return sub
     for sub in subtitles:
-        if sub.lang.startswith('en'):
+        if normalize(sub.lang).startswith("en"):
             return sub
     return subtitles[0] if subtitles else None
+
+
+def _is_english_language(language: str) -> bool:
+    value = (language or "").lower().replace("_", "-")
+    if value.startswith("ai-"):
+        value = value[3:]
+    return value == "en" or value.startswith("en-")
 
 
 def _download_subtitle_content(url: str, lang: str, is_auto: bool) -> tuple[str, str]:
@@ -159,7 +172,7 @@ def try_get_bilibili_cc_subtitle(url: str, cached_info=None) -> dict | None:
 # ─── Pipeline ────────────────────────────────────────────────
 
 async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = None,
-                         trace_id: str = "", refresh: bool = False) -> tuple[str, str, str]:
+                         trace_id: str = "", refresh: bool = False, persist: bool = False) -> tuple[str, str, str]:
     """标准化字幕获取（DB 优先，减少重复 API 调用）。
 
     返回 (subtitle_text, source, language)。不含 AI 校正。
@@ -170,6 +183,15 @@ async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = No
 
     # ── DB 缓存检查 ──
     cached_sub = None if refresh else get_subtitle_from_db(url)
+    has_chinese_track = any(
+        (track.lang or "").lower().replace("_", "-").removeprefix("ai-").startswith("zh")
+        for track in (info.subtitles or [])
+    )
+    if (cached_sub and 'bilibili' in (info.extractor or '').lower()
+            and _is_english_language(cached_sub.get("language"))
+            and (has_chinese_track or cached_sub.get("source") == "bilibili_cc")):
+        logger.info("忽略英文字幕缓存，重新检查 B站当前可用字幕")
+        cached_sub = None
     if cached_sub and len(cached_sub["full_text"].strip()) >= 50:
         if cached_sub["source"] == "bilibili_cc" and not re.search(r'\[\d{2}:\d{2}\]', cached_sub["full_text"]):
             logger.info(f"DB缓存的B站CC字幕缺少时间戳，跳过缓存重新获取")
@@ -190,7 +212,13 @@ async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = No
     if bilibili_sub and bilibili_sub['has_subtitle']:
         text = bilibili_sub['text']
         sub_lang = bilibili_sub.get('language', 'zh')
-        return text, "bilibili_cc", sub_lang
+        if _is_english_language(sub_lang) and has_chinese_track:
+            logger.info("B站 CC 返回英文字幕，但 yt-dlp 提供中文字幕轨道，改用中文轨道")
+        else:
+            if persist:
+                save_subtitle_to_db(url, "bilibili_cc", sub_lang, text, info.title, platform,
+                                    _build_part_info(url, info), bilibili_sub.get("segments"))
+            return text, "bilibili_cc", sub_lang
 
     # ── Pipeline 2: yt-dlp 原生字幕 ──
     if info.subtitles:
@@ -206,10 +234,15 @@ async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = No
                     subtitle_text = clean_subtitle_text(raw_content, ext)
                 if subtitle_text and len(subtitle_text.strip()) >= 50:
                     source = "youtube_auto" if selected.is_auto else "ytdlp_native"
+                    if persist:
+                        save_subtitle_to_db(url, source, selected.lang, subtitle_text, info.title, platform,
+                                            _build_part_info(url, info), extract_subtitle_segments(raw_content, ext))
                     logger.info(f"yt-dlp字幕获取成功 source={source}")
                     return subtitle_text, source, selected.lang
+                raise ValueError("平台字幕为空或不完整")
             except Exception as e:
                 logger.info(f"yt-dlp字幕获取失败: {e}")
+                raise BilibiliSubtitleUnavailable("平台字幕获取暂时失败，请稍后重试；未启动语音转录") from e
 
     if bilibili_lookup_unavailable:
         raise BilibiliSubtitleUnavailable("B站字幕接口暂时不可用，请稍后重试；未启动语音转录")

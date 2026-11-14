@@ -15,6 +15,7 @@ from core.logging_config import get_logger
 
 logger = get_logger("blogger.routes")
 from core.cache import _extract_part_index, _extract_video_key
+from core.content_state import content_state
 
 router = APIRouter(prefix="/api", tags=["bloggers"])
 
@@ -112,11 +113,14 @@ async def add_blogger(request: Request):
 async def list_bloggers(request: Request):
     identity = require_identity(request)
     bloggers = store.list_subs(_identity_owner(identity))
-    learned_map = learned_mod.learned_video_counts(
+    counts = learned_mod.video_counts(
         _identity_owner(identity), [b["creator_id"] for b in bloggers]
     )
     for item in bloggers:
-        item["learned_count"] = learned_map.get(item["creator_id"], 0)
+        state = counts.get(item["creator_id"], {})
+        item["organized_count"] = state.get("organized_count", 0)
+        item["subtitle_count"] = state.get("subtitle_count", 0)
+        item["learned_count"] = item["organized_count"]
     return {"bloggers": bloggers}
 
 
@@ -191,7 +195,12 @@ async def list_blogger_videos(sub_id: int, request: Request):
     params = request.query_params
     q = params.get("q", "")
     learned_filter = params.get("learned", "all")
+    subtitle_only = params.get("has_subtitle", "") in ("1", "true")
     extra_where, extra_params = learned_mod.learned_exists_sql(_identity_owner(identity), learned_filter)
+    if subtitle_only:
+        subtitle_where, subtitle_params = learned_mod.subtitle_exists_sql(_identity_owner(identity))
+        extra_where = f"({extra_where}) AND ({subtitle_where})" if extra_where else subtitle_where
+        extra_params = [*extra_params, *subtitle_params]
     result = store.list_videos(
         sub["creator_id"],
         q=q,
@@ -199,6 +208,7 @@ async def list_blogger_videos(sub_id: int, request: Request):
         limit=int(params.get("limit") or 30),
         extra_where=extra_where,
         extra_params=extra_params,
+        anchor_id=int(params["anchor_id"]) if params.get("anchor_id", "").isdigit() else None,
     )
     # learned_total = 匹配 q 的已学总数（不受 learned 过滤影响）
     learned_scope_where, learned_scope_params = learned_mod.learned_exists_sql(
@@ -208,12 +218,22 @@ async def list_blogger_videos(sub_id: int, request: Request):
         extra_where=learned_scope_where, extra_params=learned_scope_params,
     )["total"]
     bvids = [item["bvid"] for item in result["items"]]
-    learned = _learned_parts_map(identity, bvids)
+    content = learned_mod.content_by_bvid(identity, bvids)
     for item in result["items"]:
-        parts = learned.get(item["bvid"], set())
+        states = content.get(item["bvid"], {})
+        parts = {page for page, state in states.items() if state["module_count"]}
         item["url"] = _part_url(item["bvid"], 1)
         item["learned_parts"] = sorted(parts)
         item["is_learned"] = bool(parts)
+        item["content"] = states.get(1, content_state())
+        item["subtitle_parts"] = sorted(p for p, state in states.items() if state["has_subtitle"])
+        item["organized_parts"] = sorted(parts)
+        item["part_content"] = states
+    subtitle_where, subtitle_params = learned_mod.subtitle_exists_sql(_identity_owner(identity))
+    result["subtitle_total"] = store.list_videos(sub["creator_id"], q=q, limit=1,
+        extra_where=subtitle_where, extra_params=subtitle_params)["total"]
+    result["matched_total"] = store.list_videos(sub["creator_id"], q=q, limit=1)["total"]
+    result["organized_total"] = learned_total
     result["learned_total"] = learned_total
     return result
 
@@ -250,11 +270,12 @@ async def list_blogger_video_pages(sub_id: int, video_id: int, request: Request)
             "published_at": video.get("published_at") or view_data.get("pubdate") or 0,
             "duration": video.get("duration") or 0,
         })
-    learned = _learned_parts_map(identity, [video["bvid"]]).get(video["bvid"], set())
+    content = learned_mod.content_by_bvid(identity, [video["bvid"]]).get(video["bvid"], {})
     rows = store.list_pages(video_id)
     for row in rows:
         row["url"] = _part_url(video["bvid"], row["page"])
-        row["is_learned"] = row["page"] in learned
+        row["content"] = content.get(row["page"], content_state())
+        row["is_learned"] = row["content"]["module_count"] > 0
     return {"pages": rows}
 
 

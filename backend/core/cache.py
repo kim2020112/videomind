@@ -186,54 +186,37 @@ def _compute_notes_chars(result_json: str) -> int:
 
 
 def _cleanup_old_cache(conn):
-    """保留最新的 AI_CACHE_KEEP 个视频的缓存，删除超出的旧记录。
-    按 fingerprint（视频唯一标识，如 bilibili:BVxxx）去重计数：
-    - 一个多P视频（如 185P）算 1 个视频，所有分P都保留
-    - 无 fingerprint 的记录按单条计数，保留最新的 AI_CACHE_KEEP 条
+    """Trim disposable AI cache only; saved history and favorites are durable.
+
+    The size limit is soft: history-owned/favorited artifacts may exceed it.
+    Fingerprinted multipart videos count as one; ungrouped URLs count separately.
+    Transcripts, tags, video records and task events have independent lifetimes.
     """
     keep = int(AI_CACHE_KEEP)
-    # 1. 收集需删除的 URL（在删除前收集，用于级联清理）
-    old_urls = []
-    # 有 fingerprint: 找出不在 top keep 的视频
-    kept_fps = conn.execute(
-        "SELECT DISTINCT fingerprint FROM ai_cache WHERE fingerprint != '' ORDER BY updated_at DESC LIMIT ?",
-        (keep,),
-    ).fetchall()
-    if kept_fps:
-        placeholders = ','.join('?' for _ in kept_fps)
-        old = conn.execute(
-            f"SELECT url FROM ai_cache WHERE fingerprint != '' AND fingerprint NOT IN ({placeholders})",
-            [r[0] for r in kept_fps],
-        ).fetchall()
-        old_urls.extend(old)
-        conn.execute(
-            f"DELETE FROM ai_cache WHERE fingerprint != '' AND fingerprint NOT IN ({placeholders})",
-            [r[0] for r in kept_fps],
+    protected = """
+        AND COALESCE(is_favorite, 0) = 0
+        AND NOT EXISTS (
+            SELECT 1 FROM user_history h WHERE h.url_hash = ai_cache.url_hash
         )
-    # 无 fingerprint: 保留最新的 keep 条
-    old = conn.execute(
-        "SELECT url FROM ai_cache WHERE (fingerprint = '' OR fingerprint IS NULL) "
-        "AND url_hash NOT IN ("
-        "SELECT url_hash FROM ai_cache WHERE fingerprint = '' OR fingerprint IS NULL ORDER BY updated_at DESC LIMIT ?"
-        ")",
+    """
+    conn.execute(
+        "DELETE FROM ai_cache WHERE fingerprint != '' AND fingerprint NOT IN ("
+        "SELECT fingerprint FROM ai_cache WHERE fingerprint != '' "
+        "GROUP BY fingerprint ORDER BY MAX(updated_at) DESC LIMIT ?"
+        ")" + protected,
         (keep,),
-    ).fetchall()
-    old_urls.extend(old)
+    )
     conn.execute(
         "DELETE FROM ai_cache WHERE (fingerprint = '' OR fingerprint IS NULL) AND url_hash NOT IN ("
         "SELECT url_hash FROM ai_cache WHERE fingerprint = '' OR fingerprint IS NULL ORDER BY updated_at DESC LIMIT ?"
-        ")",
+        ")" + protected,
         (keep,),
     )
-    # 统一数据库内复用当前事务，避免持有写锁时再打开写连接。
-    if old_urls:
-        for (url,) in old_urls:
-            video = conn.execute("SELECT id FROM videos WHERE url = ?", (url,)).fetchone()
-            if video:
-                conn.execute("DELETE FROM video_tags WHERE video_id = ?", (video["id"],))
-                conn.execute("DELETE FROM subtitles WHERE video_id = ?", (video["id"],))
-                conn.execute("DELETE FROM videos WHERE id = ?", (video["id"],))
-        conn.execute("DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM video_tags)")
+
+
+def _delete_learning_events(conn, url):
+    conn.execute("DELETE FROM learning_events WHERE task_id IN "
+                 "(SELECT id FROM background_jobs WHERE url = ? AND status IN ('done','partial','failed','cancelled'))", (url,))
 
 
 def save_cache(url: str, video_title: str = "", subtitle_text: str = "", source: str = "", result_json: str = "", fingerprint: str = None, part_info: str = "", platform: str = "", prompt_version: int = 0):
@@ -302,6 +285,7 @@ def delete_cache(url: str, fingerprint: str = None):
     except Exception:
         pass
     with _conn() as conn:
+        _delete_learning_events(conn, url)
         conn.execute("DELETE FROM ai_cache WHERE url_hash = ?", (h,))
 
 
@@ -566,41 +550,30 @@ def _extract_part_index(url: str) -> int:
 
 def get_learned_part_indexes(url: str, user_id: int = None, guest_id: str = None,
                              role: str = "guest") -> set[int]:
-    """Return cached, completed multipart indexes visible to this identity."""
-    conditions = [
-        "COALESCE(uh.status, 'done') = 'done'",
-        "ac.result_json IS NOT NULL",
-        "TRIM(ac.result_json) != ''",
-    ]
-    params = []
+    """Return parts with actual saved modules, independent of task status."""
+    return {p for p, state in get_part_content(url, user_id, guest_id, role).items() if state["module_count"]}
 
-    if role != "admin":
-        if user_id is not None:
-            conditions.append("uh.user_id = ?")
-            params.append(user_id)
-        elif guest_id:
-            conditions.append("uh.guest_id = ?")
-            params.append(guest_id)
-        else:
-            return set()
 
-    with _get_db() as conn:
-        rows = conn.execute(
-            f"""
-            SELECT DISTINCT uh.url
-            FROM user_history uh
-            JOIN ai_cache ac ON ac.url_hash = uh.url_hash
-            WHERE {' AND '.join(conditions)}
-            """,
-            params,
-        ).fetchall()
+def get_part_content(url: str, user_id=None, guest_id=None, role="guest"):
+    from core.blogger.learned import content_by_bvid
+    key = _extract_video_key(url)
+    if not key.startswith("bilibili:"):
+        from core.blogger.learned import _identity_clause, SUBTITLE_SQL, SUBTITLE_TEXT_SQL
+        from core.content_state import content_state, register_content_functions
+        owner, params = _identity_clause({"user_id": user_id, "guest_id": guest_id, "role": role})
+        with _get_db() as conn:
+            register_content_functions(conn)
+            rows = conn.execute(
+                f"SELECT uh.url, ac.result_json, {SUBTITLE_SQL} AS has_subtitle, {SUBTITLE_TEXT_SQL} AS subtitle_text "
+                f"FROM user_history uh LEFT JOIN ai_cache ac ON ac.url_hash=uh.url_hash WHERE {owner} AND vm_video_key(uh.url)=?",
+                [*params, key],
+            ).fetchall()
+        return {_extract_part_index(r["url"]): content_state(r["result_json"], r["has_subtitle"], r["subtitle_text"]) for r in rows}
+    return content_by_bvid({"user_id": user_id, "guest_id": guest_id, "role": role}, [key.split(":", 1)[1]]).get(key.split(":", 1)[1], {})
 
-    video_key = _extract_video_key(url)
-    return {
-        _extract_part_index(row["url"])
-        for row in rows
-        if _extract_video_key(row["url"]) == video_key
-    }
+
+def get_part_coverage(url: str, user_id=None, guest_id=None, role="guest") -> dict[int, str]:
+    return {p: state["coverage"] for p, state in get_part_content(url, user_id, guest_id, role).items()}
 
 
 def _get_cached_multipart_parts(conn, urls: list[str]) -> list[dict]:
@@ -726,7 +699,7 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
             return {"total": 0, "items": []}
 
     if q:
-        conditions.append("(ac.video_title LIKE ? OR ac.result_json LIKE ?)")
+        conditions.append("(COALESCE(NULLIF(ac.video_title, ''), uh.video_title) LIKE ? OR ac.result_json LIKE ?)")
         like = f"%{q}%"
         params.extend([like, like])
 
@@ -735,8 +708,8 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
         params.append(tag)
 
     if platform:
-        conditions.append("(ac.platform = ? OR v.platform = ?)")
-        params.extend([platform, platform])
+        conditions.append("(ac.platform = ? OR v.platform = ? OR uh.platform = ?)")
+        params.extend([platform, platform, platform])
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     order = "DESC" if sort == "newest" else "ASC"
@@ -750,7 +723,7 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
                    CASE WHEN ac.video_title IS NOT NULL AND ac.video_title != '' THEN ac.video_title ELSE uh.video_title END as video_title,
                    uh.created_at, uh.is_favorite, uh.status,
                    CASE WHEN ac.platform IS NOT NULL AND ac.platform != '' THEN ac.platform ELSE uh.platform END as platform,
-                   ac.part_info,
+                   COALESCE(NULLIF(ac.part_info, ''), v.part_info, '') AS part_info,
                    v.platform as v_platform
             {base} {where}
             ORDER BY uh.created_at {order}
@@ -819,7 +792,7 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
             platform_name = first["platform"] or ""
             total_parts = total_parts_map.get(first["url"], 0)
             # 取最高优先级状态: transcribing > generating > failed > done
-            _status_order = {"transcribing": 0, "generating": 1, "failed": 2, "done": 3}
+            _status_order = {"transcribing": 0, "generating": 1, "downloading": 2, "queued": 3, "awaiting_confirmation": 4, "failed": 5, "partial": 6, "done": 7}
             part_statuses = [row["status"] if "status" in row.keys() and row["status"] else "done" for row in parts_raw]
             best_status = min(part_statuses, key=lambda s: _status_order.get(s, 99))
 
@@ -858,6 +831,25 @@ def list_history_enhanced(q: str = None, tag: str = None, platform: str = None,
                 p["summary_preview"] = summaries.get(p["id"], "")[:100]
         else:
             item["summary_preview"] = summaries.get(item["id"], "")
+
+    # Saved content is independent of the last task's status.
+    from core.content_state import content_state
+    from core.blogger.learned import SUBTITLE_SQL, SUBTITLE_TEXT_SQL
+    states = {}
+    if page_hashes:
+        with _get_db() as conn:
+            for start in range(0, len(page_hashes), 50):
+                batch = page_hashes[start:start + 50]
+                rows = conn.execute(
+                    f"SELECT uh.url_hash, ac.result_json, {SUBTITLE_SQL} AS has_subtitle, {SUBTITLE_TEXT_SQL} AS subtitle_text "
+                    f"FROM user_history uh LEFT JOIN ai_cache ac ON ac.url_hash = uh.url_hash WHERE uh.url_hash IN ({','.join('?' for _ in batch)})", batch,
+                ).fetchall()
+                for row in rows:
+                    states[row["url_hash"]] = content_state(row["result_json"], row["has_subtitle"], row["subtitle_text"])
+    for item in page_items:
+        for part in item.get("parts", []) if item.get("is_multipart") else [item]:
+            part["content"] = states.get(part["id"], content_state())
+            part["coverage"] = part["content"]["coverage"]
 
     return {"total": total, "items": page_items}
 

@@ -156,6 +156,21 @@ CREATE INDEX IF NOT EXISTS idx_background_jobs_guest_created
 CREATE INDEX IF NOT EXISTS idx_background_jobs_url_hash
     ON background_jobs(url_hash);
 
+CREATE TABLE IF NOT EXISTS learning_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL REFERENCES background_jobs(id) ON DELETE CASCADE,
+    event_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_learning_events_task ON learning_events(task_id, id);
+
+CREATE TABLE IF NOT EXISTS learning_usage (
+    operation_id TEXT PRIMARY KEY,
+    user_id INTEGER,
+    guest_id TEXT,
+    status TEXT NOT NULL DEFAULT 'reserved',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS blogger_creators (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     platform TEXT NOT NULL DEFAULT 'bilibili',

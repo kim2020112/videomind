@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 import urllib.request
 import http.client
 import uuid
@@ -27,10 +28,11 @@ from api.media_security import (
 from core.pipeline.subtitle import _download_subtitle_content
 from core.logging_config import get_logger
 from core.video import canonical_video_url
+from config import DOWNLOAD_DIR
 
 logger = get_logger(__name__)
 
-from core.cache import get_learned_part_indexes, save_video_info_cache
+from core.cache import get_learned_part_indexes, get_part_coverage, get_part_content, save_video_info_cache
 
 
 def extract_url(text: str) -> str:
@@ -128,7 +130,7 @@ def _upgrade_thumbnail_url(url: str) -> str:
 
 
 # 全局下载器实例
-downloader = VideoDownloader(output_dir=os.path.join(os.path.dirname(os.path.dirname(__file__)), "downloads"))
+downloader = VideoDownloader(output_dir=str(DOWNLOAD_DIR))
 
 # 任务存储（内存）
 tasks: dict[str, DownloadTask] = {}
@@ -149,6 +151,11 @@ async def capabilities():
 @router.post("/api/parse", response_model=VideoInfo)
 async def parse_video(req: ParseRequest, request: Request):
     """解析视频链接，返回视频信息和可用格式列表。"""
+    return await run_in_threadpool(_parse_video, req, request)
+
+
+def _parse_video(req: ParseRequest, request: Request):
+    """Keep DNS, short-link resolution, yt-dlp and SQLite off the event loop."""
     try:
         identity = require_identity(request)
         url = extract_url(req.url)
@@ -164,11 +171,17 @@ async def parse_video(req: ParseRequest, request: Request):
                 guest_id=identity.get("guest_id"),
                 role=identity.get("role", "guest"),
             )
+            content = get_part_content(canonical_url, user_id=identity.get("user_id"),
+                                         guest_id=identity.get("guest_id"), role=identity.get("role", "guest"))
             for part in info.parts:
                 part.is_cached = part.index in learned_parts
+                part.content = content.get(part.index, {})
+                part.coverage = part.content.get("coverage", "empty")
         except Exception as exc:
             logger.warning(f"读取分P学习状态失败: {exc}")
         return info
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"解析失败: {str(e)}")
 
@@ -176,6 +189,10 @@ async def parse_video(req: ParseRequest, request: Request):
 @router.get("/api/video/refresh")
 async def refresh_stream_url(url: str, request: Request):
     """刷新过期的视频直链，轻量级（仅提取 formats，不完整 parse）。"""
+    return await run_in_threadpool(_refresh_stream_url, url, request)
+
+
+def _refresh_stream_url(url: str, request: Request):
     try:
         require_identity(request)
         import time as _time
@@ -225,6 +242,8 @@ async def refresh_stream_url(url: str, request: Request):
             "audio_stream_expires_at": expires_at if audio else None,
             "stream_needs_audio": not combined and bool(audio),
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"刷新失败: {ytdlp_error_message(e)}")
 

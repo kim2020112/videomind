@@ -68,7 +68,7 @@ class BatchRunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cache_hit_reuses_without_ai(self):
         batch, item, job = self._make_item()
-        with patch.object(batch_runner, "get_cached", return_value={"result_json": "{}", "video_title": "旧"}):
+        with patch.object(batch_runner, "get_cached", return_value={"result_json": '{"result":{"summary":"摘要"},"notes":"笔记","mindmap_markdown":"# 导图","qa_pairs":[{"question":"问题","answer":"回答"}]}', "video_title": "旧"}):
             with patch.object(batch_runner, "generate_full_from_subtitle") as gen:
                 result = await batch_runner.run_batch_item(job, self.scheduler)
         gen.assert_not_called()

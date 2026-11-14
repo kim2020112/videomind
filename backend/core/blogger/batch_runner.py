@@ -70,6 +70,13 @@ def _snapshot_info(payload_info: dict | None, url: str, bvid: str = "", cid=None
     )
 
 
+def _complete_cache(cached):
+    from core.content_state import decode_payload
+    from core.learning import complete_payload, artifact_states
+    payload = decode_payload(cached.get("result_json"))
+    return complete_payload(payload) and not any(s["stale"] for s in artifact_states(payload, cached.get("subtitle_text", "")).values())
+
+
 async def run_batch_item(job: dict, scheduler) -> dict:
     payload = job.get("payload") or {}
     item_id = payload.get("batch_item_id")
@@ -79,7 +86,7 @@ async def run_batch_item(job: dict, scheduler) -> dict:
 
     # ── 0. 缓存命中：直接复用，不耗额度 ──
     cached = get_cached(url)
-    if cached and cached.get("result_json"):
+    if cached and cached.get("result_json") and _complete_cache(cached):
         if mode == "full":
             _set_phase(job, item_id, "reused", "命中已有学习资料，跳过生成", 100)
             add_user_history(
@@ -107,7 +114,7 @@ async def run_batch_item(job: dict, scheduler) -> dict:
     fingerprint = video_fingerprint(info.extractor, info.id) if info.extractor and info.id else None
 
     cached = get_cached(canonical_url, fingerprint)
-    if cached and cached.get("result_json") and mode == "full":
+    if cached and cached.get("result_json") and mode == "full" and _complete_cache(cached):
         _set_phase(job, item_id, "reused", "命中已有学习资料，跳过生成", 100)
         add_user_history(
             user_id=identity["user_id"], guest_id=identity["guest_id"],

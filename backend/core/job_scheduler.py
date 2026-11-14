@@ -153,6 +153,12 @@ class JobScheduler:
             result = handler(job, self)
             if inspect.isawaitable(result):
                 result = await result
+            # Learning handlers checkpoint their own terminal/waiting state.
+            current = job_store.get_job(job_id)
+            if current and current["status"] in {"awaiting_confirmation", "partial", "failed", "done"}:
+                if current["status"] != "awaiting_confirmation":
+                    await self._notify_terminal(job_id, current["status"], current.get("error"))
+                return
             if job_store.is_cancel_requested(job_id):
                 raise JobCancelled()
             job_store.update_job(
@@ -253,6 +259,8 @@ class JobScheduler:
             await process.wait()
 
     async def _notify_terminal(self, job_id: str, status: str, error: str | None = None) -> None:
+        from core.learning import release_usage
+        release_usage(job_id)
         if not self.on_terminal:
             return
         callback = self.on_terminal(job_store.get_job(job_id), status, error)

@@ -170,7 +170,7 @@ def _replay_cached(cached: dict, identity: dict, url: str, trace_id: str):
 
 # ──── 主端点 ────
 
-@router.post("/api/summarize/stream")
+# Legacy pipeline retained for existing internal callers; HTTP uses learning_routes.
 async def summarize_stream(req: SummarizeRequest, request: Request):
     """SSE 流式 AI 视频总结。"""
     if not is_ai_available():
@@ -183,13 +183,16 @@ async def summarize_stream(req: SummarizeRequest, request: Request):
 
         # ── 缓存检查 ──
         cached = get_cached(url)
-        if req.force:
-            if not cached and req.mode != "full":
-                # prompt_version 不匹配导致 get_cached 返回 None，用 _get_cached_raw 兜底
-                from core.cache import _get_cached_raw
+        if req.mode != "full":
+            if not cached:
+                # prompt_version 不匹配导致 get_cached 返回 None，用原始缓存兜底。
                 cached = _get_cached_raw(url)
-                if not cached:
-                    raise HTTPException(status_code=400, detail="尚无缓存，请先生成完整 AI 总结")
+            if req.mode in {"summary", "mindmap", "notes"} and not (
+                cached and (cached.get("subtitle_text") or "").strip()
+            ):
+                # 首次模型调用失败不会提交 AI 缓存。此时重试需要重新准备
+                # 输入并完成全量生成，不能要求用户先有一次成功的生成。
+                req = req.model_copy(update={"mode": "full", "force": True})
 
         # 缓存命中 + 全量模式 → 重放
         if cached and cached.get("result_json") and req.mode == "full" and not req.force:
@@ -736,13 +739,29 @@ async def chat_stream(req: ChatRequest, request: Request):
     if not allowed:
         raise HTTPException(status_code=429, detail=f"今日 AI 次数已用完（{used}/{limit}）")
 
+    from core.learning import reserve_usage, release_usage, charge_usage
+    operation = {**identity, "task_id": f"chat-{uuid.uuid4().hex}"}
+    try:
+        reserve_usage(operation)
+    except ValueError as exc:
+        raise HTTPException(status_code=429, detail=str(exc))
+
     try:
         def _gen():
-            for event_type, data in stream_chat(req.subtitle_text, req.question, [h.model_dump() for h in req.history]):
-                yield PipelineEvent(event_type, data)
-            log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
-                      action="qa", status="SUCCESS")
-            yield PipelineEvent("done", {})
+            successful = False
+            failed = False
+            try:
+                for event_type, data in stream_chat(req.subtitle_text, req.question, [h.model_dump() for h in req.history]):
+                    if event_type == 'error':
+                        failed = True
+                    elif event_type in {'text', 'content', 'delta'} and data:
+                        successful = True
+                    yield PipelineEvent(event_type, data)
+                if successful and not failed:
+                    charge_usage(operation)
+                yield PipelineEvent("done", {})
+            finally:
+                release_usage(operation["task_id"])
 
         return StreamingResponse(_sse_generator(_gen()), media_type="text/event-stream", headers=_sse_headers())
 
@@ -797,7 +816,7 @@ def _merge_and_save_qanda(
     )
 
 
-@router.post("/api/qa/stream")
+# Text-only compatibility helper; URL-based HTTP calls use learning_routes.
 async def qa_stream(req: QaGenerationRequest, request: Request):
     """SSE 流式 AI 关键问答对生成（支持缓存）。"""
     if not is_ai_available():
@@ -822,41 +841,51 @@ async def qa_stream(req: QaGenerationRequest, request: Request):
             except json.JSONDecodeError:
                 pass
 
-    # ── AI 使用次数检查 ──
-    allowed, used, limit = check_usage_limit(
-        identity.get("user_id"), identity.get("guest_id"), identity.get("guest_sig")
-    )
-    if not allowed:
-        raise HTTPException(status_code=429, detail=f"今日 AI 次数已用完（{used}/{limit}）")
+    from core.learning import reserve_usage, release_usage, charge_usage
+    operation = {**identity, "task_id": f"qanda-{uuid.uuid4().hex}"} if not req.url else None
+    try:
+        if operation:
+            reserve_usage(operation)
+        else:
+            allowed, used, limit = check_usage_limit(
+                identity.get("user_id"), identity.get("guest_id"), identity.get("guest_sig")
+            )
+            if not allowed:
+                raise HTTPException(status_code=429, detail=f"今日 AI 次数已用完（{used}/{limit}）")
+    except ValueError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
     trace_id = uuid.uuid4().hex[:8]
 
     try:
         def _gen():
             qa_pairs_result = []
-            for event in run_qanda(req.subtitle_text, req.video_title, trace_id):
-                yield event
-                if event.type == "qa_pairs":
-                    qa_pairs_result = event.data
+            try:
+                for event in run_qanda(req.subtitle_text, req.video_title, trace_id):
+                    yield event
+                    if event.type == "qa_pairs":
+                        qa_pairs_result = event.data
 
-            if not qa_pairs_result:
-                raise InvalidGenerationResult("qanda result is empty")
-            if req.url:
-                _merge_and_save_qanda(
-                    req.url,
-                    req.subtitle_text,
-                    req.video_title,
-                    qa_pairs_result,
-                    identity,
-                )
-            else:
-                try:
-                    json.dumps(qa_pairs_result, ensure_ascii=False, allow_nan=False)
-                except (TypeError, ValueError) as exc:
-                    raise InvalidGenerationResult("qanda result is not JSON serializable") from exc
-                log_usage(user_id=identity.get("user_id"), guest_id=identity.get("guest_id"),
-                          action="qanda", status="SUCCESS")
-            yield PipelineEvent("done", {})
+                if not qa_pairs_result:
+                    raise InvalidGenerationResult("qanda result is empty")
+                if req.url:
+                    _merge_and_save_qanda(
+                        req.url,
+                        req.subtitle_text,
+                        req.video_title,
+                        qa_pairs_result,
+                        identity,
+                    )
+                else:
+                    try:
+                        json.dumps(qa_pairs_result, ensure_ascii=False, allow_nan=False)
+                    except (TypeError, ValueError) as exc:
+                        raise InvalidGenerationResult("qanda result is not JSON serializable") from exc
+                    charge_usage(operation)
+                yield PipelineEvent("done", {})
+            finally:
+                if operation:
+                    release_usage(operation["task_id"])
 
         return StreamingResponse(_sse_generator(_gen()), media_type="text/event-stream", headers=_sse_headers())
 

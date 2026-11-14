@@ -25,6 +25,7 @@ from api.auth_routes import router as auth_router
 from api.admin_routes import router as admin_router
 from api.health_routes import router as health_router
 from api.blogger_routes import router as blogger_router
+from api.learning_routes import router as learning_router
 
 
 @asynccontextmanager
@@ -52,7 +53,10 @@ async def lifespan(app: FastAPI):
     from core.background_pipeline import finalize_whisper_job, update_terminal_history
     from core.blogger.batch_runner import run_batch_item
     from core.blogger.batches import resolve_item_for_job
+    from core.learning import run_learning_job, recover_usage_reservations
     from core.job_scheduler import JobScheduler
+
+    recover_usage_reservations()
 
     async def _on_terminal(job, status, error=None):
         await update_terminal_history(job, status, error)
@@ -61,7 +65,7 @@ async def lifespan(app: FastAPI):
     scheduler = JobScheduler(
         on_completed=finalize_whisper_job,
         on_terminal=_on_terminal,
-        handlers={"batch_item": run_batch_item},
+        handlers={"batch_item": run_batch_item, "learning": run_learning_job},
     )
     app.state.job_scheduler = scheduler
     await scheduler.start()
@@ -93,6 +97,7 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
+app.include_router(learning_router)
 app.include_router(summary_router)
 app.include_router(subtitle_text_router)
 app.include_router(stream_router)

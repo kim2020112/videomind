@@ -1,0 +1,128 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import config
+import database
+from core import cache, learning
+from core.auth import add_user_history
+from core.blogger import store, learned
+from core.content_state import content_state
+from api import blogger_routes, learning_routes
+
+A = {"user_id": None, "guest_id": "reader-a"}
+B = {"user_id": None, "guest_id": "reader-b"}
+URL = "https://www.bilibili.com/video/BV1state"
+
+
+class Request:
+    def __init__(self, **query):
+        self.query_params = query
+
+
+class ContentStateTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        path = Path(self.tmp.name) / 'test.db'
+        for module in (database, config):
+            patcher = patch.object(module, 'DB_PATH', path)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        database.init_db()
+        cache._ensure_table()
+        cache._ensure_video_info_table()
+        self.creator = store.upsert_creator('bilibili', '99')
+        self.sub = store.upsert_sub(self.creator, A)
+
+    def save(self, url=URL, payload=None, text='', source='bilibili_cc', identity=A, status='done'):
+        cache.save_cache(url, result_json=json.dumps(payload or {}), subtitle_text=text, source=source)
+        add_user_history(**identity, url_hash=cache._url_hash(url), url=url, status=status)
+
+    async def listing(self, **query):
+        with patch.object(blogger_routes, 'require_identity', return_value=A):
+            return await blogger_routes.list_blogger_videos(self.sub, Request(**query))
+
+    def test_content_semantics_exclude_empty_malformed_and_description(self):
+        for payload in ('{}', '[]', 'null', '{bad', {'notes': '  ', 'qa_pairs': []}, {'result': {'summary': ''}}):
+            self.assertEqual(0, content_state(payload)['module_count'])
+        state = content_state({'description_summary': {'summary': '简介'}})
+        self.assertTrue(state['has_description_summary'])
+        self.assertEqual('empty', state['coverage'])
+        self.assertEqual('subtitle', content_state(has_subtitle=True)['coverage'])
+        state = content_state({'result': {'summary': '摘要'}, 'notes': '笔记'})
+        self.assertEqual(['summary', 'notes'], state['modules'])
+        self.assertEqual(2, state['module_count'])
+
+    async def test_catalog_filters_counts_and_exact_part_ownership(self):
+        for bvid in ('BV1state', 'BV1stateLonger', 'BV1empty', 'BV1description', 'BV1other'):
+            store.upsert_video(self.creator, {'bvid': bvid, 'title': bvid})
+        self.save(payload={'notes': '笔记'}, text='字幕', status='failed')
+        self.save(URL+'?p=2', {'mindmap_markdown': '# 导图'}, 'P2字幕')
+        self.save(URL+'?p=3', text='只有字幕')
+        self.save(URL.replace('BV1state', 'BV1empty'))
+        self.save(URL.replace('BV1state', 'BV1description'), {'description_summary': {'summary': '简介'}}, '简介原文', source='description')
+        self.save(URL.replace('BV1state', 'BV1other'), {'notes': '另一身份'}, '他人字幕', identity=B)
+        all_items = await self.listing()
+        indexed = {item['bvid']: item for item in all_items['items']}
+        self.assertEqual([1, 2], indexed['BV1state']['organized_parts'])
+        self.assertEqual([1, 2, 3], indexed['BV1state']['subtitle_parts'])
+        self.assertEqual(1, indexed['BV1state']['content']['module_count'])
+        self.assertFalse(indexed['BV1stateLonger']['is_learned'])
+        self.assertFalse(indexed['BV1other']['is_learned'])
+        self.assertEqual(1, all_items['organized_total'])
+        self.assertEqual(1, all_items['subtitle_total'])
+        self.assertEqual(5, all_items['matched_total'])
+        filtered = await self.listing(learned='learned', has_subtitle='1')
+        self.assertEqual(['BV1state'], [i['bvid'] for i in filtered['items']])
+        self.assertEqual(0, (await self.listing(learned='unlearned', has_subtitle='1'))['total'])
+        state = learned.content_by_bvid(B, ['BV1state'])
+        self.assertEqual({}, state)
+        with patch.object(blogger_routes, 'require_identity', return_value=A):
+            cards = await blogger_routes.list_bloggers(Request())
+        self.assertEqual(1, cards['bloggers'][0]['organized_count'])
+        self.assertEqual(1, cards['bloggers'][0]['subtitle_count'])
+
+    async def test_anchor_index_uses_current_sort_and_filters(self):
+        for i in range(24):
+            store.upsert_video(self.creator, {'bvid': f'BV1anchor{i}', 'title': f'第{i}集', 'published_at': 100+i})
+        result = await self.listing(limit='5')
+        target = result['items'][3]['id']
+        self.assertEqual(3, (await self.listing(anchor_id=str(target)))['anchor_index'])
+        self.assertIsNone((await self.listing(anchor_id=str(target), learned='learned'))['anchor_index'])
+        store.upsert_video(self.creator, {'bvid': 'BV1new', 'title': '最新', 'published_at': 999})
+        self.assertEqual(4, (await self.listing(anchor_id=str(target)))['anchor_index'])
+
+    async def test_visit_shared_subtitle_is_idempotent_and_free(self):
+        database.save_subtitle_to_db(URL, 'bilibili_cc', 'zh', '共享字幕', '测试', 'bilibili')
+        with patch.object(learning_routes, 'require_identity', return_value=A), patch.object(learning_routes, 'normalize', return_value=URL):
+            for _ in range(2):
+                response = await learning_routes.visit_workspace(learning_routes.VisitRequest(url=URL), Request())
+                self.assertTrue(response['recorded'])
+        with database.get_db() as conn:
+            self.assertEqual(1, conn.execute('SELECT COUNT(*) FROM user_history').fetchone()[0])
+            for table in ('background_jobs', 'usage_logs', 'learning_usage'):
+                self.assertEqual(0, conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0])
+            conn.execute("UPDATE user_history SET status='failed', is_favorite=1")
+        learning.record_visit(URL, A)
+        with database.get_db() as conn:
+            row = conn.execute('SELECT status, is_favorite FROM user_history').fetchone()
+            self.assertEqual(('failed', 1), tuple(row))
+        self.assertFalse(learning.record_visit(URL+'/missing', B)['recorded'])
+
+    def test_visit_shared_artifact_records_only_current_identity(self):
+        cache.save_cache(URL, result_json=json.dumps({'notes': '共享笔记'}))
+        state = learning.record_visit(URL, A)
+        self.assertTrue(state['recorded'])
+        self.assertEqual(1, state['content']['module_count'])
+        self.assertEqual({}, learned.content_by_bvid(B, ['BV1state']))
+        self.assertEqual(1, learned.content_by_bvid(A, ['BV1state'])['BV1state'][1]['module_count'])
+
+    def test_stale_saved_module_still_counts(self):
+        payload = {'notes': '旧笔记', '_artifacts': {'notes': {'subtitle_revision': learning.revision('旧字幕'), 'prompt_version': learning.prompt_version('notes')}}}
+        state = content_state(payload, True, '新字幕')
+        self.assertEqual(1, state['module_count'])
+        self.assertEqual(['notes'], state['stale_modules'])
+        self.assertEqual([], content_state(payload, True, '旧字幕')['stale_modules'])

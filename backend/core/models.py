@@ -1,4 +1,4 @@
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
 
@@ -48,6 +48,8 @@ class VideoPart(BaseModel):
     filesize: Optional[int] = None
     filesize_str: Optional[str] = None
     is_cached: bool = False
+    coverage: str = "empty"
+    content: dict = Field(default_factory=dict)
 
 
 class VideoChapter(BaseModel):

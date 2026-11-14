@@ -41,7 +41,7 @@ def _build_response(text, lang, name, ext, is_auto, segments=None):
     }
 
 
-@router.get("/api/subtitle/text")
+# HTTP compatibility is handled by learning_routes; retained for internal callers.
 async def get_subtitle_text(
     request: Request,
     url: str = Query(..., description="视频 URL"),

@@ -60,12 +60,14 @@ def run(
         segments, info = model.transcribe(audio_path, **options)
         duration = max(float(getattr(info, "duration", 0) or 0), 1.0)
         lines = []
+        timed_segments = []
         for segment in segments:
             text = segment.text.strip()
             if text:
                 minutes = int(segment.start // 60)
                 seconds = int(segment.start % 60)
                 lines.append(f"[{minutes:02d}:{seconds:02d}] {text}")
+                timed_segments.append({"start": float(segment.start), "end": float(segment.end), "text": text})
             progress = min(94, 15 + int((float(segment.end) / duration) * 79))
             emit(
                 {
@@ -79,7 +81,7 @@ def run(
         subtitle_text = "\n".join(lines)
         if not subtitle_text.strip():
             raise RuntimeError("Whisper transcription produced no text")
-        result = {"subtitle_text": subtitle_text, "language": language or "auto", "source": "whisper"}
+        result = {"subtitle_text": subtitle_text, "language": language or "auto", "source": "whisper", "segments": timed_segments}
         result_path.parent.mkdir(parents=True, exist_ok=True)
         result_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
         emit({"type": "result", "result_path": str(result_path)})

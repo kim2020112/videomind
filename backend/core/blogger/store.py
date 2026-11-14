@@ -301,7 +301,7 @@ def find_sub_by_uid(identity: dict, uid: str, platform: str = "bilibili") -> dic
 
 
 def list_videos(creator_id: int, *, q: str = "", offset: int = 0, limit: int = 30,
-                extra_where: str | None = None, extra_params: list | None = None) -> dict:
+                extra_where: str | None = None, extra_params: list | None = None, anchor_id: int | None = None) -> dict:
     limit = max(1, min(int(limit), 100))
     offset = max(0, int(offset))
     where = ["v.creator_id = ?"]
@@ -314,6 +314,8 @@ def list_videos(creator_id: int, *, q: str = "", offset: int = 0, limit: int = 3
         params.extend(extra_params or [])
     where_sql = " AND ".join(where)
     with get_db() as conn:
+        from core.content_state import register_content_functions
+        register_content_functions(conn)
         total = conn.execute(
             f"SELECT COUNT(*) AS n FROM blogger_videos v WHERE {where_sql}", params
         ).fetchone()["n"]
@@ -322,7 +324,14 @@ def list_videos(creator_id: int, *, q: str = "", offset: int = 0, limit: int = 3
             "ORDER BY v.published_at DESC, v.id DESC LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
-        return {"total": total, "items": [dict(row) for row in rows]}
+        result = {"total": total, "items": [dict(row) for row in rows]}
+        if anchor_id is not None:
+            anchor = conn.execute(
+                f"SELECT position FROM (SELECT v.id, ROW_NUMBER() OVER (ORDER BY v.published_at DESC, v.id DESC) - 1 AS position "
+                f"FROM blogger_videos v WHERE {where_sql}) WHERE id = ?", [*params, anchor_id],
+            ).fetchone()
+            result["anchor_index"] = anchor[0] if anchor else None
+        return result
 
 
 def replace_pages(video_id: int, pages: list[dict]) -> None:

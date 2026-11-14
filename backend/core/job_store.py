@@ -9,9 +9,9 @@ from datetime import datetime, timezone
 from config import DB_PATH
 
 
-ACTIVE_STATUSES = ("queued", "downloading", "transcribing", "generating")
+ACTIVE_STATUSES = ("queued", "downloading", "transcribing", "generating", "awaiting_confirmation")
 PROCESSING_STATUSES = ("downloading", "transcribing", "generating")
-TERMINAL_STATUSES = ("done", "failed", "cancelled")
+TERMINAL_STATUSES = ("done", "partial", "failed", "cancelled")
 
 
 def _now() -> str:
@@ -87,6 +87,15 @@ def create_job(
     job_id = uuid.uuid4().hex[:12]
     with _db() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        request_key = (payload or {}).get("request_key")
+        if request_key:
+            previous = conn.execute(
+                f"SELECT id FROM background_jobs WHERE {owner_sql} "
+                "AND json_extract(payload_json, '$.request_key') = ? ORDER BY created_at DESC LIMIT 1",
+                [*owner_params, request_key],
+            ).fetchone()
+            if previous:
+                return previous["id"]
         existing = conn.execute(
             f"SELECT id FROM background_jobs WHERE {owner_sql} AND url_hash = ? "
             f"AND status IN ({active_placeholders}) ORDER BY created_at LIMIT 1",
@@ -250,7 +259,7 @@ def request_cancel(
         ).fetchone()
         if not row or row["status"] in TERMINAL_STATUSES:
             return False
-        if row["status"] == "queued":
+        if row["status"] in {"queued", "awaiting_confirmation"}:
             conn.execute(
                 "UPDATE background_jobs SET status = 'cancelled', progress = 0, "
                 "message = ?, cancel_requested = 1, completed_at = ?, updated_at = ? WHERE id = ?",
@@ -278,6 +287,10 @@ def recover_interrupted_jobs() -> int:
     now = _now()
     with _db() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM learning_usage WHERE status = 'reserved' AND operation_id NOT IN "
+                     "(SELECT id FROM background_jobs WHERE status IN ('queued','downloading','transcribing','generating'))")
+        conn.execute("DELETE FROM learning_events WHERE task_id IN (SELECT id FROM background_jobs "
+                     "WHERE status IN ('done','partial','failed','cancelled') AND completed_at < datetime('now', '-7 days'))")
         conn.execute(
             f"UPDATE background_jobs SET status = 'cancelled', message = ?, "
             f"completed_at = ?, updated_at = ? WHERE status IN ({placeholders}) "

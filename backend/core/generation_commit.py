@@ -99,7 +99,6 @@ def commit_full_generation(
             prompt_version=prompt_version,
             now=now,
         )
-        _cleanup_old_cache(conn)
         _upsert_history(
             conn,
             user_id=user_id,
@@ -109,6 +108,7 @@ def commit_full_generation(
             title=video_title,
             platform=platform,
         )
+        _cleanup_old_cache(conn)
         _insert_usage(
             conn,
             user_id=user_id,
@@ -209,7 +209,6 @@ def commit_cached_generation(
             prompt_version=prompt_version,
             now=now,
         )
-        _cleanup_old_cache(conn)
         _upsert_history(
             conn,
             user_id=user_id,
@@ -219,6 +218,7 @@ def commit_cached_generation(
             title=video_title,
             platform=platform,
         )
+        _cleanup_old_cache(conn)
         if usage_action:
             _insert_usage(
                 conn,
@@ -364,14 +364,16 @@ def _replace_video_subtitle(
         )
         video_id = cursor.lastrowid
 
+    existing_subtitle = conn.execute("SELECT full_text, segments_json FROM subtitles WHERE video_id = ?", (video_id,)).fetchone()
+    segments_json = existing_subtitle["segments_json"] if existing_subtitle and existing_subtitle["full_text"] == subtitle_text else None
     conn.execute("DELETE FROM subtitles WHERE video_id = ?", (video_id,))
     conn.execute(
         """
         INSERT INTO subtitles (
             video_id, source, language, full_text, segments_json
-        ) VALUES (?, ?, ?, ?, NULL)
+        ) VALUES (?, ?, ?, ?, ?)
         """,
-        (video_id, subtitle_source, subtitle_language, subtitle_text),
+        (video_id, subtitle_source, subtitle_language, subtitle_text, segments_json),
     )
 
 

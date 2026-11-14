@@ -31,7 +31,7 @@ from core.auth import check_usage_limit, log_usage
 router = APIRouter()
 
 
-@router.post("/api/summarize", response_model=SummaryResult)
+# HTTP compatibility is handled by learning_routes.
 async def summarize_video(req: SummarizeRequest, request: Request):
     """AI 视频总结：提取字幕 -> DeepSeek 生成摘要/章节/思维导图。"""
     if not is_ai_available():

@@ -86,13 +86,11 @@ async def finalize_whisper_job(job: dict, worker_result: dict) -> dict:
     fingerprint = video_fingerprint(info.extractor, info.id) if info.extractor and info.id else None
     fingerprint = fingerprint or job.get("payload", {}).get("fingerprint")
 
-    job_store.update_job(job["task_id"], message="正在校正字幕", progress=95)
-    corrected = await correct_subtitle_text(
-        raw_text,
-        info.title or "",
-        info.description or "",
-        trace_id=job["task_id"][:8],
-    )
+    # Independent transcription is useful without any LLM configuration.
+    corrected = raw_text
+    if job.get("payload", {}).get("pipeline", "full") == "full":
+        job_store.update_job(job["task_id"], message="正在校正字幕", progress=95)
+        corrected = await correct_subtitle_text(raw_text, info.title or "", info.description or "", trace_id=job["task_id"][:8])
     language = job.get("lang") or worker_result.get("language") or "auto"
 
     pipeline = job.get("payload", {}).get("pipeline", "full")
@@ -128,6 +126,10 @@ async def finalize_whisper_job(job: dict, worker_result: dict) -> dict:
         }
 
     canonical_hash = _url_hash(canonical_url)
+    if corrected == raw_text and worker_result.get("segments"):
+        from database import save_subtitle_to_db
+        save_subtitle_to_db(canonical_url, "whisper", language, corrected, info.title,
+                            info.extractor or "", _build_part_info(canonical_url, info), worker_result["segments"])
     _replace_history(job, canonical_hash, canonical_url, info.title, info.extractor or "")
     job_store.update_job(job["task_id"], url_hash=canonical_hash, url=canonical_url)
     return result
