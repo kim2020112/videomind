@@ -80,6 +80,7 @@ systemd、反向代理和备份策略属于部署环境，不在仓库内维护�
 | 内容标签与列表定位 | `backend/core/content_state.py`、`backend/core/blogger/learned.py`、`frontend/src/components/ContentBadges.vue`、`frontend/src/utils/bloggerNavigation.js` |
 | 缓存与历史 | `backend/core/cache.py`、`backend/api/knowledge_routes.py` |
 | 前端路由与编排 | `frontend/src/router.js`、`frontend/src/App.vue` |
+| 统一工具按钮与分页 | `frontend/src/toolbars.css`、`frontend/src/components/ListPagination.vue`、`frontend/src/components/AiSummary.vue` |
 | 前端组件与状态 | `frontend/src/components/`、`frontend/src/composables/` |
 
 ## 测试
@@ -104,7 +105,9 @@ git diff --check
 
 测试必须使用临时数据库，不得读写开发或生产数据库。涉及缓存、身份、后台任务或路由的修复应补回归测试，并先确认测试能复现旧行为。
 
-博主列表回归需覆盖：字幕浏览后返回出现“有字幕”、生成部分模块后显示“已整理 · n/4”、失败重试保留已有标记、工作台刷新和浏览器后退恢复原视频/分 P、筛选后原视频移出时的提示，以及访客/用户之间的状态隔离。补充验证：只读字幕不进入学习历史、清空后标签/筛选计数同步消失且刷新不自动恢复、显式获取可恢复、其他身份/相邻分 P/已有 AI 资料不受影响，以及旧库新增 `subtitle_cleared` 列的兼容迁移。浏览器验收还应覆盖桌面/手机无横向溢出，导图加载期间返回不产生异常。
+博主列表回归需覆盖：字幕浏览后返回出现“有字幕”、生成部分模块后显示“已整理 · n/4”、失败重试保留已有标记、工作台刷新和浏览器后退恢复原视频/分 P、筛选后原视频移出时的提示，以及访客/用户之间的状态隔离。补充验证：只读字幕不进入学习历史、清空后标签/筛选计数同步消失且刷新不自动恢复、显式获取可恢复、其他身份/相邻分 P/已有 AI 资料不受影响，以及旧库新增 `subtitle_cleared` 列的兼容迁移。浏览器验收还应覆盖桌面/平板/手机无横向溢出、内层卡片不超出容器，导图加载期间返回不产生异常。
+
+分页回归需覆盖：深页冷返回仅一次视频请求；10/20/50 条切换、跳页、筛选重置、每页数量 URL 优先及身份偏好隔离；缓存 LRU 淘汰、慢网络下先展示原页且后台刷新不重复滚动、旧请求晚到不覆盖新页、展开分 P 恢复、同步后锚点移动和删除后页码越界。UI 回归需检查长文下固定工具栏、手机底部返回与任务浮层/键盘/安全区避让、字幕各按钮普通/悬停/禁用/聚焦状态一致、已有内容生成中可复制导出、问答全部展开和清空字幕后仍能阅读问答，以及导图全屏内退出按钮。
 
 ## 运行排错
 
