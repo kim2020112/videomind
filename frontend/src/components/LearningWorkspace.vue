@@ -81,7 +81,8 @@ function status(target) {
 </template>
 
 <style scoped>
-.learning-workspace { display: grid; gap: 1.5rem; min-width: 0; }
+.learning-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.5rem; min-width: 0; }
+.learning-materials { min-width: 0; }
 h2 { margin: 0; font-size: 1.125rem; color: var(--text-primary); font-weight: 650; }
 p { margin: .5rem 0; color: var(--text-secondary); font-size: .8125rem; line-height: 1.7; }
 .module-choices { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .65rem; padding: 0; border: 0; margin: 1.2rem 0; }

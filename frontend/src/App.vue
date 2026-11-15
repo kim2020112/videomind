@@ -29,6 +29,16 @@ const BloggerDetailPage = defineAsyncComponent(() => import('./components/Blogge
 const VideoPlayerModal = defineAsyncComponent(() => import('./components/VideoPlayerModal.vue'))
 const LoginModal = defineAsyncComponent(() => import('./components/LoginModal.vue'))
 
+let navbarObserver
+onMounted(() => {
+  const navbar = document.querySelector('.navbar')
+  if (navbar && typeof ResizeObserver !== 'undefined') {
+    navbarObserver = new ResizeObserver(() => document.documentElement.style.setProperty('--navbar-height', `${navbar.getBoundingClientRect().height}px`))
+    navbarObserver.observe(navbar)
+  }
+})
+onUnmounted(() => navbarObserver?.disconnect())
+
 const route = useRoute()
 const router = useRouter()
 
@@ -582,7 +592,7 @@ function handleUrlChange(value) {
 </script>
 
 <template>
-  <div class="app-container">
+  <div class="app-container" :class="{ 'has-blogger-return': isWorkspaceRoute && bloggerReturnTarget }">
     <NavBar
       :currentView="currentView"
       :activeTaskCount="activeTaskCount"
@@ -1054,5 +1064,18 @@ function handleUrlChange(value) {
     width: 14px;
     height: 14px;
   }
+}
+</style>
+
+<style>
+.app-container { --workspace-sticky-top:var(--navbar-height, 80px); }
+.has-blogger-return { --workspace-sticky-top:calc(var(--navbar-height, 80px) + 64px); }
+.workspace-origin.workspace-origin { position:sticky; top:var(--navbar-height, 80px); z-index:50; max-width:none; padding:10px max(20px, calc((100vw - 1360px) / 2)); background:var(--bg-primary); border-bottom:1px solid var(--border); }
+.workspace-back-link.workspace-back-link { padding:0 16px; color:var(--text-primary); background:var(--bg-secondary); border:1px solid var(--border); border-radius:10px; }
+@media(max-width:767px) {
+  .has-blogger-return { --workspace-sticky-top:var(--navbar-height, 80px); padding-bottom:calc(88px + env(safe-area-inset-bottom)); }
+  .workspace-origin.workspace-origin { position:fixed; top:auto; bottom:0; left:0; right:0; padding:10px 16px calc(10px + env(safe-area-inset-bottom)); box-shadow:0 -4px 20px #0002; }
+  .workspace-back-link.workspace-back-link { display:flex; justify-content:center; width:100%; }
+  .has-blogger-return .task-progress-dock { bottom:calc(80px + env(safe-area-inset-bottom)); }
 }
 </style>

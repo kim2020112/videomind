@@ -389,13 +389,14 @@ onUnmounted(() => {
   }
 })
 
-function toggleFullscreen() {
+async function toggleFullscreen() {
   if (!mindmapContainer.value) return
-  if (!document.fullscreenElement) {
-    mindmapContainer.value.requestFullscreen()
-  } else {
-    document.exitFullscreen()
-  }
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen()
+    else if (isFullscreen.value) isFullscreen.value = false
+    else if (mindmapContainer.value.requestFullscreen) await mindmapContainer.value.requestFullscreen()
+    else isFullscreen.value = true
+  } catch { toolbarFeedback.value = '全屏暂不可用，请重试' }
 }
 
 function getSafeFilename() {
@@ -772,14 +773,38 @@ function backgroundStageLabel(task) {
   }[task.status] || '转录已加入后台队列'
 }
 
-function copyNotes() {
-  if (!props.notesMarkdown) return
-  const text = props.notesMarkdown
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).catch(() => fallbackCopy(text))
-  } else {
-    fallbackCopy(text)
-  }
+const toolbarFeedback = ref('')
+const moduleTitle = computed(() => ({ summary: '摘要', mindmap: '思维导图', notes: '学习笔记', qa: '关键问答' })[activeSubTab.value])
+const moduleText = computed(() => ({
+  summary: props.result?.summary || props.streamingText || '',
+  mindmap: props.mindmapMarkdown || '', notes: props.notesMarkdown || '',
+  qa: (props.qaPairs || []).map((p, i) => `## Q${i + 1} ${p.question}\n\n${p.answer}`).join('\n\n'),
+})[activeSubTab.value] || '')
+const allQaExpanded = computed(() => props.qaPairs?.length && props.qaPairs.every(p => p.expanded))
+function toggleAllQa() {
+  const expand = !allQaExpanded.value
+  props.qaPairs?.forEach((p, i) => { if (Boolean(p.expanded) !== expand) props.onToggleQaExpand?.(i) })
+}
+watch(activeSubTab, () => { toolbarFeedback.value = '' })
+async function copyModule() {
+  try {
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(moduleText.value)
+    else if (!fallbackCopy(moduleText.value)) throw new Error('copy')
+    toolbarFeedback.value = '已复制'
+  } catch { toolbarFeedback.value = '复制失败，请重试' }
+}
+function regenerateModule() {
+  const handlers = { summary: props.onRegenerateSummary, mindmap: props.onRegenerateMindmap,
+    notes: props.onRegenerateNotes, qa: props.qaPairs?.length ? props.onRegenerateQa : props.onGenerateQa }
+  handlers[activeSubTab.value]?.()
+}
+function downloadModule() {
+  const objectUrl = URL.createObjectURL(new Blob([moduleText.value], { type: 'text/markdown;charset=utf-8' }))
+  const link = document.createElement('a')
+  link.href = objectUrl
+  link.download = `${(props.videoTitle || '视频').replace(/[\\/:*?"<>|]/g, '_')}-${moduleTitle.value}.md`
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
 }
 
 function fallbackCopy(text) {
@@ -789,20 +814,12 @@ function fallbackCopy(text) {
   ta.style.left = '-9999px'
   document.body.appendChild(ta)
   ta.select()
-  try { document.execCommand('copy') } catch {}
+  let copied = false
+  try { copied = document.execCommand('copy') } catch {}
   document.body.removeChild(ta)
+  return copied
 }
 
-function downloadNotes() {
-  if (!props.notesMarkdown) return
-  const blob = new Blob([props.notesMarkdown], { type: 'text/markdown' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `${props.videoTitle || 'notes'}.md`
-  a.click()
-  URL.revokeObjectURL(url)
-}
 </script>
 
 <template>
@@ -832,7 +849,6 @@ function downloadNotes() {
       <template v-else>
         <svg class="error-icon" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" /></svg>
         <span>{{ error }}</span>
-        <button @click="handleRegenerateSummary" class="retry-btn">重试</button>
       </template>
     </div>
 
@@ -897,40 +913,55 @@ function downloadNotes() {
     <div v-if="workspaceMode || ((result || loading) && !backgroundTask)" class="summary-content">
 
       <!-- 子 Tab 栏 -->
-      <div class="sub-tab-bar">
-        <button class="sub-tab-btn" :class="{ active: activeSubTab === 'summary' }" @click="activeSubTab = 'summary'">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="sub-tab-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" /></svg>
+      <div class="module-header">
+      <div class="sub-tab-bar" role="group" aria-label="学习资料类型">
+        <button class="sub-tab-btn" :aria-pressed="activeSubTab === 'summary'" :class="{ active: activeSubTab === 'summary' }" @click="activeSubTab = 'summary'">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="sub-tab-icon" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" /></svg>
           摘要
         </button>
-        <button v-if="!workspaceMode" class="sub-tab-btn" :class="{ active: activeSubTab === 'subtitle' }" @click="handleTabSubtitle">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="sub-tab-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg>
+        <button v-if="!workspaceMode" class="sub-tab-btn" :aria-pressed="activeSubTab === 'subtitle'" :class="{ active: activeSubTab === 'subtitle' }" @click="handleTabSubtitle">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="sub-tab-icon" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg>
           字幕
         </button>
         <button
           class="sub-tab-btn"
-          :class="{ active: activeSubTab === 'mindmap' }"
+          :aria-pressed="activeSubTab === 'mindmap'" :class="{ active: activeSubTab === 'mindmap' }"
           @click="activeSubTab = 'mindmap'"
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="sub-tab-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" /></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="sub-tab-icon" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" /></svg>
           导图
         </button>
         <button
           class="sub-tab-btn"
-          :class="{ active: activeSubTab === 'notes' }"
+          :aria-pressed="activeSubTab === 'notes'" :class="{ active: activeSubTab === 'notes' }"
           @click="activeSubTab = 'notes'"
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="sub-tab-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" /></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="sub-tab-icon" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" /></svg>
           笔记
         </button>
         <button
           class="sub-tab-btn"
-          :class="{ active: activeSubTab === 'qa' }"
+          :aria-pressed="activeSubTab === 'qa'" :class="{ active: activeSubTab === 'qa' }"
           @click="handleTabQA"
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="sub-tab-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" /></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="sub-tab-icon" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" /></svg>
           {{ workspaceMode ? '精选问答' : '问答' }}
         </button>
-        <button v-if="workspaceMode" class="sub-tab-btn" :class="{ active: activeSubTab === 'chat' }" @click="activeSubTab = 'chat'">自由提问</button>
+        <button v-if="workspaceMode" class="sub-tab-btn" :aria-pressed="activeSubTab === 'chat'" :class="{ active: activeSubTab === 'chat' }" @click="activeSubTab = 'chat'">自由提问</button>
+      </div>
+
+      <div v-if="moduleTitle" class="module-toolbar" role="group" :aria-label="`${moduleTitle}操作`">
+        <button class="tool-button" :disabled="!moduleText" @click="copyModule">{{ activeSubTab === 'qa' ? '复制全部' : activeSubTab === 'mindmap' ? '复制 Markdown' : '复制' }}</button>
+        <template v-if="activeSubTab === 'mindmap'">
+          <button class="tool-button" :disabled="!hasMindmap" @click="downloadSVG" title="SVG：可无损缩放的矢量图片">下载 SVG</button>
+          <button class="tool-button" :disabled="!hasMindmap" @click="downloadPNG" title="PNG：便于分享的图片">下载 PNG</button>
+          <button class="tool-button" :disabled="!hasMindmap" @click="toggleFullscreen">{{ isFullscreen ? '退出全屏' : '全屏' }}</button>
+        </template>
+        <button v-else class="tool-button" :disabled="!moduleText" @click="downloadModule" title="Markdown：保留标题和列表结构的文本格式">下载 Markdown</button>
+        <button v-if="activeSubTab === 'qa'" class="tool-button" :disabled="!qaPairs?.length" @click="toggleAllQa">{{ allQaExpanded ? '全部收起' : '全部展开' }}</button>
+        <button class="tool-button" :disabled="loading || moduleLoading(activeSubTab) || (activeSubTab === 'qa' && isQaGenerating)" @click="regenerateModule">{{ moduleLoading(activeSubTab) ? '生成中…' : `${moduleText ? '重新生成' : '生成'}${moduleTitle}` }}</button>
+        <span class="toolbar-feedback" role="status">{{ toolbarFeedback }}</span>
+      </div>
       </div>
 
       <!-- Tab: 摘要 -->
@@ -966,10 +997,6 @@ function downloadNotes() {
               </div>
             </div>
           </div>
-          <button v-if="!loading" @click="handleRegenerateSummary" class="regenerate-btn">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="regenerate-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" /></svg>
-            {{ result?.summary ? '重新生成摘要' : '生成摘要' }}
-          </button>
         </div>
       </div>
 
@@ -1025,25 +1052,9 @@ function downloadNotes() {
       <!-- Tab: 思维导图 -->
       <div v-show="activeSubTab === 'mindmap'" class="sub-tab-panel">
         <div v-if="hasMindmap">
-          <div class="mindmap-controls">
-            <button @click="downloadSVG" class="zoom-btn" title="下载 SVG">
-              <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path fill-rule="evenodd" d="M6 2a2 2 0 00-2 2v12a2 2 0 002 2h8a2 2 0 002-2V7.414A2 2 0 0015.414 6L13 3.586A2 2 0 0011.586 3H6zm5 13a1 1 0 102 0V8.414l2.293 2.293a1 1 0 001.414-1.414l-4-4a1 1 0 00-1.414 0l-4 4a1 1 0 001.414 1.414L11 8.414V15z" clip-rule="evenodd"/></svg>
-              SVG
-            </button>
-            <button @click="downloadPNG" class="zoom-btn" title="下载 PNG">
-              <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path fill-rule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clip-rule="evenodd"/></svg>
-              PNG
-            </button>
-            <button @click="toggleFullscreen" class="zoom-btn" :title="isFullscreen ? '退出全屏' : '全屏展示'">
-              <svg v-if="!isFullscreen" viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path d="M3 4a1 1 0 011-1h4a1 1 0 010 2H6.414l3.293 3.293a1 1 0 01-1.414 1.414L5 6.414V8a1 1 0 01-2 0V4zm9 1a1 1 0 010-2h4a1 1 0 011 1v4a1 1 0 01-2 0V6.414l-3.293 3.293a1 1 0 11-1.414-1.414L13.586 5H12zm-9 7a1 1 0 012 0v1.586l3.293-3.293a1 1 0 011.414 1.414L6.414 15H8a1 1 0 010 2H4a1 1 0 01-1-1v-4zm13-1a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 010-2h1.586l-3.293-3.293a1 1 0 011.414-1.414L15 13.586V12a1 1 0 011-1z"/></svg>
-              <svg v-else viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path d="M6 18L18 6M6 6l12 12" stroke="currentColor" stroke-width="2"/></svg>
-              {{ isFullscreen ? '退出' : '全屏' }}
-            </button>
-            <button @click="handleRegenerateMindmap" :disabled="loading" class="regenerate-btn" title="重新生成思维导图">
-              <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/></svg>
-            </button>
-          </div>
+
           <div ref="mindmapContainer" class="mindmap-container" :class="{ 'mindmap-fullscreen': isFullscreen }">
+            <button v-if="isFullscreen" class="tool-button fullscreen-close" @click="toggleFullscreen">退出全屏</button>
             <svg ref="mindmapSvg" class="mindmap-svg" :style="isFullscreen ? 'height: 100%' : 'min-height: 500px'"></svg>
           </div>
         </div>
@@ -1055,10 +1066,6 @@ function downloadNotes() {
         <div v-else class="mindmap-empty">
           <template v-if="result || workspaceMode">
             <p>尚未生成思维导图</p>
-            <button @click="handleRegenerateMindmap" :disabled="loading" class="regenerate-btn regenerate-btn--primary">
-              <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/></svg>
-              生成思维导图
-            </button>
           </template>
           <template v-else>
             <p>思维导图将在总结完成后自动生成</p>
@@ -1075,29 +1082,12 @@ function downloadNotes() {
           <p class="loading-text">正在生成学习笔记...</p>
         </div>
         <div v-else-if="notesMarkdown" class="notes-section">
-          <div class="notes-toolbar">
-            <span v-if="moduleLoading('notes')" class="notes-streaming-badge">生成中...</span>
-            <button @click="copyNotes" class="notes-action-btn">
-              <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z"/><path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 3H9a3 3 0 01-3-3z"/></svg>
-              复制
-            </button>
-            <button @click="downloadNotes" class="notes-action-btn">
-              <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path d="M10.75 2.75a.75.75 0 00-1.5 0v8.614L6.295 8.235a.75.75 0 10-1.09 1.03l4.25 4.5a.75.75 0 001.09 0l4.25-4.5a.75.75 0 00-1.09-1.03l-2.955 3.129V2.75z"/><path d="M3.5 12.75a.75.75 0 00-1.5 0v2.5A2.75 2.75 0 004.75 18h10.5A2.75 2.75 0 0018 15.25v-2.5a.75.75 0 00-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5z"/></svg>
-              下载 .md
-            </button>
-            <button @click="handleRegenerateNotes" :disabled="loading" class="regenerate-btn" title="重新生成笔记">
-              <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/></svg>
-            </button>
-          </div>
+
           <div class="notes-content prose prose-invert prose-sm max-w-none" v-html="notesHtml" @click="onNotesClick"></div>
         </div>
         <div v-else class="notes-empty">
           <template v-if="result || workspaceMode">
             <p>尚未生成学习笔记</p>
-            <button @click="handleRegenerateNotes" :disabled="loading" class="regenerate-btn regenerate-btn--primary">
-              <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/></svg>
-              生成学习笔记
-            </button>
           </template>
           <template v-else>
             笔记将在总结完成后自动生成
@@ -1117,7 +1107,7 @@ function downloadNotes() {
           <!-- 精选问答模式 -->
           <div v-show="workspaceMode ? activeSubTab === 'qa' : qaMode === 'generated'" class="qa-mode-panel">
             <!-- 无字幕 -->
-            <div v-if="!subtitleText && !isFetchingSubtitle" class="chat-need-subtitle">
+            <div v-if="!subtitleText && !isFetchingSubtitle && !qaPairs?.length" class="chat-need-subtitle">
               <p>请先加载字幕文本以使用问答功能</p>
               <button @click="onFetchSubtitle" class="fetch-subtitle-btn">加载字幕</button>
             </div>
@@ -1132,10 +1122,6 @@ function downloadNotes() {
               <div v-else-if="!qaPairs.length && !qaError" class="qa-empty">
                 <template v-if="result || workspaceMode">
                   <p>尚未生成关键问答</p>
-                  <button @click="onGenerateQa" :disabled="!subtitleText || loading" class="regenerate-btn regenerate-btn--primary">
-                    <svg viewBox="0 0 20 20" fill="currentColor" class="toolbar-icon"><path fill-rule="evenodd" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" clip-rule="evenodd"/></svg>
-                    生成关键问答
-                  </button>
                 </template>
                 <template v-else>
                   <p>问答对将在总结完成后自动生成</p>
@@ -1163,10 +1149,6 @@ function downloadNotes() {
                     <div class="qa-pair-answer-content prose prose-invert prose-sm max-w-none" v-html="cachedMarkdown(pair.answer)"></div>
                   </div>
                 </div>
-                <button @click="handleRegenerateQa" :disabled="isQaGenerating || loading" class="regenerate-btn">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="regenerate-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" /></svg>
-                  重新生成
-                </button>
               </div>
             </template>
           </div>
@@ -1866,5 +1848,22 @@ function downloadNotes() {
 
   /* 笔记操作按钮 */
   .notes-action-btn { min-height: 44px; padding: 0.5rem 0.75rem; }
+}
+</style>
+
+<style scoped>
+.fullscreen-close { position:absolute; top:16px; right:16px; z-index:2; }
+.module-header { position:sticky; top:var(--workspace-sticky-top, var(--navbar-height, 80px)); z-index:25; background:var(--bg-secondary); border-bottom:1px solid var(--border); padding-bottom:12px; margin-bottom:16px; }
+.module-header .sub-tab-bar { margin-bottom:12px; gap:4px; }
+.module-header .sub-tab-btn { min-height:44px; flex:1; justify-content:center; border-radius:8px 8px 0 0; }
+.module-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+.toolbar-feedback { font-size:12px; color:var(--text-secondary); }
+</style>
+
+<style scoped>
+@media(max-width:480px) {
+  .module-header .sub-tab-bar { overflow:visible; }
+  .module-header .sub-tab-btn { min-width:0; padding:10px 4px; gap:0; font-size:12px; }
+  .module-header .sub-tab-icon { display:none; }
 }
 </style>

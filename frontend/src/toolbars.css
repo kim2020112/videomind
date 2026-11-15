@@ -1,0 +1,10 @@
+.tool-button.tool-button {
+  display:inline-flex; align-items:center; justify-content:center; gap:6px;
+  min-height:44px; padding:8px 12px; border:1px solid var(--border); border-radius:8px;
+  color:var(--text-primary); background:var(--bg-secondary); font-size:13px; font-weight:500;
+  line-height:1.3; cursor:pointer; flex-shrink:0; transition:background .15s, border-color .15s;
+}
+.tool-button.tool-button:hover:not(:disabled) { border-color:var(--accent-blue); background:var(--bg-tertiary, var(--bg-card)); color:var(--text-primary); }
+.tool-button.tool-button:disabled { opacity:.45; cursor:default; }
+.tool-button.tool-button:focus-visible { outline:2px solid var(--accent-blue); outline-offset:3px; }
+@media(prefers-reduced-motion:reduce) { .tool-button.tool-button { transition:none; } }

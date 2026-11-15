@@ -32,7 +32,7 @@ defineProps({
 
 .desktop-workspace__sidebar {
   position: sticky;
-  top: 88px;
+  top: calc(var(--workspace-sticky-top, 80px) + 12px);
   min-width: 0;
 }
 

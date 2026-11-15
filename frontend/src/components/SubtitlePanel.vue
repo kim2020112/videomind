@@ -127,22 +127,22 @@ async function copy() {
         <p>{{ text ? `${source} · ${language} · ${lines.length} 条` : cleared ? '字幕已清空，不会自动重新获取' : '尚未获取视频字幕' }}</p>
       </div>
       <div class="heading-actions">
-        <button v-if="!text" type="button" :disabled="busy" @click="onFetch?.()">{{ busy ? '正在获取…' : '获取字幕' }}</button>
+        <button v-if="!text" class="tool-button" type="button" :disabled="busy" @click="onFetch?.()">{{ busy ? '正在获取…' : '获取字幕' }}</button>
         <template v-else>
-          <button type="button" class="refresh-button" :disabled="busy" @click="onFetch?.(true)">{{ info?.source === 'whisper' ? '重新识别' : '重新获取' }}</button>
-          <button type="button" class="toggle-button" :aria-expanded="expanded" :aria-controls="previewId" @click="expanded = !expanded">{{ expanded ? '收起字幕' : '展开字幕' }}</button>
+          <button type="button" class="refresh-button tool-button" :disabled="busy" @click="onFetch?.(true)">{{ info?.source === 'whisper' ? '重新识别' : '重新获取' }}</button>
+          <button type="button" class="toggle-button tool-button" :aria-expanded="expanded" :aria-controls="previewId" @click="expanded = !expanded">{{ expanded ? '收起字幕' : '展开字幕' }}</button>
         </template>
       </div>
     </div>
     <p v-if="error" class="error-message" role="alert">{{ error }}</p>
     <template v-if="text">
       <div class="subtitle-actions" role="group" aria-label="复制与下载字幕" @keydown.esc="dismissTooltip">
-        <button v-for="action in actions" :key="action.id" type="button"
+        <button class="tool-button" v-for="action in actions" :key="action.id" type="button"
           :aria-describedby="activeTooltip?.id === action.id ? tooltipId : undefined"
           @mouseenter="showTooltip(action, $event)" @mouseleave="leaveTooltip"
           @focus="showTooltip(action, $event, true)" @blur="focusedTip = null"
           @click="action.id === 'copy' ? copy() : download(action.id)">{{ action.label }}</button>
-        <button v-if="onClear" type="button" class="clear-button" :disabled="busy" title="清空当前身份的字幕记录和有字幕标记，保留已整理资料；需要时可重新获取。" @click="onClear()">清空字幕</button>
+        <button v-if="onClear" type="button" class="clear-button tool-button" :disabled="busy" title="清空当前身份的字幕记录和有字幕标记，保留已整理资料；需要时可重新获取。" @click="onClear()">清空字幕</button>
         <span v-if="!timed">无完整时间信息，提供纯文本下载</span>
       </div>
       <span v-if="copied" class="sr-only" role="status">字幕全文已复制</span>
@@ -172,10 +172,6 @@ button { min-height: 36px; padding: .35rem .65rem; border: 1px solid var(--borde
 button:hover { border-color: var(--accent-blue); }
 button:disabled { opacity: .5; cursor: wait; }
 button:focus-visible, .subtitle-preview:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 3px; }
-.clear-button { color: var(--text-secondary); background: transparent; }
-.clear-button:hover { color: #fca5a5; border-color: #fca5a5; }
-.refresh-button { background: transparent; }
-.toggle-button { border-color: transparent; background: transparent; color: var(--accent-blue); }
 .subtitle-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: .6rem 0; font-size: .6875rem; color: var(--text-secondary); }
 .subtitle-actions button { min-height: 44px; }
 .subtitle-preview { max-height: min(42vh, 360px); overflow: auto; padding: .25rem 0; font-size: .8125rem; line-height: 1.55; }
