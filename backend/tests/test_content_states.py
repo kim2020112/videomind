@@ -95,6 +95,21 @@ class ContentStateTests(unittest.IsolatedAsyncioTestCase):
         store.upsert_video(self.creator, {'bvid': 'BV1new', 'title': '最新', 'published_at': 999})
         self.assertEqual(4, (await self.listing(anchor_id=str(target)))['anchor_index'])
 
+    async def test_locate_anchor_returns_one_aligned_page_and_clamps_deleted_tail(self):
+        for i in range(65):
+            store.upsert_video(self.creator, {'bvid': f'BVdeep{i}', 'title': f'课程{i}', 'published_at': 100+i})
+        ordered = store.list_videos(self.creator, limit=100)['items']
+        target = ordered[47]['id']
+        result = await self.listing(anchor_id=str(target), locate_anchor='1', offset='0', limit='20')
+        self.assertEqual(47, result['anchor_index'])
+        self.assertEqual(40, result['offset'])
+        self.assertEqual(20, result['limit'])
+        self.assertEqual(20, len(result['items']))
+        self.assertIn(target, [item['id'] for item in result['items']])
+        tail = await self.listing(offset='99999', limit='20')
+        self.assertEqual(((tail['total'] - 1) // 20) * 20, tail['offset'])
+        self.assertTrue(tail['items'])
+
     async def test_visit_shared_subtitle_is_idempotent_and_free(self):
         database.save_subtitle_to_db(URL, 'bilibili_cc', 'zh', '共享字幕', '测试', 'bilibili')
         with patch.object(learning_routes, 'require_identity', return_value=A), patch.object(learning_routes, 'normalize', return_value=URL):

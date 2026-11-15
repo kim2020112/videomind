@@ -3,7 +3,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { createMemoryHistory } from 'vue-router'
 import { createRouter } from 'vue-router'
 import BloggerDetailPage from './BloggerDetailPage.vue'
-import { bloggerContextKey, saveBloggerContext } from '../utils/bloggerNavigation.js'
+import { bloggerContextKey, saveBloggerContext, clearBloggerPages } from '../utils/bloggerNavigation.js'
 import { routes } from '../router.js'
 
 vi.mock('../composables/useAuth.js', () => ({
@@ -46,11 +46,13 @@ describe('BloggerDetailPage', () => {
   beforeEach(() => {
     vi.unstubAllGlobals()
     sessionStorage.clear()
+    localStorage.clear()
+    clearBloggerPages()
     window.scrollTo = vi.fn()
     Element.prototype.scrollIntoView = vi.fn()
   })
 
-  it('restores loaded pages and includes filters and video position in the workspace origin', async () => {
+  it('restores a single page and includes filters and video position in the workspace origin', async () => {
     const fetchMock = vi.fn().mockImplementation((url) => {
       if (url.includes('/videos')) {
         const offset = Number(new URL(url, 'http://localhost').searchParams.get('offset'))
@@ -65,8 +67,8 @@ describe('BloggerDetailPage', () => {
       return Promise.resolve(okJson({ bloggers: [{ id: 7, name: 'UP主', sync_status: 'complete' }] }))
     })
     const { wrapper, router } = await mountPage(fetchMock, '/bloggers/7?q=相机&learned=unlearned&page=2#video-25')
-    expect(wrapper.findAll('.video-card')).toHaveLength(40)
-    expect(fetchMock.mock.calls.filter(([url]) => url.includes('/videos')).map(([url]) => new URL(url, 'http://localhost').searchParams.get('offset'))).toEqual(['0', '20'])
+    expect(wrapper.findAll('.video-card')).toHaveLength(20)
+    expect(fetchMock.mock.calls.filter(([url]) => url.includes('/videos')).map(([url]) => new URL(url, 'http://localhost').searchParams.get('offset'))).toEqual(['20'])
     await wrapper.find('#video-25 .video-actions button').trigger('click')
     await flushPromises()
     const payload = wrapper.emitted('open-workspace')[0][0]
@@ -93,7 +95,7 @@ describe('BloggerDetailPage', () => {
     await wrapper.find('.part-row button').trigger('click')
     await flushPromises()
     expect(wrapper.emitted('open-workspace')[0][0]).toMatchObject({
-      url: 'https://www.bilibili.com/video/BV1aaa?p=2', returnTo: '/bloggers/7#video-9',
+      url: 'https://www.bilibili.com/video/BV1aaa?p=2', returnTo: '/bloggers/7?pageSize=20#video-9',
     })
     wrapper.unmount()
   })
@@ -156,29 +158,48 @@ describe('BloggerDetailPage', () => {
     wrapper.unmount()
   })
 
-  it('appends on load more without replacing existing items', async () => {
-    const fetchMock = vi.fn().mockImplementation((url) => {
-      if (url.includes('/videos?') || url.includes('/videos')) {
-        const offset = Number((url.match(/offset=(\d+)/) || [])[1] || 0)
-        const items = offset === 0
-          ? [video(1, 'BV1aaa', '视频一'), video(2, 'BV1bbb', '视频二')]
-          : [video(3, 'BV1ccc', '视频三')]
-        return Promise.resolve(okJson({ total: 3, learned_total: 1, items }))
+  it('replaces the page, changes page size and clears page selection', async () => {
+    const fetchMock = vi.fn((url) => {
+      if (url.includes('/videos')) {
+        const params = new URL(url, 'http://localhost').searchParams
+        const offset = Number(params.get('offset'))
+        const limit = Number(params.get('limit'))
+        return Promise.resolve(okJson({ total: 45, offset, limit, items: Array.from({ length: Math.min(limit, 45 - offset) }, (_, i) => video(offset + i + 1, `BV${i}`, `视频${offset + i + 1}`)) }))
       }
-      if (url.includes('/batches')) return Promise.resolve(okJson({ batches: [] }))
-      return Promise.resolve(okJson({ bloggers: [{ id: 7, uid: '100', name: 'UP主', alias: '', follower_count: 5, catalog_count: 3, sync_status: 'complete' }] }))
+      return Promise.resolve(okJson({ bloggers: [], batches: [] }))
     })
-    const { wrapper } = await mountPage(fetchMock)
-
-    expect(wrapper.findAll('.video-card')).toHaveLength(2)
-    expect(wrapper.text()).toContain('共 3 · 有字幕 0 · 已整理 1')
-
-    await wrapper.find('.list-footer .btn-ghost').trigger('click')
+    const { wrapper, router } = await mountPage(fetchMock)
+    expect(wrapper.findAll('.video-card')).toHaveLength(20)
+    await wrapper.find('.list-top button[aria-label="下一页"]').trigger('click')
     await flushPromises()
-    const titles = wrapper.findAll('.video-title-text').map(el => el.text())
-    expect(titles).toEqual(['视频一', '视频二', '视频三'])  // 追加而非替换
-    expect(wrapper.find('.list-footer .btn-ghost').exists()).toBe(false)  // hasMore=false
+    expect(wrapper.find('#video-1').exists()).toBe(false)
+    expect(wrapper.find('#video-21').exists()).toBe(true)
+    expect(router.currentRoute.value.query.page).toBe('2')
+    await wrapper.find('.list-top select').setValue('10')
+    await flushPromises()
+    expect(wrapper.findAll('.video-card')).toHaveLength(10)
+    expect(router.currentRoute.value.query).toMatchObject({ page: '3', pageSize: '10' })
+    expect(wrapper.find('#video-21').exists()).toBe(true)
+    await wrapper.find('.list-top input').setValue('5')
+    await wrapper.find('.list-top form').trigger('submit')
+    await flushPromises()
+    expect(wrapper.find('#video-41').exists()).toBe(true)
     wrapper.unmount()
+  })
+
+  it('paints a warm page before delayed list, metadata and batch requests finish', async () => {
+    const fetchMock = vi.fn((url) => Promise.resolve(okJson(url.includes('/videos')
+      ? { total: 1, offset: 0, items: [video(9, 'BV9', '缓存课程')] }
+      : { bloggers: [], batches: [] })))
+    const first = await mountPage(fetchMock)
+    await first.wrapper.find('.video-actions button').trigger('click')
+    await flushPromises()
+    first.wrapper.unmount()
+    const delayed = vi.fn(() => new Promise(() => {}))
+    const second = await mountPage(delayed, '/bloggers/7?pageSize=20#video-9')
+    expect(second.wrapper.find('#video-9').exists()).toBe(true)
+    expect(second.wrapper.find('.detail-empty').exists()).toBe(false)
+    second.wrapper.unmount()
   })
 
   it('writes learned filter to query and refetches', async () => {

@@ -4,7 +4,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { useBloggers } from '../composables/useBloggers.js'
 import { thumbnailSrc } from '../utils/thumbnail.js'
 import { useAuth } from '../composables/useAuth.js'
-import { bloggerContextKey, saveBloggerContext, readBloggerContext } from '../utils/bloggerNavigation.js'
+import { bloggerContextKey, saveBloggerContext, readBloggerContext, cacheBloggerPage, readBloggerPage } from '../utils/bloggerNavigation.js'
+import ListPagination from './ListPagination.vue'
 import ContentBadges from './ContentBadges.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 
@@ -18,7 +19,7 @@ const router = useRouter()
 const {
   bloggers, videos, videosTotal, videosLearnedTotal, videosSubtitleTotal, videosMatchedTotal, videosHasMore, videosLoading,
   pages, pagesLoading, batches, currentBatch, batchLoading, pending, error,
-  listBloggers, updateBlogger, syncBlogger, cancelSync, listVideos, listPages,
+  invalidateVideoRequests, applyVideoPage, listBloggers, updateBlogger, syncBlogger, cancelSync, listVideos, listPages,
   createBatch, listBatches, getBatch, batchAction,
   startBatchPolling, stopBatchPolling, startSyncPolling,
 } = useBloggers()
@@ -26,11 +27,15 @@ const {
 const subId = computed(() => String(route.params.id || ''))
 const blogger = computed(() => bloggers.value.find(item => String(item.id) === subId.value))
 
-const PAGE_SIZE = 20
+const currentPage = ref(1)
+const pageSize = ref(20)
+const listTop = ref(null)
+let lastPageData = null
 const searchQuery = ref('')
 const subtitleOnly = ref(false)
 const restoredVideoId = ref(null)
 const missingVideo = ref(null)
+const videoError = ref('')
 const auth = useAuth()
 const identityKey = computed(() => auth.user?.value?.id ? `user:${auth.user.value.id}` : `guest:${auth.guestId?.value || 'local'}`)
 let disposed = false
@@ -161,7 +166,8 @@ function syncRouteQuery() {
   if (searchQuery.value) query.q = searchQuery.value
   if (subtitleOnly.value) query.has_subtitle = '1'
   if (learnedFilter.value !== 'all') query.learned = learnedFilter.value
-  const page = Math.max(1, Math.ceil(videos.value.length / PAGE_SIZE))
+  const page = currentPage.value
+  query.pageSize = String(pageSize.value)
   if (page > 1) query.page = String(page)
   router.replace({ name: 'blogger-detail', params: { id: subId.value }, query })
 }
@@ -171,47 +177,76 @@ function currentQueryState() {
     q: typeof route.query.q === 'string' ? route.query.q : '',
     learned: ['learned', 'unlearned'].includes(route.query.learned) ? route.query.learned : 'all',
     subtitle: route.query.has_subtitle === '1',
+    pageSize: pageSize.value,
   }
 }
 
-async function refreshVideos({ append = false, anchorId } = {}) {
-  return await listVideos(subId.value, {
-    q: searchQuery.value,
-    learned: learnedFilter.value,
-    has_subtitle: subtitleOnly.value ? '1' : undefined,
-    anchor_id: anchorId,
-    limit: PAGE_SIZE,
-    offset: append ? videos.value.length : 0,
-  }, { append })
+function snapshotKey() {
+  return `${bloggerContextKey(identityKey.value, subId.value, { q: searchQuery.value, learned: learnedFilter.value, subtitle: subtitleOnly.value, pageSize: pageSize.value })}:${currentPage.value}`
 }
-
+function rememberPage() {
+  if (lastPageData) cacheBloggerPage(snapshotKey(), { data: lastPageData, bloggers: bloggers.value,
+    expandedVideoId: expandedVideoId.value, pages: pages.value })
+}
+async function refreshVideos({ anchorId, quiet = false } = {}) {
+  videoError.value = ''
+  const data = await listVideos(subId.value, {
+    q: searchQuery.value, learned: learnedFilter.value,
+    has_subtitle: subtitleOnly.value ? '1' : undefined,
+    anchor_id: anchorId, locate_anchor: anchorId ? 1 : undefined,
+    limit: pageSize.value, offset: (currentPage.value - 1) * pageSize.value,
+  }, { quiet })
+  if (data) {
+    lastPageData = data
+    currentPage.value = Math.floor((data.offset ?? (currentPage.value - 1) * pageSize.value) / pageSize.value) + 1
+    rememberPage()
+  } else if (!disposed) videoError.value = error.value || '视频列表加载失败，请重试'
+  return data
+}
+function scrollListTop() {
+  listTop.value?.scrollIntoView({ block: 'start', behavior: 'instant' })
+}
+async function changePage(page) {
+  if (page === currentPage.value) return
+  rememberPage()
+  currentPage.value = page
+  expandedVideoId.value = null
+  selected.value = new Set()
+  missingVideo.value = null
+  applyVideoPage({ items: [] })
+  await refreshVideos()
+  syncRouteQuery()
+  await nextTick()
+  scrollListTop()
+}
+async function changeSize(size) {
+  const first = (currentPage.value - 1) * pageSize.value
+  pageSize.value = size
+  try { localStorage.setItem(`videomind:page-size:${identityKey.value}`, String(size)) } catch {}
+  currentPage.value = Math.floor(first / size) + 1
+  selected.value = new Set()
+  expandedVideoId.value = null
+  applyVideoPage({ items: [] })
+  await refreshVideos()
+  syncRouteQuery()
+  await nextTick()
+  scrollListTop()
+}
 async function handleSearch() {
+  currentPage.value = 1
+  selected.value = new Set()
   expandedVideoId.value = null
   missingVideo.value = null
+  applyVideoPage({ items: [] })
   await refreshVideos()
   syncRouteQuery()
 }
-
 async function setLearnedFilter(value) {
   if (learnedFilter.value === value) return
   learnedFilter.value = value
-  expandedVideoId.value = null
-  missingVideo.value = null
-  await refreshVideos()
-  syncRouteQuery()
+  await handleSearch()
 }
-
-async function loadMore() {
-  await refreshVideos({ append: true })
-  syncRouteQuery()
-}
-
-async function toggleSubtitleOnly() {
-  expandedVideoId.value = null
-  missingVideo.value = null
-  await refreshVideos()
-  syncRouteQuery()
-}
+async function toggleSubtitleOnly() { await handleSearch() }
 
 // ── alias ──
 function startEditAlias() {
@@ -346,7 +381,8 @@ async function openWorkspace(item, videoId = item.id) {
   if (learnedFilter.value !== 'all') query.learned = learnedFilter.value
   else delete query.learned
   if (!subtitleOnly.value) delete query.has_subtitle
-  const page = Math.max(1, Math.ceil(videos.value.length / PAGE_SIZE))
+  const page = currentPage.value
+  query.pageSize = String(pageSize.value)
   if (page > 1) query.page = String(page)
   else delete query.page
   const returnTo = router.resolve({ name: 'blogger-detail', params: { id: subId.value }, query,
@@ -355,6 +391,7 @@ async function openWorkspace(item, videoId = item.id) {
   const context = { videoId, index, loadedCount: videos.value.length, expandedVideoId: expandedVideoId.value,
     offset: document.getElementById(`video-${videoId}`)?.getBoundingClientRect().top ?? 100,
     neighbors: videos.value.slice(Math.max(0, index - 2), index + 4).map(v => v.id) }
+  rememberPage()
   saveBloggerContext(bloggerContextKey(identityKey.value, subId.value, currentQueryState()), context)
   // Persist the anchor in the history entry that browser Back will revisit.
   await router.replace(returnTo)
@@ -377,7 +414,7 @@ async function restorePosition(context, anchorId, ticket) {
   }
   if (context?.expandedVideoId && videos.value.some(v => v.id === context.expandedVideoId)) {
     expandedVideoId.value = context.expandedVideoId
-    await listPages(subId.value, context.expandedVideoId)
+    if (!pages.value.length) void listPages(subId.value, context.expandedVideoId)
     await nextTick()
   }
   if (disposed || ticket !== loadEpoch) return
@@ -393,32 +430,49 @@ async function restorePosition(context, anchorId, ticket) {
 
 async function loadAll() {
   const ticket = ++loadEpoch
+  invalidateVideoRequests()
+  let rememberedSize = 20
+  try { rememberedSize = Number(localStorage.getItem(`videomind:page-size:${identityKey.value}`)) } catch {}
+  const size = Number(route.query.pageSize || rememberedSize)
+  pageSize.value = [10, 20, 50].includes(size) ? size : 20
+  const requestedPage = Number(route.query.page)
+  currentPage.value = Number.isSafeInteger(requestedPage) ? Math.max(1, requestedPage) : 1
   const state = currentQueryState()
   searchQuery.value = state.q
   learnedFilter.value = state.learned
   subtitleOnly.value = state.subtitle
+  selected.value = new Set()
   expandedVideoId.value = null
   missingVideo.value = null
   const anchorId = /^#video-\d+$/.test(route.hash) ? Number(route.hash.slice(7)) : null
   const context = anchorId ? readBloggerContext(bloggerContextKey(identityKey.value, subId.value, state)) : null
   const saved = context?.videoId === anchorId ? context : null
-  const requestedPage = Number(route.query.page)
-  let restorePages = Number.isInteger(requestedPage) ? Math.max(1, Math.min(100, requestedPage)) : 1
-  const [, result] = await Promise.all([listBloggers(), refreshVideos({ anchorId }), listBatches(subId.value)])
-  if (disposed || ticket !== loadEpoch) return
-  if (Number.isInteger(result?.anchor_index)) restorePages = Math.max(restorePages, Math.ceil((result.anchor_index + 1) / PAGE_SIZE))
-  if (saved) restorePages = Math.max(restorePages, Math.ceil(saved.loadedCount / PAGE_SIZE))
-  for (let page = 1; page < restorePages && videosHasMore.value; page += 1) {
-    if (disposed || ticket !== loadEpoch || !await refreshVideos({ append: true })) return
+  const cached = readBloggerPage(snapshotKey())
+  if (cached) {
+    applyVideoPage(cached.data)
+    lastPageData = cached.data
+    bloggers.value = cached.bloggers
+    expandedVideoId.value = cached.expandedVideoId
+    pages.value = cached.pages
+    await restorePosition(saved, anchorId, ticket)
+  } else {
+    applyVideoPage({ items: [] })
+    pages.value = []
   }
-  ensureSyncPolling()
-  await restorePosition(saved, anchorId, ticket)
+  if (disposed || ticket !== loadEpoch) return
+  // Metadata and batch latency never delay the video list.
+  void listBloggers().then(() => { if (!disposed && ticket === loadEpoch) ensureSyncPolling() })
+  void listBatches(subId.value)
+  const result = await refreshVideos({ anchorId, quiet: !!cached })
+  if (disposed || ticket !== loadEpoch || !result) return
+  if (!cached) await restorePosition(saved, anchorId, ticket)
+  else if (anchorId && !videos.value.some(v => v.id === anchorId)) missingVideo.value = { id: anchorId }
 }
 
 async function revealMissingVideo() {
   const id = missingVideo.value?.id
   if (!id) return
-  await router.replace({ name: 'blogger-detail', params: { id: subId.value }, hash: `#video-${id}` })
+  await router.replace({ name: 'blogger-detail', params: { id: subId.value }, query: { pageSize: String(pageSize.value) }, hash: `#video-${id}` })
 }
 
 watch(subId, async () => {
@@ -426,10 +480,10 @@ watch(subId, async () => {
   await loadAll()
 })
 
-watch(() => [route.query.q, route.query.learned, route.query.has_subtitle], async () => {
+watch(() => [route.query.q, route.query.learned, route.query.has_subtitle, route.query.page, route.query.pageSize], async () => {
   if (route.name !== 'blogger-detail' || !subId.value) return
   const state = currentQueryState()
-  if (state.q === searchQuery.value && state.learned === learnedFilter.value && state.subtitle === subtitleOnly.value) return
+  if (state.q === searchQuery.value && state.learned === learnedFilter.value && state.subtitle === subtitleOnly.value && Number(route.query.page || 1) === currentPage.value && Number(route.query.pageSize || pageSize.value) === pageSize.value) return
   await loadAll()
 })
 watch(identityKey, loadAll)
@@ -520,7 +574,7 @@ onMounted(loadAll)
         </button>
         <template v-if="selectionMode">
           <button class="btn-ghost" @click="toggleSelectAll">
-            {{ selected.size === videos.length && videos.length ? '取消全选' : '全选已加载' }}
+            {{ selected.size === videos.length && videos.length ? '取消全选' : '全选本页' }}
           </button>
           <button class="btn-primary" :disabled="pending.createBatch || !selected.size" @click="handleCreateBatch">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
@@ -531,13 +585,15 @@ onMounted(loadAll)
         </template>
       </section>
 
+      <div ref="listTop" class="list-top"><ListPagination :page="currentPage" :page-size="pageSize" :total="videosTotal" :busy="videosLoading" @page="changePage" @size="changeSize" /></div>
       <div v-if="missingVideo" class="return-notice" role="status">刚才的视频状态已更新，不在当前筛选中。
         <button class="btn-ghost btn-ghost--sm" @click="revealMissingVideo">查看该视频</button>
       </div>
+      <div v-if="videoError" class="return-notice" role="alert">{{ videoError }}<button class="btn-ghost" @click="loadAll">重试</button></div>
       <div v-if="videosLoading && !videos.length" class="detail-empty">
         <div class="loading-spinner"></div>
       </div>
-      <div v-else-if="!videos.length" class="detail-empty">
+      <div v-else-if="!videos.length && !videoError" class="detail-empty">
         <p class="empty-hint">
           {{ learnedFilter !== 'all' || subtitleOnly || searchQuery ? '没有匹配的投稿' : '还没有投稿目录' }}
         </p>
@@ -604,12 +660,11 @@ onMounted(loadAll)
 
         <div class="list-footer">
           <span class="list-count">共 {{ videosMatchedTotal }} · 有字幕 {{ videosSubtitleTotal }} · 已整理 {{ videosLearnedTotal }}</span>
-          <button v-if="videosHasMore" class="btn-ghost" :disabled="videosLoading" @click="loadMore">
-            {{ videosLoading ? '加载中…' : `加载更多（已显示 ${videos.length}）` }}
-          </button>
+          <ListPagination :page="currentPage" :page-size="pageSize" :total="videosTotal" :busy="videosLoading" @page="changePage" @size="changeSize" />
         </div>
       </template>
 
+      <button class="list-to-top" @click="scrollListTop" aria-label="回到列表顶部">↑ 列表顶部</button>
       <section v-if="batches.length" class="batch-section">
         <h2 class="section-title">批量任务</h2>
         <div v-for="batch in batches" :key="batch.id" class="batch-card" @click="openBatch(batch)">
@@ -898,4 +953,11 @@ onMounted(loadAll)
   .filter-chip { min-height: 44px; }
   .list-footer { flex-wrap: wrap; }
 }
+</style>
+
+<style scoped>
+.list-top { scroll-margin-top:100px; }
+.list-to-top { position:fixed; bottom:calc(20px + env(safe-area-inset-bottom)); right:20px; z-index:60; min-height:44px; padding:0 16px; border:1px solid var(--border); border-radius:12px; background:var(--bg-secondary); color:var(--text-primary); box-shadow:0 4px 20px #0002; cursor:pointer; }
+.detail-empty { min-height:320px; }
+.list-footer { flex-wrap:wrap; }
 </style>

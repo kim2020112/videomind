@@ -125,10 +125,10 @@ describe('useBloggers', () => {
     expect(fetchMock.mock.calls[4][0]).toBe('/api/bloggers/2/deletion-preview')
   })
 
-  it('appends videos and tracks hasMore and learned filter', async () => {
+  it('replaces video pages and tracks hasMore and learned filter', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(okJson({ total: 3, learned_total: 1, items: [{ id: 1 }, { id: 2 }] }))
-      .mockResolvedValueOnce(okJson({ total: 3, learned_total: 1, items: [{ id: 3 }] }))
+      .mockResolvedValueOnce(okJson({ total: 3, offset: 2, learned_total: 1, items: [{ id: 3 }] }))
     vi.stubGlobal('fetch', fetchMock)
     const api = await loadComposable()
 
@@ -136,10 +136,24 @@ describe('useBloggers', () => {
     expect(api.videosHasMore.value).toBe(true)
     expect(api.videos.value).toHaveLength(2)
 
-    await api.listVideos(2, { limit: 2, offset: 2 }, { append: true })
-    expect(api.videos.value).toHaveLength(3)
+    await api.listVideos(2, { limit: 2, offset: 2 })
+    expect(api.videos.value).toHaveLength(1)
     expect(api.videosHasMore.value).toBe(false)
     expect(api.videosLearnedTotal.value).toBe(1)
     expect(fetchMock.mock.calls[1][0]).toContain('offset=2')
   })
+  it('ignores a slower earlier page response', async () => {
+    let finishOld
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve }))
+      .mockResolvedValueOnce(okJson({ total: 40, offset: 20, items: [{ id: 21 }] }))
+    vi.stubGlobal('fetch', fetchMock)
+    const api = await loadComposable()
+    const old = api.listVideos(2, { offset: 0 })
+    await api.listVideos(2, { offset: 20 })
+    finishOld(okJson({ total: 40, items: [{ id: 1 }] }))
+    expect(await old).toBeNull()
+    expect(api.videos.value).toEqual([{ id: 21 }])
+  })
+
 })

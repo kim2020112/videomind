@@ -152,40 +152,50 @@ export function useBloggers() {
     }
   }
 
-  async function listVideos(subId, params = {}, { append = false } = {}) {
-    videosLoading.value = true
+  let videoEpoch = 0
+  let pageEpoch = 0
+  function invalidateVideoRequests() { videoEpoch += 1; pageEpoch += 1; pagesLoading.value = false }
+  function applyVideoPage(data) {
+    videos.value = data.items || []
+    videosTotal.value = data.total || 0
+    videosLearnedTotal.value = data.organized_total ?? data.learned_total ?? 0
+    videosSubtitleTotal.value = data.subtitle_total || 0
+    videosMatchedTotal.value = data.matched_total ?? data.total ?? 0
+    videosHasMore.value = (data.offset || 0) + videos.value.length < videosTotal.value
+  }
+  async function listVideos(subId, params = {}, { quiet = false } = {}) {
+    const ticket = ++videoEpoch
+    videosLoading.value = !quiet
     try {
       const query = new URLSearchParams()
       Object.entries(params).forEach(([key, value]) => {
         if (value !== undefined && value !== null && value !== '') query.set(key, String(value))
       })
-      const suffix = query.toString() ? `?${query.toString()}` : ''
-      const data = await request(`/bloggers/${subId}/videos${suffix}`)
-      const items = data.items || []
-      videos.value = append ? [...videos.value, ...items] : items
-      videosTotal.value = data.total || 0
-      videosLearnedTotal.value = data.organized_total ?? data.learned_total ?? 0
-      videosSubtitleTotal.value = data.subtitle_total || 0
-      videosMatchedTotal.value = data.matched_total ?? data.total ?? 0
-      videosHasMore.value = videos.value.length < videosTotal.value
+      const data = await request(`/bloggers/${subId}/videos?${query}`)
+      if (ticket !== videoEpoch) return null
+      applyVideoPage(data)
       return data
     } catch (err) {
-      return setError(err)
+      if (ticket === videoEpoch) return setError(err)
+      return null
     } finally {
-      videosLoading.value = false
+      if (ticket === videoEpoch) videosLoading.value = false
     }
   }
 
   async function listPages(subId, videoId) {
+    const ticket = ++pageEpoch
     pagesLoading.value = true
+    pages.value = []
     try {
       const data = await request(`/bloggers/${subId}/videos/${videoId}/pages`)
+      if (ticket !== pageEpoch) return null
       pages.value = data.pages || []
       return pages.value
     } catch (err) {
       return setError(err)
     } finally {
-      pagesLoading.value = false
+      if (ticket === pageEpoch) pagesLoading.value = false
     }
   }
 
@@ -268,6 +278,7 @@ export function useBloggers() {
 
   if (getCurrentScope()) {
     onScopeDispose(() => {
+      invalidateVideoRequests()
       stopBatchPolling()
       stopSyncPolling()
     })
@@ -279,7 +290,7 @@ export function useBloggers() {
     pages, pagesLoading, batches, currentBatch, batchLoading, pending, error,
     listBloggers, previewBlogger, addBlogger, updateBlogger, removeBlogger,
     getDeletionPreview, syncBlogger, getSyncStatus, cancelSync,
-    listVideos, listPages, createBatch, listBatches, getBatch, batchAction,
+    invalidateVideoRequests, applyVideoPage, listVideos, listPages, createBatch, listBatches, getBatch, batchAction,
     startBatchPolling, stopBatchPolling, startSyncPolling, stopSyncPolling,
   }
 }

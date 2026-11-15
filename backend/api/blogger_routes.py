@@ -209,6 +209,7 @@ async def list_blogger_videos(sub_id: int, request: Request):
         extra_where=extra_where,
         extra_params=extra_params,
         anchor_id=int(params["anchor_id"]) if params.get("anchor_id", "").isdigit() else None,
+        locate_anchor=params.get("locate_anchor", "") in ("1", "true"),
     )
     # learned_total = 匹配 q 的已学总数（不受 learned 过滤影响）
     learned_scope_where, learned_scope_params = learned_mod.learned_exists_sql(

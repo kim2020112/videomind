@@ -301,7 +301,7 @@ def find_sub_by_uid(identity: dict, uid: str, platform: str = "bilibili") -> dic
 
 
 def list_videos(creator_id: int, *, q: str = "", offset: int = 0, limit: int = 30,
-                extra_where: str | None = None, extra_params: list | None = None, anchor_id: int | None = None) -> dict:
+                extra_where: str | None = None, extra_params: list | None = None, anchor_id: int | None = None, locate_anchor: bool = False) -> dict:
     limit = max(1, min(int(limit), 100))
     offset = max(0, int(offset))
     where = ["v.creator_id = ?"]
@@ -319,18 +319,25 @@ def list_videos(creator_id: int, *, q: str = "", offset: int = 0, limit: int = 3
         total = conn.execute(
             f"SELECT COUNT(*) AS n FROM blogger_videos v WHERE {where_sql}", params
         ).fetchone()["n"]
-        rows = conn.execute(
-            f"SELECT v.* FROM blogger_videos v WHERE {where_sql} "
-            "ORDER BY v.published_at DESC, v.id DESC LIMIT ? OFFSET ?",
-            [*params, limit, offset],
-        ).fetchall()
-        result = {"total": total, "items": [dict(row) for row in rows]}
+        anchor_index = None
         if anchor_id is not None:
             anchor = conn.execute(
                 f"SELECT position FROM (SELECT v.id, ROW_NUMBER() OVER (ORDER BY v.published_at DESC, v.id DESC) - 1 AS position "
                 f"FROM blogger_videos v WHERE {where_sql}) WHERE id = ?", [*params, anchor_id],
             ).fetchone()
-            result["anchor_index"] = anchor[0] if anchor else None
+            anchor_index = anchor[0] if anchor else None
+        if locate_anchor and anchor_index is not None:
+            offset = (anchor_index // limit) * limit
+        if offset >= total:
+            offset = max(0, ((total - 1) // limit) * limit)
+        rows = conn.execute(
+            f"SELECT v.* FROM blogger_videos v WHERE {where_sql} "
+            "ORDER BY v.published_at DESC, v.id DESC LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        ).fetchall()
+        result = {"total": total, "items": [dict(row) for row in rows], "offset": offset, "limit": limit}
+        if anchor_id is not None:
+            result["anchor_index"] = anchor_index
         return result
 
 
