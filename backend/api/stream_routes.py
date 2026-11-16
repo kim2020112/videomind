@@ -46,6 +46,7 @@ from core.generation_commit import (
 )
 from core.whisper import estimate_transcribe_time
 from core.video import canonical_video_url, is_bilibili_video, video_duration_for_url
+from core.bilibili_guard import BilibiliAccessBlocked
 from core.background_pipeline import enqueue_whisper_job
 from core.job_store import find_active_job
 from core.tag_extractor import detect_platform
@@ -500,6 +501,8 @@ def _quick_subtitle_check(url: str, info, lang: str = None, fingerprint: str = N
                             return True
                         if bilibili_sub is None:
                             bilibili_lookup_unavailable = True
+                    except BilibiliAccessBlocked:
+                        raise
                     except Exception:
                         bilibili_lookup_unavailable = True
             else:
@@ -512,6 +515,8 @@ def _quick_subtitle_check(url: str, info, lang: str = None, fingerprint: str = N
                     return True
                 if bilibili_sub is None:
                     bilibili_lookup_unavailable = True
+            except BilibiliAccessBlocked:
+                raise
             except Exception:
                 bilibili_lookup_unavailable = True
 
@@ -694,6 +699,8 @@ async def _partial_subtitle(req, cached: dict, identity: dict, url: str, trace_i
             info.webpage_url = cache_url
             video_title = info.title or ""
             job_info = info
+        except BilibiliAccessBlocked:
+            raise
         except Exception:
             pass  # parse_info 失败，继续使用已有缓存信息
 

@@ -8,6 +8,7 @@ import json
 import config
 from database import get_db, get_subtitle_from_db, save_subtitle_to_db
 from core import job_store
+from core.subtitle_validation import validate_cached_subtitle, SubtitleIdentityError
 from core.cache import _get_cached_raw, _url_hash, get_video_info_cache, save_video_info_cache, video_fingerprint, _cleanup_old_cache
 from core.generation_commit import (
     _upsert_ai_cache, _upsert_history, _cache_timestamp, validate_summary_result,
@@ -238,12 +239,13 @@ def _set_module(job, target, state):
 
 async def run_learning_job(job, scheduler):
     from api.routes import downloader
+    from core.video_metadata import learning_video_info
     from core.auth import add_user_history
     task_id = job["task_id"]
     payload = job.get("payload") or {}
     targets = payload.get("targets", [])
     info_data = get_video_info_cache(job["url"]) or payload.get("info")
-    info = VideoInfo.model_validate(info_data) if info_data else await asyncio.to_thread(downloader.parse_info, job["url"])
+    info = VideoInfo.model_validate(info_data) if info_data else await asyncio.to_thread(learning_video_info, job["url"], downloader)
     url = canonical_video_url(job["url"], info)
     info.webpage_url = url
     job["url"] = url
@@ -262,6 +264,11 @@ async def run_learning_job(job, scheduler):
             if legacy and legacy.get("subtitle_text") and legacy.get("source") != "description":
                 cached = {"full_text": legacy["subtitle_text"], "source": legacy["source"], "language": ""}
                 save_subtitle_to_db(url, cached["source"], "", cached["full_text"], info.title, info.extractor or "", _build_part_info(url, info))
+        if cached:
+            try:
+                cached = validate_cached_subtitle(url, cached, info)
+            except SubtitleIdentityError:
+                cached = None
         refresh = payload.get("refresh_subtitle", False)
         if cached and not refresh:
             text, source, language = cached["full_text"], cached["source"], cached["language"]
@@ -347,6 +354,12 @@ def workspace(url, identity):
     cached = _get_cached_raw(url)
     if not sub and cached and cached.get("subtitle_text") and cached.get("source") != "description":
         sub = {"full_text": cached["subtitle_text"], "source": cached["source"], "language": "", "segments": []}
+    subtitle_warning = ''
+    try:
+        sub = validate_cached_subtitle(url, sub, get_video_info_cache(url))
+    except SubtitleIdentityError as exc:
+        sub = None
+        subtitle_warning = str(exc)
     result = payload_for(url)
     task = job_store.find_active_job(_url_hash(url), user_id=identity.get("user_id"), guest_id=identity.get("guest_id"))
     if not task:
@@ -357,12 +370,16 @@ def workspace(url, identity):
         task = job_store.get_job(row[0], user_id=identity.get("user_id"), guest_id=identity.get("guest_id")) if row else None
     # Old prompt versions stay readable. The metadata records only what is known.
     states = artifact_states(result, sub["full_text"] if sub else "")
+    if subtitle_warning:
+        for state in states.values():
+            if state["status"] == "done":
+                state["stale"] = True
     cleared = subtitle_is_cleared(url, identity)
     if cleared:
         sub = None
     return {"url": url, "subtitle": {**sub, "text": sub["full_text"], "revision": revision(sub["full_text"])} if sub else None,
             "artifacts": result, "modules": states, "task": task,
-            "coverage": content_coverage(result, bool(sub)), "subtitle_cleared": cleared}
+            "coverage": content_coverage(result, bool(sub)), "subtitle_cleared": cleared, "subtitle_warning": subtitle_warning}
 
 
 def record_visit(url, identity):

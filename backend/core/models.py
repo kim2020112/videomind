@@ -4,6 +4,7 @@ from typing import Optional
 
 class ParseRequest(BaseModel):
     url: str
+    metadata_only: bool = False
 
 
 class FormatOption(BaseModel):

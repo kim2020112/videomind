@@ -46,6 +46,25 @@ class LearningWorkspaceTests(unittest.IsolatedAsyncioTestCase):
                                         payload={"targets": targets, **extras}, job_type="learning")
         return job_store.get_job(task_id)
 
+    async def test_invalid_cached_subtitle_is_hidden_and_refetched(self):
+        database.save_subtitle_to_db(URL, 'bilibili_cc', 'zh', TEXT, segments=[{'start': 0, 'end': 9999, 'text': 'wrong'}])
+        snapshot = learning.workspace(URL, OWNER)
+        self.assertIsNone(snapshot['subtitle'])
+        self.assertIn('时间轴', snapshot['subtitle_warning'])
+        job = self.job([])
+        with patch.object(learning, 'fetch_subtitle', new=AsyncMock(return_value=(TEXT, 'bilibili_cc', 'zh'))) as fetch:
+            await self.scheduler.run_once()
+        fetch.assert_awaited_once()
+        self.assertEqual('done', job_store.get_job(job['task_id'])['status'])
+
+    async def test_subtitle_provenance_roundtrip_and_mismatch(self):
+        database.save_subtitle_to_db(URL, 'bilibili_cc', 'zh', TEXT, segments=[{'start': 0, 'end': 3, 'text': 'test'}],
+                                    provenance={'version': 1, 'bvid': 'BVother', 'cid': '99'})
+        stored = database.get_subtitle_from_db(URL)
+        self.assertTrue(stored['provenance']['text_sha256'])
+        self.assertTrue(stored['provenance']['fetched_at'])
+        self.assertIsNone(learning.workspace(URL, OWNER)['subtitle'])
+
     def counts(self):
         with database.get_db() as conn:
             return (conn.execute("SELECT COUNT(*) FROM usage_logs WHERE status = 'SUCCESS'").fetchone()[0],

@@ -12,7 +12,8 @@ import tempfile
 import shutil
 
 from config import WHISPER_MODEL, WHISPER_MODELS_DIR
-from core.bilibili import ydl_opts_for, ytdlp_error_message
+from core.bilibili import youtube_dl, ydl_opts_for, ytdlp_error_message
+from core.bilibili_guard import BilibiliAccessBlocked
 from core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -65,7 +66,7 @@ def _download_audio(url: str, *, audio_url: str | None = None) -> str:
         last_error = None
         for target in targets:
             try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with youtube_dl(ydl_opts, url) as ydl:
                     info = ydl.extract_info(target, download=True)
                     base = os.path.splitext(ydl.prepare_filename(info))[0]
                     mp3_path = base + ".mp3"
@@ -76,6 +77,8 @@ def _download_audio(url: str, *, audio_url: str | None = None) -> str:
                         if os.path.isfile(fp) and not f.endswith(".part"):
                             return fp
                     raise FileNotFoundError("音频下载后未找到输出文件")
+            except BilibiliAccessBlocked:
+                raise
             except Exception as exc:
                 last_error = exc
         if last_error is not None:

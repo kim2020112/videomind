@@ -40,6 +40,9 @@ class FakeClient:
     def __init__(self, *args, **kwargs):
         pass
 
+    def check_session(self):
+        return {"isLogin": True}
+
     def profile(self, uid):
         if self.profile_error:
             raise self.profile_error
@@ -125,6 +128,17 @@ class BloggerSyncTests(unittest.TestCase):
         self.assertIsNone(retry3)
         self.assertEqual("failed", store.get_sync(sync_id)["status"])
 
+    def test_invalid_session_stops_before_catalog_requests(self):
+        sync_id = store.create_sync(self.creator_id)
+        with patch.object(sync, "BilibiliCatalogClient", FakeClient), patch.object(
+            FakeClient, "check_session", side_effect=CatalogError("login", "登录已失效")
+        ):
+            retry = sync.run_sync_blocking(sync_id, self.creator_id)
+        self.assertIsNone(retry)
+        self.assertEqual([], FakeClient.calls)
+        self.assertEqual("paused", store.get_sync(sync_id)["status"])
+        self.assertEqual("login", store.get_sync(sync_id)["error_code"])
+
     def test_login_error_pauses_without_retry(self):
         FakeClient.pages = {}
         FakeClient.videos_error = CatalogError("login", "登录失效")
@@ -134,15 +148,106 @@ class BloggerSyncTests(unittest.TestCase):
         self.assertEqual("paused", record["status"])
         self.assertEqual("login", record["error_code"])
 
-    def test_rate_limit_pauses_after_one_retry(self):
+    def test_rate_limit_pauses_without_retry(self):
         FakeClient.pages = {}
         FakeClient.videos_error = CatalogError("rate_limit", "风控")
         sync_id, retry = self._run()
-        self.assertEqual(900.0, retry)
-        with patch.object(sync, "BilibiliCatalogClient", FakeClient):
-            retry2 = sync.run_sync_blocking(sync_id, self.creator_id, refresh_profile=False)
-        self.assertIsNone(retry2)
+        self.assertIsNone(retry)
         self.assertEqual("paused", store.get_sync(sync_id)["status"])
+        self.assertEqual(0, store.get_sync(sync_id)["retry_count"])
+        self.assertEqual([1], FakeClient.calls)
+
+    def test_profile_protection_stops_before_catalog_and_does_not_schedule_retry(self):
+        for code in ("rate_limit", "budget", "protection"):
+            with self.subTest(code=code):
+                FakeClient.profile_error = CatalogError(code, "保护已暂停")
+                sync_id = store.create_sync(self.creator_id)
+                with patch.object(sync, "BilibiliCatalogClient", FakeClient), patch.object(
+                    sync.threading, "Timer"
+                ) as timer:
+                    sync._run_guarded(sync_id, self.creator_id, True)
+                timer.assert_not_called()
+                self.assertEqual([], FakeClient.calls)
+                self.assertEqual("paused", store.get_sync(sync_id)["status"])
+                self.assertEqual(code, store.get_sync(sync_id)["error_code"])
+
+    @patch.object(sync, "MAX_PAGES_PER_SYNC", 5)
+    def test_page_budget_pauses_and_manual_sync_resumes_saved_cursor(self):
+        FakeClient.pages = {
+            page: (_entries((page - 1) * 30, 30), 180)
+            for page in range(1, 7)
+        }
+        with patch.object(sync._executor, "submit"):
+            sync_id = sync.start_sync(self.creator_id)
+        with patch.object(sync, "BilibiliCatalogClient", FakeClient):
+            retry = sync.run_sync_blocking(sync_id, self.creator_id, refresh_profile=False)
+        self.assertIsNone(retry)
+        record = store.get_sync(sync_id)
+        self.assertEqual([1, 2, 3, 4, 5], FakeClient.calls)
+        self.assertEqual("paused", record["status"])
+        self.assertEqual("budget", record["error_code"])
+        self.assertEqual(150, record["found"])
+        self.assertFalse(store.has_full_catalog_sync(self.creator_id))
+
+        FakeClient.calls = []
+        with patch.object(sync._executor, "submit"):
+            resumed_id = sync.start_sync(self.creator_id)
+        with patch.object(sync, "BilibiliCatalogClient", FakeClient):
+            retry = sync.run_sync_blocking(resumed_id, self.creator_id, refresh_profile=False)
+        self.assertIsNone(retry)
+        self.assertEqual([6], FakeClient.calls)
+        record = store.get_sync(resumed_id)
+        self.assertEqual("complete", record["status"])
+        self.assertEqual(180, record["found"])
+        self.assertEqual(180, record["added"])
+
+    @patch.object(sync, "MAX_PAGES_PER_SYNC", 5)
+    def test_exact_page_budget_can_complete_without_extra_request(self):
+        FakeClient.pages = {
+            page: (_entries((page - 1) * 30, 30), 150)
+            for page in range(1, 6)
+        }
+        sync_id, retry = self._run()
+        self.assertIsNone(retry)
+        self.assertEqual([1, 2, 3, 4, 5], FakeClient.calls)
+        self.assertEqual("complete", store.get_sync(sync_id)["status"])
+
+    def test_incremental_budget_resume_does_not_short_circuit_on_newly_saved_page(self):
+        self._seed_known(30, start=60)
+        baseline = store.create_sync(self.creator_id)
+        store.update_sync(baseline, status="complete", found=30, expected=30)
+        FakeClient.pages = {
+            1: (_entries(0, 30), 90),
+            2: (_entries(30, 30), 90),
+            3: (_entries(60, 30), 90),
+        }
+        with patch.object(sync, "MAX_PAGES_PER_SYNC", 1):
+            sync_id, _ = self._run()
+        self.assertEqual("budget", store.get_sync(sync_id)["error_code"])
+        with patch.object(sync._executor, "submit"):
+            resumed_id = sync.start_sync(self.creator_id)
+        FakeClient.calls = []
+        with patch.object(sync, "BilibiliCatalogClient", FakeClient):
+            sync.run_sync_blocking(resumed_id, self.creator_id, refresh_profile=False)
+        self.assertEqual([2, 3], FakeClient.calls)
+        self.assertEqual("deep", store.get_sync(resumed_id)["mode"])
+        self.assertEqual(90, store.list_videos(self.creator_id)["total"])
+
+    def test_network_failure_after_progress_pauses_without_automatic_rescan(self):
+        FakeClient.pages = {1: (_entries(0, 30), 90)}
+
+        def fail_second_page(page):
+            if page == 2:
+                raise CatalogError("network", "断网")
+
+        FakeClient.on_call = fail_second_page
+        sync_id, retry = self._run(refresh_profile=False)
+        self.assertIsNone(retry)
+        record = store.get_sync(sync_id)
+        self.assertEqual("paused", record["status"])
+        self.assertEqual("network", record["error_code"])
+        self.assertEqual(1, record["page"])
+        self.assertEqual(0, record["retry_count"])
 
     def test_resume_continues_from_page_cursor(self):
         FakeClient.pages = {
@@ -157,7 +262,7 @@ class BloggerSyncTests(unittest.TestCase):
 
         # 深度同步模拟中断后的断点：清空 found/expected，保留 page=2 重新同步
         store.update_sync(sync_id, status="interrupted", page=2, found=30, expected=60)
-        FakeClient.pages = {3: (_entries(60, 10), 70)}
+        FakeClient.pages = {3: (_entries(60, 30), 60)}
         FakeClient.calls = []
         with patch.object(sync, "BilibiliCatalogClient", FakeClient):
             sync.run_sync_blocking(sync_id, self.creator_id, refresh_profile=False)
@@ -206,6 +311,8 @@ class BloggerSyncTests(unittest.TestCase):
 
     def test_incremental_short_circuits_on_fully_known_page(self):
         self._seed_known(30)
+        baseline = store.create_sync(self.creator_id)
+        store.update_sync(baseline, status="complete", found=30, expected=30)
         FakeClient.pages = {1: (_entries(0, 30), 300), 2: (_entries(30, 30), 300)}
         FakeClient.calls = []
         sync_id, retry = self._run()
@@ -215,6 +322,33 @@ class BloggerSyncTests(unittest.TestCase):
         self.assertEqual("complete", record["status"])
         self.assertEqual(0, record["added"])
         self.assertEqual("incremental", record["mode"])
+
+    def test_incomplete_catalog_does_not_stop_on_known_first_page(self):
+        self._seed_known(30)
+        FakeClient.pages = {1: (_entries(0, 30), 45), 2: (_entries(30, 15), 45)}
+        sync_id, _ = self._run()
+        self.assertEqual([1, 2], FakeClient.calls)
+        self.assertEqual(45, store.list_videos(self.creator_id)["total"])
+        self.assertTrue(store.has_full_catalog_sync(self.creator_id))
+
+    def test_manual_sync_resumes_incomplete_catalog(self):
+        previous = store.create_sync(self.creator_id)
+        store.update_sync(previous, status="paused", mode="deep", page=2,
+                          found=60, added=60, expected=957, error_code="rate_limit")
+        with patch.object(sync._executor, "submit"):
+            sync_id = sync.start_sync(self.creator_id)
+        record = store.get_sync(sync_id)
+        self.assertEqual("deep", record["mode"])
+        self.assertEqual(2, record["page"])
+        self.assertEqual(60, record["found"])
+        self.assertEqual(957, record["expected"])
+        self.assertEqual(0, record["retry_count"])
+
+    def test_partial_page_is_not_marked_complete(self):
+        FakeClient.pages = {1: (_entries(0, 5), 45)}
+        sync_id, _ = self._run()
+        self.assertEqual("failed", store.get_sync(sync_id)["status"])
+        self.assertFalse(store.has_full_catalog_sync(self.creator_id))
 
     def test_incremental_scans_new_then_stops_on_known_page(self):
         self._seed_known(30, start=30)  # 第 2 页内容已收录

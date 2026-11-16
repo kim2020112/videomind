@@ -114,7 +114,7 @@ SQLite 保存用户、会话、视频、字幕、AI 输出、学习历史、缓�
 
 博主功能拆分「共享目录」与「按身份订阅」：`blogger_creators`/`blogger_videos`/`blogger_video_pages` 全局共享（同一 UP 主只同步一次），`blogger_subs`/`blogger_batches`/`blogger_batch_items` 按 `user_id`/`guest_id` 归属，互不可见。退订只删订阅行，最后一个订阅者离开且无活跃任务时才清理共享目录。
 
-目录同步（`core/blogger/sync.py`）运行在独立线程池，不进重任务队列；2 秒全局限速 + 同页签名防死循环 + 空目录与预期不一致拒绝误判。B 站空间搜索接口（`/x/space/wbi/arc/search`）需要登录 Cookie（`BILIBILI_COOKIE` 含 SESSDATA）；未配置时明确报 `login` 而非静默失败。错误分类：`network` 自动重试 2 次（30s/120s）、`rate_limit` 重试 1 次（15 分钟）、`login` 暂停并提示配置 Cookie。B 站课堂付费课程的推广条目（vlist `is_lesson_video` 或 `jump_url` 指向 `/cheese/`）不是普通投稿，同步时跳过入库并清理历史误收，避免批量生成和工作台解析失败。
+目录同步（`core/blogger/sync.py`）运行在独立线程池，不进重任务队列。所有 B 站入口共享 `core/bilibili_guard.py` 的持久化限速与额度，API 至少间隔 5 秒、每小时 120 次、每 24 小时 600 次；每次同步最多 20 页并保留断点。403/412/风控代码仅暂停对应功能 10/20/40/最多60分钟，429短时暂停所有功能，不自动重试或切换接口；`login` / `budget` / `protection` 也暂停。首次分页前的 `network` 错误最多退避 30s/120s，已有进度则暂停。仅列表/字幕等必要API默认使用登录 Cookie，网页和 CDN 默认匿名；重复元数据短期缓存。保留同页签名防死循环、空目录一致性检查，并跳过课堂推广条目。详见 [B 站访问保护](bilibili-access.md)。
 
 批量条目是 `job_type="batch_item"` 的后台任务，每条目一 job：复用 `job_store` 的单槽队列、取消与崩溃恢复；`JobScheduler` 按 `job_type` 分发到进程内处理器 `core/blogger/batch_runner.py`——缓存命中直接复用，bvid+cid 已知时跳过 yt-dlp 解析快取 CC 字幕，无字幕才跑 Whisper 子进程（处理器内禁止再 create_job，单槽会死锁），AI 生成走 `background_pipeline.generate_full_from_subtitle`（与 Whisper 后完成共用），`generate-then-swap` 原子提交。AI 前有额度闸门，超限条目跳过并暂停整批。批量成果写入所属身份的学习历史后，同样受到缓存淘汰保护。
 
@@ -164,3 +164,5 @@ FastAPI lifespan 依次完成：
 | Whisper 模型 | `backend/data/whisper_models/` | `WHISPER_MODELS_DIR` |
 
 数据库、密钥、模型、下载内容、旧向量索引和会话交接文件不得提交到 Git。
+
+字幕身份校验集中于 `core/subtitle_identity.py` 与 `core/subtitle_validation.py`，字幕数据库保存来源证明；访问 JSON 与封面分别使用有界缓存和请求合并。工作台轻量解析、下载页按需取得格式。最新边界说明见 [B 站访问说明](bilibili-access.md)。

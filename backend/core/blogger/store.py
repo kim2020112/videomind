@@ -430,6 +430,15 @@ def latest_sync(creator_id: int) -> dict | None:
         ).fetchone())
 
 
+def has_full_catalog_sync(creator_id: int) -> bool:
+    """Only a scan that reached the reported total establishes a complete baseline."""
+    with get_db() as conn:
+        return conn.execute(
+            "SELECT 1 FROM blogger_syncs WHERE creator_id = ? AND status = 'complete' "
+            "AND expected > 0 AND found >= expected LIMIT 1", (creator_id,),
+        ).fetchone() is not None
+
+
 def sync_running(creator_id: int) -> bool:
     with get_db() as conn:
         row = conn.execute(

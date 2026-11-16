@@ -364,16 +364,17 @@ def _replace_video_subtitle(
         )
         video_id = cursor.lastrowid
 
-    existing_subtitle = conn.execute("SELECT full_text, segments_json FROM subtitles WHERE video_id = ?", (video_id,)).fetchone()
-    segments_json = existing_subtitle["segments_json"] if existing_subtitle and existing_subtitle["full_text"] == subtitle_text else None
+    existing_subtitle = conn.execute("SELECT source, full_text, segments_json, provenance_json FROM subtitles WHERE video_id = ?", (video_id,)).fetchone()
+    segments_json = existing_subtitle["segments_json"] if existing_subtitle and existing_subtitle["full_text"] == subtitle_text and existing_subtitle["source"] == subtitle_source else None
+    provenance_json = existing_subtitle["provenance_json"] if existing_subtitle and existing_subtitle["full_text"] == subtitle_text and existing_subtitle["source"] == subtitle_source else None
     conn.execute("DELETE FROM subtitles WHERE video_id = ?", (video_id,))
     conn.execute(
         """
         INSERT INTO subtitles (
-            video_id, source, language, full_text, segments_json
-        ) VALUES (?, ?, ?, ?, ?)
+            video_id, source, language, full_text, segments_json, provenance_json
+        ) VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (video_id, subtitle_source, subtitle_language, subtitle_text, segments_json),
+        (video_id, subtitle_source, subtitle_language, subtitle_text, segments_json, provenance_json),
     )
 
 

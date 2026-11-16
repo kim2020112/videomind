@@ -1,21 +1,23 @@
 """B 站空间目录适配：输入解析、wbi 签名、投稿/分 P 接口与错误分类。
 
-与 yt-dlp / 下载管线隔离，只做目录发现。请求全局限速 2 秒，错误按
+只做目录发现；所有请求共享持久化限速与熔断，错误按
 login / rate_limit / network / unavailable / api / invalid_input 分类，
 调用方据此决定重试、暂停还是提示用户。
 """
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import hashlib
 import re
-import threading
 import time
 from urllib.parse import urlencode, urljoin, urlparse
 
 import httpx
 
-from core.bilibili import default_cookie
+from core.bilibili import default_cookie, LOGIN_API_PATHS
+from core.bilibili_guard import BilibiliAccessBlocked, guarded_get
+from core.bilibili_cache import cached_get, refresh_responses
 from core.logging_config import get_logger
 
 logger = get_logger("blogger.catalog")
@@ -26,13 +28,6 @@ MIXIN_KEY_TABLE = (
     37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
     22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
 )
-
-RATE_LIMIT_SECONDS = 2.0
-_RETRIES = 2
-
-_rate_lock = threading.Lock()
-_last_request = 0.0
-
 
 class CatalogError(ValueError):
     def __init__(self, code: str, message: str):
@@ -65,11 +60,12 @@ def parse_creator_input(value: str) -> str:
         if parsed.hostname != "b23.tv":
             break
         try:
-            with httpx.Client(timeout=10, follow_redirects=False) as client:
-                response = client.get(url)
+            response = guarded_get(url, timeout=10)
             if response.status_code not in (301, 302, 303, 307, 308):
                 break
             url = urljoin(url, response.headers.get("Location", ""))
+        except BilibiliAccessBlocked as exc:
+            raise CatalogError(exc.code, str(exc)) from exc
         except httpx.HTTPError as exc:
             raise CatalogError("network", "分享链接解析失败，请粘贴完整空间地址") from exc
     raise CatalogError("invalid_input", "这不是 UP 主空间链接；单个视频请使用工作台解析入口")
@@ -117,53 +113,27 @@ class BilibiliCatalogClient:
 
     # ── 基础请求 ──
 
-    def _throttle(self):
-        global _last_request
-        with _rate_lock:
-            wait = RATE_LIMIT_SECONDS - (time.monotonic() - _last_request)
-            if wait > 0:
-                time.sleep(wait)
-            _last_request = time.monotonic()
-
-    def get(self, path: str, params: dict | None = None, allow_codes: tuple = ()) -> dict:
+    def get(self, path: str, params: dict | None = None, allow_codes: tuple = (), *, live: bool = False) -> dict:
         """请求 api.bilibili.com 并返回 data；错误统一转 CatalogError。"""
-        self._throttle()
         headers = {
-            "Cookie": self.cookie,
+            "Cookie": self.cookie if path in LOGIN_API_PATHS else "",
             "Referer": "https://space.bilibili.com/",
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
             ),
         }
-        last_error: Exception | None = None
-        for attempt in range(_RETRIES):
-            try:
-                response = httpx.get(
-                    f"https://api.bilibili.com{path}",
-                    params=params,
-                    headers=headers,
-                    timeout=self.timeout,
+        try:
+            with refresh_responses(False) if path == "/x/web-interface/nav" else nullcontext():
+                response = cached_get(
+                    f"https://api.bilibili.com{path}", params=params,
+                    headers=headers, timeout=self.timeout, ttl=0 if live else 1800 if path == "/x/web-interface/nav" else 120,
                 )
-                break
-            except httpx.HTTPError as exc:
-                last_error = exc
-                if attempt + 1 < _RETRIES:
-                    time.sleep(0.5 * (attempt + 1))
-        else:
-            raise CatalogError("network", "B 站接口暂时不可用，请稍后重试") from last_error
+        except BilibiliAccessBlocked as exc:
+            raise CatalogError(exc.code, str(exc)) from exc
+        except httpx.HTTPError as exc:
+            raise CatalogError("network", "B 站接口暂时不可用，请稍后重试") from exc
 
-        if response.status_code in (412, 429, 403):
-            has_sessdata = any(
-                part.strip().startswith("SESSDATA=") and part.strip() != "SESSDATA="
-                for part in self.cookie.split(";")
-            )
-            if not has_sessdata:
-                raise CatalogError(
-                    "login",
-                    "B 站目录接口需要登录 Cookie：请在 backend/.env 配置 BILIBILI_COOKIE（含 SESSDATA）后重试",
-                )
-            raise CatalogError("rate_limit", "B 站限制了请求，请稍后继续同步")
         if response.status_code >= 500:
             raise CatalogError("network", "B 站接口暂时不可用，请稍后重试")
         if response.status_code >= 400:
@@ -176,10 +146,8 @@ class BilibiliCatalogClient:
             raise CatalogError("api", "B 站接口返回了无法识别的数据，未将结果视为空目录")
 
         code = payload.get("code")
-        if code in (-101, -111) and code not in allow_codes:
-            raise CatalogError("login", "B 站登录已失效，请更新 Cookie 后继续")
-        if code in (-352, -412, -509, -799):
-            raise CatalogError("rate_limit", "B 站触发风控，请稍后继续")
+        if code == -101 and code not in allow_codes:
+            raise CatalogError("login", "B 站接口需要有效登录，自动访问已暂停；请在官方客户端查看，勿反复提交 Cookie")
         if code in (-404, 62002, 62012):
             if path in ("/x/web-interface/card", "/x/space/wbi/arc/search"):
                 raise CatalogError("unavailable", "B 站博主不存在或投稿目录不可访问")
@@ -211,9 +179,9 @@ class BilibiliCatalogClient:
             part.strip().startswith("SESSDATA=") and part.strip() != "SESSDATA="
             for part in self.cookie.split(";")
         )
-        nav = self.get("/x/web-interface/nav", allow_codes=() if has_sessdata else (-101,))
+        nav = self.get("/x/web-interface/nav", allow_codes=() if has_sessdata else (-101,), live=True)
         if has_sessdata and not nav.get("isLogin"):
-            raise CatalogError("login", "B 站登录已失效，请更新 Cookie")
+            raise CatalogError("login", "B 站接口需要有效登录，自动访问已暂停；请在官方客户端查看，勿反复提交 Cookie")
         image = nav.get("wbi_img") or {}
         raw_key = "".join(
             urlparse(image.get(key, "")).path.rsplit("/", 1)[-1].split(".")[0]

@@ -137,7 +137,7 @@ async def run_batch_item(job: dict, scheduler) -> dict:
     _set_phase(job, item_id, "subtitle", "获取字幕", 45)
     try:
         subtitle_text, source, language = await fetch_subtitle(
-            canonical_url, info, fingerprint=fingerprint, trace_id=job["task_id"][:8],
+            canonical_url, info, fingerprint=fingerprint, trace_id=job["task_id"][:8], persist=True,
         )
     except BilibiliSubtitleUnavailable as error:
         raise RuntimeError(str(error)) from error

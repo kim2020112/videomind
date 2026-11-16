@@ -1,6 +1,7 @@
 """字幕文本提取端点 — 返回清洗后的字幕/弹幕文本用于前端展示。"""
 
 import asyncio
+from core.bilibili_guard import BilibiliAccessBlocked
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -86,6 +87,8 @@ async def get_subtitle_text(
                         part = next((p for p in parts if p.index == p_index), None)
                         if part and part.cid:
                             bilibili_sub = extract_bilibili_subtitle_by_cid(bvid, part.cid)
+                    except BilibiliAccessBlocked:
+                        raise
                     except Exception:
                         pass
             if not p_match:
@@ -163,6 +166,8 @@ async def get_subtitle_text(
                         _pi = _build_part_info(canonical_url, info)
                         save_subtitle_to_db(canonical_url, source, selected.lang, clean_text, info.title, platform, part_info=_pi, segments=segments)
                         return _build_response(clean_text, selected.lang, selected.name, ext, selected.is_auto, segments)
+                except BilibiliAccessBlocked:
+                    raise
                 except Exception as e:
                     sub_error = str(e)
 
@@ -209,6 +214,8 @@ async def get_subtitle_text(
             },
         )
 
+    except BilibiliAccessBlocked as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except HTTPException:
         raise
     except Exception as e:

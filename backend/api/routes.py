@@ -18,7 +18,8 @@ from api.security import (
     require_media_identity,
     require_websocket_identity,
 )
-from core.bilibili import ydl_opts_for, ytdlp_error_message
+from core.bilibili import ydl_opts_for, ytdlp_error_message, youtube_dl
+from core.bilibili_guard import BilibiliAccessBlocked, check_response, request_slot
 from api.media_security import (
     MEDIA_RESPONSE_SECURITY_HEADERS,
     fetch_thumbnail,
@@ -26,8 +27,9 @@ from api.media_security import (
     referer_for_url,
 )
 from core.pipeline.subtitle import _download_subtitle_content
+from core.thumbnail_cache import cached_thumbnail
 from core.logging_config import get_logger
-from core.video import canonical_video_url
+from core.video import canonical_video_url, is_bilibili_video
 from config import DOWNLOAD_DIR
 
 logger = get_logger(__name__)
@@ -58,11 +60,14 @@ def _resolve_short_url(url: str) -> str:
         if parsed.query:
             path = f'{path}?{parsed.query}'
         conn = http.client.HTTPSConnection('b23.tv', timeout=10)
+        resp = None
         try:
-            conn.request('GET', path, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            })
-            resp = conn.getresponse()
+            with request_slot(kind="api", scope="video"):
+                conn.request('GET', path, headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                })
+                resp = conn.getresponse()
+                check_response(resp.status, scope="video")
             location = resp.getheader('Location')
             location_host = (urlsplit(location).hostname or '').lower() if location else ''
             if location and (location_host == 'bilibili.com' or location_host.endswith('.bilibili.com')):
@@ -72,9 +77,13 @@ def _resolve_short_url(url: str) -> str:
                     part = re.search(r'[?&]p=(\d+)', location, re.IGNORECASE)
                     return f'{canonical}?p={part.group(1)}' if part else canonical
                 return location
+        except BilibiliAccessBlocked as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
         except Exception:
             logger.warning(f"Bilibili短链接解析失败: {url[:80]}")
         finally:
+            if resp is not None:
+                resp.close()
             conn.close()
         return url
 
@@ -160,7 +169,8 @@ def _parse_video(req: ParseRequest, request: Request):
         identity = require_identity(request)
         url = extract_url(req.url)
         ensure_public_http_url(url)
-        info = downloader.parse_info(url)
+        from core.video_metadata import learning_video_info
+        info = learning_video_info(url, downloader) if req.metadata_only else downloader.parse_info(url)
         canonical_url = canonical_video_url(url, info)
         info.webpage_url = canonical_url
         save_video_info_cache(canonical_url, info)
@@ -182,6 +192,8 @@ def _parse_video(req: ParseRequest, request: Request):
         return info
     except HTTPException:
         raise
+    except BilibiliAccessBlocked as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"解析失败: {str(e)}")
 
@@ -196,12 +208,11 @@ def _refresh_stream_url(url: str, request: Request):
     try:
         require_identity(request)
         import time as _time
-        import yt_dlp
         url = extract_url(url)
         ensure_public_http_url(url)
         ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True, 'noplaylist': True}
         ydl_opts.update(ydl_opts_for(url))
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with youtube_dl(ydl_opts, url) as ydl:
             info = ydl.extract_info(url, download=False)
         raw_formats = info.get('formats', [])
         audio_only = [
@@ -244,6 +255,8 @@ def _refresh_stream_url(url: str, request: Request):
         }
     except HTTPException:
         raise
+    except BilibiliAccessBlocked as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"刷新失败: {ytdlp_error_message(e)}")
 
@@ -316,14 +329,14 @@ async def proxy_thumbnail(url: str):
         }
         if referer:
             headers["Referer"] = referer
-        return fetch_thumbnail(thumbnail_url, headers=headers)
+        return cached_thumbnail(thumbnail_url, lambda: fetch_thumbnail(thumbnail_url, headers=headers))
 
     try:
         payload = await asyncio.get_event_loop().run_in_executor(None, _fetch)
         return Response(
             content=payload.content,
             media_type=payload.content_type,
-            headers=MEDIA_RESPONSE_SECURITY_HEADERS,
+            headers={**MEDIA_RESPONSE_SECURITY_HEADERS, "Cache-Control": "public, max-age=3600"},
         )
     except HTTPException:
         raise
@@ -397,6 +410,13 @@ def _batch_translate(texts: list[str], src: str, dest: str, batch_size: int = 20
     return results
 
 
+def _export_subtitle_content(url, lang, auto):
+    if not is_bilibili_video(url):
+        return _download_subtitle_content(url, lang, auto)
+    from core.subtitle_export import download_subtitle_content
+    return download_subtitle_content(url, lang, auto, downloader)
+
+
 @router.get("/api/subtitle")
 async def download_subtitle(url: str, lang: str, request: Request, auto: bool = False):
     """下载字幕文件。"""
@@ -405,7 +425,7 @@ async def download_subtitle(url: str, lang: str, request: Request, auto: bool = 
         url = extract_url(url)
         ensure_public_http_url(url)
         content, ext = await asyncio.get_event_loop().run_in_executor(
-            None, _download_subtitle_content, url, lang, auto
+            None, _export_subtitle_content, url, lang, auto
         )
         suffix = f".{lang}.auto.{ext}" if auto else f".{lang}.{ext}"
         return Response(
@@ -413,6 +433,10 @@ async def download_subtitle(url: str, lang: str, request: Request, auto: bool = 
             media_type='text/plain; charset=utf-8',
             headers={'Content-Disposition': f'attachment; filename="subtitle{suffix}"'},
         )
+    except HTTPException:
+        raise
+    except BilibiliAccessBlocked as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"字幕下载失败: {str(e)}")
 
@@ -431,7 +455,7 @@ async def translate_subtitle(url: str, lang: str, target: str, request: Request,
         # 优先尝试 YouTube 原生翻译：用 target-lang 格式直接下载翻译字幕
         # 例如 lang="en", target="zh-Hans" → 尝试下载 "zh-Hans-en"
         yt_translated = False
-        if not auto and '-' not in lang:  # 避免对已翻译的条目重复处理
+        if not is_bilibili_video(url) and not auto and '-' not in lang:  # 避免对已翻译的条目重复处理
             yt_trans_code = f"{target}-{lang}"
             try:
                 content, ext = await asyncio.get_event_loop().run_in_executor(
@@ -444,7 +468,7 @@ async def translate_subtitle(url: str, lang: str, target: str, request: Request,
 
         if not yt_translated:
             content, ext = await asyncio.get_event_loop().run_in_executor(
-                None, _download_subtitle_content, url, lang, auto
+                None, _export_subtitle_content, url, lang, auto
             )
 
         if yt_translated:
@@ -486,6 +510,10 @@ async def translate_subtitle(url: str, lang: str, target: str, request: Request,
             media_type='text/plain; charset=utf-8',
             headers={'Content-Disposition': f'attachment; filename="subtitle{suffix}"'},
         )
+    except HTTPException:
+        raise
+    except BilibiliAccessBlocked as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"字幕翻译失败: {str(e)}")
 

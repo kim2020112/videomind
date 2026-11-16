@@ -2,6 +2,7 @@ import importlib
 import os
 import socket
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ BACKEND = ROOT / "backend"
 sys.path.insert(0, str(BACKEND))
 
 from api import routes
+from core import bilibili_guard
 
 
 PUBLIC_IP = "93.184.216.34"
@@ -107,6 +109,8 @@ class MediaUrlValidationTests(unittest.TestCase):
             "https://example.com/image.jpg",
             "https://evilhdslb.com/image.jpg",
             "https://hdslb.com.evil.example/image.jpg",
+            "https://api.bilibili.com/x/web-interface/nav",
+            "https://www.bilibili.com/video/BV1test",
         ):
             with self.subTest(url=url):
                 with self.assertRaises(HTTPException) as raised:
@@ -168,6 +172,91 @@ class MediaUrlValidationTests(unittest.TestCase):
 
 
 class MediaFetchTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        for name, value in (
+            ("STATE_PATH", Path(temporary.name) / "bilibili-guard.db"),
+            ("LIMITS", {"api": (0, ((3600, 60),)), "media": (0, ((3600, 1200),))}),
+        ):
+            patched = patch.object(bilibili_guard, name, value)
+            patched.start()
+            self.addCleanup(patched.stop)
+
+    def test_media_proxy_rejects_bilibili_api_before_network(self):
+        media_security = load_media_security(self)
+        opener = SequenceOpener([])
+        with self.assertRaises(HTTPException) as raised:
+            media_security.fetch_thumbnail(
+                "https://api.bilibili.com/x/web-interface/nav",
+                resolver=public_resolver, opener=opener,
+            )
+        self.assertEqual(400, raised.exception.status_code)
+        self.assertEqual([], opener.calls)
+
+    def test_media_risk_closes_response_and_blocks_later_requests(self):
+        media_security = load_media_security(self)
+        response = FakeUpstreamResponse(status=412)
+        opener = SequenceOpener([response])
+
+        for _ in range(2):
+            with self.assertRaises(HTTPException) as raised:
+                media_security.open_video(
+                    "https://video.bilivideo.com/media", resolver=public_resolver, opener=opener,
+                )
+            self.assertEqual(429, raised.exception.status_code)
+            self.assertIn("暂时受限", raised.exception.detail)
+
+        self.assertTrue(response.closed)
+        self.assertEqual(1, len(opener.calls))
+
+    def test_expired_media_link_does_not_disable_other_bilibili_media(self):
+        media_security = load_media_security(self)
+        denied = FakeUpstreamResponse(status=403)
+        valid = FakeUpstreamResponse(headers={"Content-Type": "video/mp4"})
+        opener = SequenceOpener([denied, valid])
+        with self.assertRaises(HTTPException) as raised:
+            media_security.open_video(
+                "https://video.bilivideo.com/expired", resolver=public_resolver, opener=opener,
+            )
+        self.assertEqual(429, raised.exception.status_code)
+        self.assertTrue(denied.closed)
+        opened = media_security.open_video(
+            "https://video.bilivideo.com/valid", resolver=public_resolver, opener=opener,
+        )
+        opened.close()
+        self.assertEqual(2, len(opener.calls))
+
+    def test_bilibili_redirect_checks_budget_before_each_request(self):
+        media_security = load_media_security(self)
+        redirect = FakeUpstreamResponse(
+            status=302, headers={"Location": "https://i1.hdslb.com/final.jpg"},
+        )
+        opener = SequenceOpener([redirect])
+        with patch.object(bilibili_guard, "LIMITS", {"media": (0, ((3600, 1),))}):
+            with self.assertRaises(HTTPException) as raised:
+                media_security.fetch_thumbnail(
+                    "https://i0.hdslb.com/first.jpg", resolver=public_resolver, opener=opener,
+                )
+        self.assertEqual(429, raised.exception.status_code)
+        self.assertTrue(redirect.closed)
+        self.assertEqual(1, len(opener.calls))
+
+    def test_redirect_from_other_platform_cannot_bypass_bilibili_stop(self):
+        media_security = load_media_security(self)
+        bilibili_guard.trip("test")
+        redirect = FakeUpstreamResponse(
+            status=302, headers={"Location": "https://i0.hdslb.com/image.jpg"},
+        )
+        opener = SequenceOpener([redirect])
+        with self.assertRaises(HTTPException) as raised:
+            media_security.fetch_thumbnail(
+                "https://i.ytimg.com/image.jpg", resolver=public_resolver, opener=opener,
+            )
+        self.assertEqual(429, raised.exception.status_code)
+        self.assertTrue(redirect.closed)
+        self.assertEqual(1, len(opener.calls))
+
     def test_default_transport_pins_validated_ip_and_preserves_tls_hostname(self):
         media_security = load_media_security(self)
         resolver_calls = []

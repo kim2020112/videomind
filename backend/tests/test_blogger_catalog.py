@@ -90,15 +90,15 @@ class ErrorMappingTests(unittest.TestCase):
 
     def test_login_codes(self):
         self.assertEqual("login", self._get_error({"code": -101}).code)
-        self.assertEqual("login", self._get_error({"code": -111}).code)
+        self.assertEqual("rate_limit", self._get_error({"code": -111}).code)
 
     def test_risk_codes(self):
         for code in (-352, -412, -509, -799):
             self.assertEqual("rate_limit", self._get_error({"code": code}).code)
 
-    def test_http_block_without_cookie_is_login_guidance(self):
-        # 无 SESSDATA 时 412 是「空间接口需要登录」，不是可重试的限流
-        self.assertEqual("login", self._get_error({}, status_code=412).code)
+    def test_http_block_without_cookie_still_stops_access(self):
+        # HTTP 412 is not proof that adding an account Cookie would be safe.
+        self.assertEqual("rate_limit", self._get_error({}, status_code=412).code)
 
     def test_http_rate_limit_with_cookie(self):
         client = BilibiliCatalogClient(cookie="SESSDATA=abc; buvid3=x")
@@ -126,3 +126,14 @@ class ErrorMappingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_session_check_never_uses_signature_material_cache(monkeypatch):
+    from core.blogger.catalog import BilibiliCatalogClient
+    from unittest.mock import Mock
+    import httpx
+    import core.blogger.catalog as catalog
+    get = Mock(return_value=httpx.Response(200, json={'code': 0, 'data': {'isLogin': True}}, request=httpx.Request('GET', 'https://api.bilibili.com/x/web-interface/nav')))
+    monkeypatch.setattr(catalog, 'cached_get', get)
+    BilibiliCatalogClient(cookie='SESSDATA=test').check_session()
+    assert get.call_args.kwargs['ttl'] == 0

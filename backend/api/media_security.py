@@ -6,11 +6,15 @@ import http.client
 import ipaddress
 import socket
 import ssl
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Callable
 from urllib.parse import urljoin, urlsplit
 
 from fastapi import HTTPException
+from core.bilibili_guard import (
+    BilibiliAccessBlocked, check_response, is_bilibili_url, request_kind, request_scope, request_slot,
+)
 
 
 ALLOWED_MEDIA_DOMAINS = frozenset({
@@ -18,7 +22,6 @@ ALLOWED_MEDIA_DOMAINS = frozenset({
     "hdslb.com",
     "biliimg.com",
     "bilivideo.com",
-    "bilibili.com",
     "douyinvod.com",
     "365yg.com",
     "amemv.com",
@@ -237,19 +240,35 @@ def _open_checked(
     *,
     resolver: Resolver,
     opener: Opener,
+    protection_scope: str | None = None,
 ) -> tuple[object, str]:
     current_url = url
     redirects = 0
     while True:
         target = validate_media_url(current_url, resolver=resolver)
+        response = None
         try:
-            response = opener(target, headers)
+            guarded = is_bilibili_url(current_url, include_cdn=True)
+            kind = request_kind(current_url)
+            scope = protection_scope or request_scope(current_url)
+            with request_slot(kind=kind, scope=scope) if guarded else nullcontext():
+                response = opener(target, headers)
+                status = int(getattr(response, "status", 0) or 0)
+                if guarded:
+                    check_response(status, kind=kind, scope=scope, retry_after=_header(response, "Retry-After"))
+        except BilibiliAccessBlocked as exc:
+            if response is not None:
+                _close(response)
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
         except HTTPException:
+            if response is not None:
+                _close(response)
             raise
         except Exception as exc:
+            if response is not None:
+                _close(response)
             raise HTTPException(status_code=502, detail=f"媒体源请求失败: {exc}") from exc
 
-        status = int(getattr(response, "status", 0) or 0)
         if status not in REDIRECT_STATUSES:
             if status not in (200, 206):
                 _close(response)
@@ -285,6 +304,7 @@ def fetch_thumbnail(
         dict(headers or {}),
         resolver=resolver,
         opener=opener,
+        protection_scope="thumbnail",
     )
     try:
         content_type = _normalized_content_type(response)

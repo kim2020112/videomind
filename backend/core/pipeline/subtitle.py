@@ -15,13 +15,16 @@ import shutil as _shutil
 import tempfile as _tempfile
 
 from database import get_subtitle_from_db, save_subtitle_to_db
+from core.bilibili_cache import refresh_responses
+from core.video import video_duration_for_url
 from core.summarizer import (
     clean_subtitle_text, _clean_danmaku_xml,
     extract_bilibili_subtitle, extract_bilibili_subtitle_by_cid, extract_subtitle_segments,
 )
 from core.cache import get_video_info_cache
-from core.bilibili import ydl_opts_for
+from core.bilibili import youtube_dl, ydl_opts_for
 from core.logging_config import get_logger
+from core.bilibili_guard import BilibiliAccessBlocked
 from core.video import canonical_video_url, is_bilibili_video
 
 logger = get_logger(__name__)
@@ -85,7 +88,7 @@ def _download_subtitle_content(url: str, lang: str, is_auto: bool) -> tuple[str,
     ydl_opts.update(ydl_opts_for(url))
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with youtube_dl(ydl_opts, url) as ydl:
             ydl.extract_info(url, download=True)
 
         candidates = _glob.glob(os.path.join(tmpdir, '*'))
@@ -144,13 +147,13 @@ def try_get_bilibili_cc_subtitle(url: str, cached_info=None) -> dict | None:
         return None
 
     p_match = re.search(r'[?&]p=(\d+)', url)
-    if p_match and cached_info:
+    if cached_info:
         parts = (
             cached_info.get('parts', [])
             if isinstance(cached_info, dict)
             else getattr(cached_info, 'parts', [])
         ) or []
-        p_idx = int(p_match.group(1))
+        p_idx = int(p_match.group(1)) if p_match else 1
         part = next((p for p in parts if (
             p.get('index') if isinstance(p, dict) else getattr(p, 'index', None)
         ) == p_idx), None)
@@ -159,8 +162,9 @@ def try_get_bilibili_cc_subtitle(url: str, cached_info=None) -> dict | None:
             bvid = extract_bvid(url)
             if bvid:
                 return extract_bilibili_subtitle_by_cid(bvid, cid)
-        # 多P指定分P无法获取CC字幕，返回 None（不降级到P1）
-        return None
+        # Unknown explicit parts must never silently fall back to P1.
+        if p_match:
+            return None
 
     if p_match:
         # 未知分P cid 时不能用 P1 字幕替代。
@@ -192,6 +196,12 @@ async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = No
             and (has_chinese_track or cached_sub.get("source") == "bilibili_cc")):
         logger.info("忽略英文字幕缓存，重新检查 B站当前可用字幕")
         cached_sub = None
+    if cached_sub:
+        from core.subtitle_validation import validate_cached_subtitle, SubtitleIdentityError
+        try:
+            cached_sub = validate_cached_subtitle(url, cached_sub, info)
+        except SubtitleIdentityError:
+            cached_sub = None
     if cached_sub and len(cached_sub["full_text"].strip()) >= 50:
         if cached_sub["source"] == "bilibili_cc" and not re.search(r'\[\d{2}:\d{2}\]', cached_sub["full_text"]):
             logger.info(f"DB缓存的B站CC字幕缺少时间戳，跳过缓存重新获取")
@@ -203,13 +213,24 @@ async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = No
     bilibili_sub = None
     bilibili_lookup_unavailable = False
     if 'bilibili' in (info.extractor or '').lower():
-        bilibili_sub = try_get_bilibili_cc_subtitle(url, info)
+        with refresh_responses(refresh):
+            bilibili_sub = await asyncio.to_thread(try_get_bilibili_cc_subtitle, url, info)
         if bilibili_sub:
             logger.info(f"B站CC字幕获取成功 has_subtitle={bilibili_sub.get('has_subtitle')} lang={bilibili_sub.get('language')}")
         else:
             bilibili_lookup_unavailable = True
             logger.info("B站CC字幕接口暂时不可用，先尝试其他原生字幕")
     if bilibili_sub and bilibili_sub['has_subtitle']:
+        from core.subtitle_validation import validate_cached_subtitle
+        validate_cached_subtitle(url, {'source': 'bilibili_cc', 'segments': bilibili_sub.get('segments'), 'full_text': bilibili_sub['text'], 'provenance': bilibili_sub.get('provenance')}, info)
+        proof = bilibili_sub.get('provenance')
+        if proof and proof.get('cid') and not getattr(info, 'parts', None):
+            from core.models import VideoPart
+            from core.cache import save_video_info_cache
+            from core.video import selected_video_part_index
+            info.parts = [VideoPart(index=selected_video_part_index(url, info) or 1,
+                                    cid=int(proof['cid']), title=info.title, duration=info.duration)]
+            save_video_info_cache(url, info)
         text = bilibili_sub['text']
         sub_lang = bilibili_sub.get('language', 'zh')
         if _is_english_language(sub_lang) and has_chinese_track:
@@ -217,7 +238,7 @@ async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = No
         else:
             if persist:
                 save_subtitle_to_db(url, "bilibili_cc", sub_lang, text, info.title, platform,
-                                    _build_part_info(url, info), bilibili_sub.get("segments"))
+                                    _build_part_info(url, info), bilibili_sub.get("segments"), provenance=bilibili_sub.get("provenance"))
             return text, "bilibili_cc", sub_lang
 
     # ── Pipeline 2: yt-dlp 原生字幕 ──
@@ -240,6 +261,8 @@ async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = No
                     logger.info(f"yt-dlp字幕获取成功 source={source}")
                     return subtitle_text, source, selected.lang
                 raise ValueError("平台字幕为空或不完整")
+            except BilibiliAccessBlocked:
+                raise
             except Exception as e:
                 logger.info(f"yt-dlp字幕获取失败: {e}")
                 raise BilibiliSubtitleUnavailable("平台字幕获取暂时失败，请稍后重试；未启动语音转录") from e

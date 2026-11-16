@@ -18,7 +18,10 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 
 from core.ai_client import summarize, generate_notes, generate_mindmap, stream_summarize, stream_generate_notes, stream_chat, _chunk_summarize
-from core.bilibili import default_cookie
+from core.bilibili import cookie_for_url
+from core.bilibili_guard import BilibiliAccessBlocked
+from core.bilibili_cache import cached_get
+from core.subtitle_identity import SubtitleIdentityError, validate_subtitle_duration, subtitle_link_identity
 from core.logging_config import get_logger
 
 
@@ -221,40 +224,52 @@ _BILIBILI_HEADERS = {
     ),
     'Accept': 'application/json, text/plain, */*',
 }
-_BILIBILI_COOKIE = default_cookie()
-_BILIBILI_HEADERS['Cookie'] = _BILIBILI_COOKIE
 
 
-def _fetch_bilibili_json(url: str, headers: dict = None, retries: int = 2) -> dict:
-    """Fetch a Bilibili JSON endpoint without converting failures into absence."""
-    request_headers = {**_BILIBILI_HEADERS, **(headers or {})}
-    last_error = None
-    for attempt in range(retries):
+def _fetch_bilibili_json(url: str, headers: dict = None, retries: int = 1) -> dict:
+    """One protected request. Kept retries argument for old callers; no retries."""
+    parsed = urllib.parse.urlsplit(url)
+    query = urllib.parse.parse_qs(parsed.query)
+    if parsed.hostname == 'api.bilibili.com' and parsed.path == '/x/player/v2' and query.get('bvid') and query.get('cid'):
+        from core.blogger.catalog import BilibiliCatalogClient, sign_wbi, CatalogError
         try:
-            req = urllib.request.Request(url, headers=request_headers)
-            with urllib.request.urlopen(req, timeout=15) as response:
-                payload = json.loads(response.read())
-            if not isinstance(payload, dict):
-                raise RuntimeError('B站接口返回了无效数据')
-            code = payload.get('code', 0)
-            if code != 0:
-                raise RuntimeError(f"B站接口错误 {code}: {payload.get('message', '')}")
-            return payload
-        except Exception as exc:
-            last_error = exc
-            if attempt + 1 < retries:
-                time.sleep(0.25 * (attempt + 1))
-    raise RuntimeError(f"B站接口请求失败: {last_error}") from last_error
+            key = BilibiliCatalogClient().ensure_wbi()
+        except CatalogError as exc:
+            if exc.code in ('rate_limit', 'budget', 'protection'):
+                raise BilibiliAccessBlocked(str(exc), exc.code) from exc
+            raise RuntimeError('字幕签名信息暂时不可用，请稍后重试') from exc
+        params = sign_wbi({name: values[0] for name, values in query.items()} | {'wts': int(time.time())}, key)
+        url = 'https://api.bilibili.com/x/player/wbi/v2?' + urllib.parse.urlencode(params)
+    request_headers = {**_BILIBILI_HEADERS, **(headers or {})}
+    cookie = cookie_for_url(url)
+    if cookie:
+        request_headers['Cookie'] = cookie
+    try:
+        response = cached_get(url, headers=request_headers, timeout=15)
+        response.raise_for_status()
+        payload = response.json()
+    except (BilibiliAccessBlocked, SubtitleIdentityError):
+        raise
+    except Exception as exc:
+        raise RuntimeError('B站接口请求失败，未将失败视为无字幕') from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError('B站接口返回了无效数据')
+    code = payload.get('code', 0)
+    if code != 0:
+        raise RuntimeError(f"B站接口错误 {code}")
+    return payload
 
 
-def _select_bilibili_track(subtitle_list: list[dict]) -> dict:
+def _select_bilibili_track(subtitle_list: list[dict]) -> dict | None:
     def rank(track):
         language = (track.get('lan') or '').lower()
         is_chinese = language.startswith('zh') or language.startswith('ai-zh')
         is_auto = language.startswith('ai-') or track.get('type') == 1
         return (0 if is_chinese else 1, 1 if is_auto else 0)
 
-    return min(subtitle_list, key=rank)
+    downloadable = [track for track in subtitle_list if isinstance(track, dict)
+                    and isinstance(track.get('subtitle_url'), str) and track['subtitle_url'].strip()]
+    return min(downloadable, key=rank) if downloadable else None
 
 def extract_bilibili_subtitle_by_cid(bvid: str, cid: int, aid: int = None) -> dict | None:
     """获取B站指定分P的CC字幕（人工字幕 > 自动字幕）。
@@ -271,19 +286,30 @@ def extract_bilibili_subtitle_by_cid(bvid: str, cid: int, aid: int = None) -> di
     }
     metadata = None
     primary_confirmed_absent = False
-    fallback_confirmed_absent = False
+    primary_tracks = []
+    fallback_tracks = []
 
     query = urllib.parse.urlencode({'bvid': bvid, 'cid': cid})
     primary_url = f'https://api.bilibili.com/x/player/v2?{query}'
     try:
         primary = _fetch_bilibili_json(primary_url, headers=headers)
-        primary_data = primary.get('data', {})
+        primary_data = primary.get('data') or {}
+        if not isinstance(primary_data, dict):
+            raise RuntimeError('字幕目录响应格式异常')
+        if (primary_data.get('bvid') and primary_data['bvid'] != bvid) or (primary_data.get('cid') and str(primary_data['cid']) != str(cid)):
+            raise SubtitleIdentityError('字幕接口返回的视频标识不匹配，已拒绝使用该字幕')
+        if aid and primary_data.get('aid') and str(aid) != str(primary_data['aid']):
+            raise SubtitleIdentityError('字幕接口返回的视频 aid 不匹配，已拒绝使用该字幕')
+        if not isinstance(primary_data, dict) or not isinstance(primary_data.get('subtitle'), dict) or not isinstance(primary_data['subtitle'].get('subtitles'), list):
+            raise RuntimeError('字幕目录响应结构不完整，不能认定为无字幕')
+        aid = aid or primary_data.get('aid')
         primary_tracks = primary_data.get('subtitle', {}).get('subtitles') or []
-        if primary_tracks:
+        if _select_bilibili_track(primary_tracks):
             metadata = primary
         else:
-            aid = aid or primary_data.get('aid')
-            primary_confirmed_absent = not primary_data.get('need_login_subtitle', False)
+            primary_confirmed_absent = not primary_tracks and not primary_data.get('need_login_subtitle', False)
+    except (BilibiliAccessBlocked, SubtitleIdentityError):
+        raise
     except RuntimeError as exc:
         logger.warning(f"B站字幕元数据请求失败 endpoint={primary_url.split('?')[0]}: {exc}")
 
@@ -295,6 +321,8 @@ def extract_bilibili_subtitle_by_cid(bvid: str, cid: int, aid: int = None) -> di
                 headers=headers,
             )
             aid = view_data.get('data', {}).get('aid')
+        except BilibiliAccessBlocked:
+            raise
         except RuntimeError as exc:
             logger.warning(f"B站视频 aid 请求失败 bvid={bvid}: {exc}")
 
@@ -306,16 +334,18 @@ def extract_bilibili_subtitle_by_cid(bvid: str, cid: int, aid: int = None) -> di
                 headers=headers,
             )
             fallback_tracks = fallback.get('data', {}).get('subtitle', {}).get('subtitles') or []
-            if fallback_tracks:
+            if _select_bilibili_track(fallback_tracks):
                 metadata = fallback
-            else:
-                fallback_confirmed_absent = True
+        except BilibiliAccessBlocked:
+            raise
         except RuntimeError as exc:
             logger.warning(f"B站备用字幕元数据请求失败 bvid={bvid} cid={cid}: {exc}")
 
     if metadata is None:
-        if primary_confirmed_absent or fallback_confirmed_absent:
+        if primary_confirmed_absent and not fallback_tracks:
             return {'has_subtitle': False, 'reason': 'absent'}
+        if primary_tracks or fallback_tracks:
+            raise RuntimeError('B站已返回字幕目录，但未提供可下载的字幕链接；请稍后重新获取')
         return None
 
     subtitle_list = metadata.get('data', {}).get('subtitle', {}).get('subtitles') or []
@@ -333,8 +363,11 @@ def extract_bilibili_subtitle_by_cid(bvid: str, cid: int, aid: int = None) -> di
         if sub_url.startswith('http://'):
             sub_url = 'https://' + sub_url[7:]
 
+        link_checked = subtitle_link_identity(sub_url, aid, cid)
         sub_json = _fetch_bilibili_json(sub_url, headers=headers)
-        body = sub_json.get('body', [])
+        body = sub_json.get('body')
+        if not isinstance(body, list) or not all(isinstance(item, dict) for item in body):
+            raise RuntimeError('字幕正文格式异常')
 
         segments = []
         for item in body:
@@ -347,6 +380,7 @@ def extract_bilibili_subtitle_by_cid(bvid: str, cid: int, aid: int = None) -> di
                 'text': content,
             })
 
+        validate_subtitle_duration(segments, None)
         full_text = '\n'.join(seg['text'] for seg in segments)
         formatted_lines = []
         for seg in segments:
@@ -355,9 +389,10 @@ def extract_bilibili_subtitle_by_cid(bvid: str, cid: int, aid: int = None) -> di
             formatted_lines.append(f"[{mm:02d}:{ss:02d}] {seg['text']}")
 
         if not segments:
-            return None
+            raise RuntimeError('B站返回的字幕正文为空；请稍后重新获取')
 
         return {
+            'provenance': {'version': 1, 'bvid': bvid, 'cid': str(cid), 'aid': str(aid or ''), 'track_id': str(best.get('id_str') or best.get('id') or ''), 'link_identity_checked': link_checked},
             'has_subtitle': True,
             'language': language or 'zh',
             'subtitle_type': sub_type,
@@ -366,9 +401,11 @@ def extract_bilibili_subtitle_by_cid(bvid: str, cid: int, aid: int = None) -> di
             'text': '\n'.join(formatted_lines),
         }
 
+    except (BilibiliAccessBlocked, SubtitleIdentityError):
+        raise
     except Exception as exc:
         logger.warning(f"B站字幕正文请求失败 bvid={bvid} cid={cid}: {exc}")
-        return None
+        raise RuntimeError('B站字幕正文下载失败，请稍后重新获取；已保留已有资料') from exc
 
 
 def extract_bilibili_subtitle(url: str) -> dict | None:
@@ -379,6 +416,7 @@ def extract_bilibili_subtitle(url: str) -> dict | None:
     bvid = m.group(1)
 
     headers = {'Referer': f'https://www.bilibili.com/video/{bvid}'}
+    cid = aid = None
     try:
         query = urllib.parse.urlencode({'bvid': bvid})
         view_data = _fetch_bilibili_json(
@@ -388,10 +426,16 @@ def extract_bilibili_subtitle(url: str) -> dict | None:
         video_data = view_data.get('data', {})
         cid = video_data.get('cid')
         aid = video_data.get('aid')
-        if cid:
-            return extract_bilibili_subtitle_by_cid(bvid, cid, aid)
+    except (BilibiliAccessBlocked, SubtitleIdentityError):
+        raise
     except RuntimeError as exc:
         logger.warning(f"B站视频信息请求失败 bvid={bvid}: {exc}")
+
+    if cid:
+        result = extract_bilibili_subtitle_by_cid(bvid, cid, aid)
+        if result and result.get('has_subtitle'):
+            validate_subtitle_duration(result.get('segments'), (video_data.get('pages') or [{}])[0].get('duration') or video_data.get('duration'))
+        return result
 
     try:
         query = urllib.parse.urlencode({'bvid': bvid})
@@ -400,12 +444,13 @@ def extract_bilibili_subtitle(url: str) -> dict | None:
             headers=headers,
         )
         pages = page_data.get('data') or []
-        if pages and pages[0].get('cid'):
-            return extract_bilibili_subtitle_by_cid(bvid, pages[0]['cid'])
+        cid = pages[0].get('cid') if pages else None
+    except (BilibiliAccessBlocked, SubtitleIdentityError):
+        raise
     except RuntimeError as exc:
         logger.warning(f"B站分P信息请求失败 bvid={bvid}: {exc}")
 
-    return None
+    return extract_bilibili_subtitle_by_cid(bvid, cid) if cid else None
 
 
 # ──── 别名（兼容旧 import） ────

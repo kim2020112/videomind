@@ -29,6 +29,9 @@ DB_PATH = Path(os.getenv("DB_PATH", str(BASE_DIR / "db" / "knowledge.db"))).expa
 AI_CONFIG_PATH = Path(
     os.getenv("AI_CONFIG_PATH", str(BASE_DIR / "data" / "ai_config.json"))
 ).expanduser()
+PLATFORM_CONFIG_PATH = Path(
+    os.getenv("PLATFORM_CONFIG_PATH", str(BASE_DIR / "data" / "platform_config.json"))
+).expanduser()
 
 # 临时文件（视频/音频处理后删除）
 TEMP_DIR = Path(os.getenv("TEMP_DIR", str(BASE_DIR / "temp"))).expanduser()

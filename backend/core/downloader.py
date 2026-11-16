@@ -10,7 +10,8 @@ from asyncio import Queue
 
 from .models import VideoInfo, FormatOption, ProgressData, VideoPart, VideoChapter, SubtitleTrack
 from .video import selected_video_part_index, video_duration_for_url
-from .bilibili import ydl_opts_for, ytdlp_error_message
+from .bilibili import ydl_opts_for, ytdlp_error_message, youtube_dl
+from .bilibili_guard import BilibiliAccessBlocked, guarded_get
 
 # 下载清理策略
 _MAX_DOWNLOADS = 20       # 最多保留 20 个下载
@@ -48,157 +49,49 @@ def _fetch_bilibili_parts(url: str) -> list[VideoPart]:
         return []
     bvid = m.group(1)
     try:
-        req = urllib.request.Request(
+        response = guarded_get(
             f'https://api.bilibili.com/x/player/pagelist?bvid={bvid}',
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Referer': 'https://www.bilibili.com/',
-            }
+            headers={'Referer': 'https://www.bilibili.com/'}, timeout=10,
         )
-        resp = urllib.request.urlopen(req, timeout=10)
-        data = json.loads(resp.read())
+        response.raise_for_status()
+        data = response.json()
         if data.get('code') != 0 or not data.get('data'):
             return []
         pages = data['data']
         if len(pages) <= 1:
             return []
         return [VideoPart(index=p['page'], title=p['part'], cid=p.get('cid'), duration=p.get('duration')) for p in pages]
+    except BilibiliAccessBlocked:
+        raise
     except Exception:
         return []
 
 
-def _patch_bilibili_extractor():
-    """
-    两个补丁解决 Bilibili 未登录限制：
-    1. 网页 412 补丁：服务器 IP 被封时，从 API 获取视频数据构造假网页，让提取器正常运行。
-    2. 画质补丁：WBI 签名接口对未登录用户限制到 480p，改用非 WBI 接口 + try_look=1 可获取 1080p/720p。
-    """
-    import re
-    import json
-    import urllib.request
-    from yt_dlp.extractor.bilibili import BiliBiliIE, BilibiliBaseIE
-
-    if getattr(BiliBiliIE, '_patched_412', False):
-        return
-
-    # --- 补丁 1：网页 412 时用 API 数据构造假网页 ---
-    _orig_webpage = BiliBiliIE._download_webpage_handle
-
-    def _fetch_video_info(bvid: str) -> dict:
-        req = urllib.request.Request(
-            f'https://api.bilibili.com/x/web-interface/view?bvid={bvid}',
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-                'Referer': 'https://www.bilibili.com/',
-            }
-        )
-        resp = urllib.request.urlopen(req, timeout=15)
-        return json.loads(resp.read())
-
-    def _patched_webpage(self, url_or_request, *args, **kwargs):
-        try:
-            return _orig_webpage(self, url_or_request, *args, **kwargs)
-        except Exception as e:
-            if '412' not in str(e):
-                raise
-            url = (url_or_request if isinstance(url_or_request, str)
-                   else getattr(url_or_request, 'url', str(url_or_request)))
-            m = re.search(r'(BV\w+)', url)
-            if not m:
-                raise
-            api_resp = _fetch_video_info(m.group(1))
-            if api_resp.get('code') != 0:
-                raise
-            api_data = api_resp['data']
-            initial_state = {
-                'videoData': api_data,
-                'upData': api_data.get('owner', {}),
-            }
-            fake_webpage = f'window.__INITIAL_STATE__={json.dumps(initial_state)};'
-
-            class _FakeUrlh:
-                pass
-            fake = _FakeUrlh()
-            fake.url = url
-            return fake_webpage, fake
-
-    BiliBiliIE._download_webpage_handle = _patched_webpage
-    BilibiliBaseIE._download_webpage_handle = _patched_webpage
-
-    # --- 补丁 2：未登录时用非 WBI 接口 + try_look=1 获取高清画质 ---
-    _orig_playinfo = BiliBiliIE._download_playinfo
-
-    def _patched_playinfo(self, bvid, cid, headers=None, query=None):
-        if self.is_logged_in:
-            return _orig_playinfo(self, bvid, cid, headers=headers, query=query)
-        params = {
-            'bvid': bvid, 'cid': cid,
-            'qn': 0, 'fnval': 4048, 'fourk': 1,
-            'try_look': 1, 'platform': 'pc',
-        }
-        if query:
-            params.update(query)
-        return self._download_json(
-            'https://api.bilibili.com/x/player/playurl', bvid,
-            query=params, headers=headers,
-            note=f'Downloading video formats for cid {cid}')['data']
-
-    BiliBiliIE._download_playinfo = _patched_playinfo
-    BiliBiliIE._patched_412 = True
-
-
-_patch_bilibili_extractor()
-
-
-def _patch_douyin_extractor():
-    """
-    抖音 web API 需要 JavaScript 生成的 cookie（s_v_web_id），服务器环境无法获取。
-    此补丁在 web API 失败时，降级到 api.amemv.com 移动端 API（无需 cookie）。
-    """
-    import random
-    import urllib.request
-    import json
-    from yt_dlp.extractor.tiktok import DouyinIE
-    from yt_dlp.utils import ExtractorError
-
-    if getattr(DouyinIE, '_patched_amemv', False):
-        return
-
-    _orig = DouyinIE._real_extract
-
-    def _fetch_via_amemv(video_id: str):
-        url = (
-            f'https://api.amemv.com/aweme/v1/feed/?aweme_id={video_id}'
-            f'&device_id={random.randint(10**18, 10**19)}'
-            f'&iid={random.randint(10**18, 10**19)}'
-            '&version_code=350103&app_name=aweme&channel=googleplay'
-            '&device_platform=android&os=android'
-        )
-        req = urllib.request.Request(url, headers={
-            'User-Agent': 'com.ss.android.ugc.aweme/350103 (Linux; U; Android 13; zh_CN; Pixel 7; Build/TQ3A.230901.001)',
-        })
-        resp = urllib.request.urlopen(req, timeout=15)
-        data = json.loads(resp.read())
-        items = data.get('aweme_list') or []
-        return items[0] if items else None
-
-    def _patched(self, url):
-        try:
-            return _orig(self, url)
-        except Exception as e:
-            if 'Fresh cookies' not in str(e) and 'cookie' not in str(e).lower():
-                raise
-            video_id = self._match_id(url)
-            detail = _fetch_via_amemv(video_id)
-            if not detail:
-                raise ExtractorError('无法获取抖音视频信息，请稍后重试', expected=True)
-            return self._parse_aweme_video_app(detail)
-
-    DouyinIE._real_extract = _patched
-    DouyinIE._patched_amemv = True
-
-
-_patch_douyin_extractor()
+def _retryable_parse_error(error: Exception) -> bool:
+    """Retry transient transport errors, never login/risk/content failures."""
+    from yt_dlp.networking.exceptions import TransportError
+    pending = [error]
+    seen = set()
+    transient = False
+    while pending:
+        item = pending.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        status = getattr(item, 'status', None) or getattr(item, 'status_code', None) or getattr(item, 'code', None)
+        if isinstance(status, int):
+            if 400 <= status < 500:
+                return False
+            transient = transient or 500 <= status < 600
+        transient = transient or isinstance(item, (TransportError, TimeoutError, ConnectionError))
+        for name in ('cause', '__cause__', '__context__'):
+            nested = getattr(item, name, None)
+            if isinstance(nested, BaseException):
+                pending.append(nested)
+        info = getattr(item, 'exc_info', None)
+        if isinstance(info, tuple) and len(info) > 1 and isinstance(info[1], BaseException):
+            pending.append(info[1])
+    return transient
 
 
 def _format_filesize(size_bytes: Optional[int]) -> Optional[str]:
@@ -270,18 +163,23 @@ class VideoDownloader:
             'skip_download': True,
             'noplaylist': True,
             'listsubtitles': True,
+            'extractor_retries': 0,
+            'retries': 0,
         }
         ydl_opts.update(ydl_opts_for(url))
         last_err = None
-        for attempt in range(3):
+        for attempt in range(1 if _is_bilibili(url) else 3):
             try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with youtube_dl(ydl_opts, url) as ydl:
                     info = ydl.extract_info(url, download=False)
                 break
+            except BilibiliAccessBlocked:
+                raise
             except Exception as e:
                 last_err = e
-                if attempt < 2:
-                    time.sleep(2 * (2 ** attempt))
+                if _is_bilibili(url) or attempt >= 2 or not _retryable_parse_error(e):
+                    raise RuntimeError(ytdlp_error_message(e)) from e
+                time.sleep(2 * (2 ** attempt))
         else:
             raise RuntimeError(ytdlp_error_message(last_err)) from last_err
 
@@ -595,7 +493,7 @@ class VideoDownloader:
                 ydl_opts['ffmpeg_location'] = self.ffmpeg_location
 
             try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with youtube_dl(ydl_opts, part_url) as ydl:
                     ydl.extract_info(part_url, download=True)
             except Exception as e:
                 raise RuntimeError(ytdlp_error_message(e)) from e
@@ -676,7 +574,7 @@ class VideoDownloader:
             ydl_opts['ffmpeg_location'] = self.ffmpeg_location
 
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with youtube_dl(ydl_opts, url) as ydl:
                 ydl.extract_info(url, download=True)
         except Exception as e:
             raise RuntimeError(ytdlp_error_message(e)) from e

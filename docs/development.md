@@ -22,7 +22,8 @@ cp backend/.env.example backend/.env
 | `AI_API_FORMAT` | `.env` 兜底协议，取值为 `anthropic` 或 `openai` |
 | `AI_API_KEY`、`AI_BASE_URL`、`AI_MODEL` | `.env` 兜底连接的凭据、地址和模型；有管理员运行时连接时由其覆盖 |
 | `FEATURE_AI`、`FEATURE_WHISPER` | 显式关闭可选功能 |
-| `BILIBILI_COOKIE` | B 站 Cookie；字幕留空时用匿名设备 Cookie，博主目录同步必须含 SESSDATA 的登录 Cookie |
+| `BILIBILI_COOKIE` | 可选的 B 站登录凭据；默认仅登录验证、列表和字幕目录接口使用 |
+| `BILIBILI_USE_ACCOUNT_COOKIE` | 默认 `true`；设为 `false` 则自动请求完全匿名，不会解除额度或冷却 |
 | `ADMIN_USERNAME`、`ADMIN_PASSWORD` | 可选管理员初始化 |
 | `GUEST_SECRET` | 访客签名；保持默认值时访客入口关闭 |
 | `AI_CACHE_KEEP` | AI 缓存软上限（按视频计，默认 500）；历史和收藏中的成果受保护，可超过此值，清理不删除字幕与视频记录 |
@@ -47,13 +48,13 @@ cp backend/.env.example backend/.env
 
 ```bash
 # 后端
-.venv/bin/python -m uvicorn main:app --app-dir backend --reload --host 0.0.0.0 --port 8000
+.venv/bin/python -m uvicorn main:app --app-dir backend --reload --host 0.0.0.0 --port 8083
 
 # 前端
 npm --prefix frontend run dev -- --host 0.0.0.0
 ```
 
-访问 `http://localhost:5173`。Vite 将 `/api` 和 `/ws` 代理到 `http://127.0.0.1:8000`。
+访问 `http://localhost:5173`。Vite 将 `/api` 和 `/ws` 代理到 `http://127.0.0.1:8083`。
 
 需要模拟生产静态托管时：
 
@@ -112,17 +113,17 @@ git diff --check
 ## 运行排错
 
 ```bash
-curl http://127.0.0.1:8000/api/health/live
-curl http://127.0.0.1:8000/api/health/ready
-curl http://127.0.0.1:8000/api/capabilities
+curl http://127.0.0.1:8083/api/health/live
+curl http://127.0.0.1:8083/api/health/ready
+curl http://127.0.0.1:8083/api/capabilities
 ```
 
 - `/api/health/live` 失败：检查 Uvicorn 进程和端口。
 - `/api/health/ready` 返回 503：检查 SQLite、临时目录和下载目录权限。
 - 前端 5173 无法访问：检查 Vite Preview 进程、构建产物、监听地址和防火墙。
 - B 站字幕临时不可用：查看后端日志中的平台错误码；不要直接改成“无字幕”回退。
-- 博主目录同步报 `login`：`BILIBILI_COOKIE` 未配置或缺少 SESSDATA；同步接口为登录态接口，不能用匿名设备 Cookie。
-- 解析/下载报 HTTP 412：B 站风控拦截无 Cookie 的服务端请求；`core/bilibili.py` 会把 `BILIBILI_COOKIE` 写成 Netscape cookiefile 供 yt-dlp 使用，Cookie 失效或未配置时会提示更新。
+- 博主目录同步报 `login`：平台要求有效登录，自动任务已暂停；优先在官方客户端访问，不反复提交账号 Cookie。
+- 解析/下载报 HTTP 412：请求受到限制，不能据此断言账号被封或 Cookie 失效。对应功能冷却 10～60 分钟；只有429会短时全局冷却，更新 Cookie/重启不会清除。API 请求共用 5 秒间隔、120 次/小时和 600 次/天额度；见 [访问保护](bilibili-access.md)。
 - B 站无 CC 后转录出现 `HTTP 412`：确认解析结果含 `audio_stream_url`，并确认 worker 命令收到 `--audio-url`。旧 `video_info_cache` 没有该字段时应先刷新解析，不要直接让 worker 再次抓取视频页面。
 - 分 P 状态异常：同时检查精确 URL、`url_hash`、当前身份历史归属及已保存的有效字幕/模块，失败任务不应抹掉已有资料状态；不要把共享视频指纹当成分 P 唯一键。
 - 分 P 转录 ETA 异常：确认 canonical URL 保留 `p` 参数，并从 `parts` 中读取所选分 P 时长，而不是全集总时长。

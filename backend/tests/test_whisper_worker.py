@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,6 +23,15 @@ class WhisperWorkerTests(unittest.TestCase):
         options = []
 
         class FakeYoutubeDL:
+            def urlopen(self, request):
+                raise AssertionError("Unexpected HTTP request in offline test")
+
+            def build_request_director(self, handlers):
+                return MagicMock()
+
+            def dl(self, *args, **kwargs):
+                raise AssertionError("Unexpected network download in offline test")
+
             def __init__(self, ydl_opts):
                 self.ydl_opts = ydl_opts
                 options.append(ydl_opts)

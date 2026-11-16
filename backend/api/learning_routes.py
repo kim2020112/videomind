@@ -93,7 +93,7 @@ def submit(req, identity, targets):
 @router.get("/workspace")
 async def get_workspace(request: Request, url: str = Query(...)):
     identity = require_identity(request)
-    return learning.workspace(normalize(url), identity)
+    return await run_in_threadpool(lambda: learning.workspace(normalize(url), identity))
 
 
 @router.post("/workspace/visit")
@@ -115,12 +115,12 @@ async def clear_workspace_subtitle(req: VisitRequest, request: Request):
 
 @router.post("/subtitle/prepare")
 async def prepare_subtitle(req: PrepareRequest, request: Request):
-    return JSONResponse(status_code=202, content=submit(req, require_identity(request), []))
+    return JSONResponse(status_code=202, content=await run_in_threadpool(submit, req, require_identity(request), []))
 
 
 @router.post("/learning/generate")
 async def generate_learning(req: GenerateRequest, request: Request):
-    return JSONResponse(status_code=202, content=submit(req, require_identity(request), req.targets))
+    return JSONResponse(status_code=202, content=await run_in_threadpool(submit, req, require_identity(request), req.targets))
 
 
 @router.post("/tasks/{task_id}/resume")

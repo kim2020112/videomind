@@ -75,3 +75,10 @@ faster-whisper-small/
 # 旧向量索引与其他临时文件（运行时生成，不提交）
 /backend/data/chroma/
 tmp/
+
+backend/data/platform_config.json
+
+# Shared outbound request guard lock
+backend/db/*.db.lock
+
+backend/data/platform_config.json.lock

@@ -1,7 +1,7 @@
-"""目录同步执行器：后台线程逐页抓投稿，2s 全局限速，状态写 blogger_syncs。
+"""目录同步执行器：按页限额读取投稿，状态与断点写 blogger_syncs。
 
 不进 background_jobs 重任务队列，避免被长批次饿死。同 creator 同时只跑一个同步。
-可重试错误在锁释放后用 Timer 延迟续跑，不占用执行线程。
+风控、请求预算或保护拦截后暂停，只有尚未取得页面的网络错误可延迟重试。
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from core.logging_config import get_logger
 logger = get_logger("blogger.sync")
 
 PAGE_SIZE = 30
+MAX_PAGES_PER_SYNC = 20
 
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="blogger-sync")
 _creator_locks: dict[int, threading.Lock] = {}
@@ -29,8 +30,8 @@ _creator_locks_guard = threading.Lock()
 # 错误分类 → (最大自动重试次数, 退避秒数序列)
 _RETRY_POLICY = {
     "network": (2, [30, 120]),
-    "rate_limit": (1, [900]),
 }
+_PAUSE_CODES = frozenset({"login", "rate_limit", "budget", "protection"})
 
 
 def _creator_lock(creator_id: int) -> threading.Lock:
@@ -44,8 +45,19 @@ def _creator_lock(creator_id: int) -> threading.Lock:
 
 def start_sync(creator_id: int, *, refresh_profile: bool = True, mode: str = "incremental") -> int:
     """创建 sync 行并提交后台执行，立即返回 sync_id。"""
+    previous = store.latest_sync(creator_id)
+    if mode == "incremental" and not store.has_full_catalog_sync(creator_id):
+        mode = "deep"
+    if previous and previous["status"] == "paused" and previous["page"]:
+        # 增量扫描也可能中途暂停；保留断点，避免下一次把已插入的首页误判为追平。
+        mode = "deep"
+    checkpoint = previous if mode == "deep" else None
+    if checkpoint and (checkpoint["status"] not in ("paused", "failed", "interrupted") or not checkpoint["page"] or checkpoint["error_code"] == "api"):
+        checkpoint = None
     sync_id = store.create_sync(creator_id, status="queued")
     store.update_sync(sync_id, mode=mode if mode in ("incremental", "deep") else "incremental")
+    if checkpoint:
+        store.update_sync(sync_id, **{key: checkpoint[key] for key in ("page", "found", "added", "expected")})
     _executor.submit(_run_guarded, sync_id, creator_id, refresh_profile)
     return sync_id
 
@@ -83,8 +95,10 @@ def _run_guarded(sync_id: int, creator_id: int, refresh_profile: bool) -> None:
 
 def _run_sync(sync_id: int, creator_id: int, refresh_profile: bool) -> float | None:
     client = BilibiliCatalogClient()
+    pages_fetched = 0
     sync_row = store.get_sync(sync_id) or {}
     mode = sync_row.get("mode") or "incremental"
+    can_short_circuit = mode == "incremental" and store.has_full_catalog_sync(creator_id)
     store.update_sync(sync_id, status="running", started_at=store.now_iso(), error=None,
                       error_code=None)
 
@@ -94,14 +108,18 @@ def _run_sync(sync_id: int, creator_id: int, refresh_profile: bool) -> float | N
             return None
         code = error.code
         retryable, backoffs = _RETRY_POLICY.get(code, (0, []))
+        if pages_fetched:
+            # 已取得进度后交给手动续跑，防止自动重试不断重置本轮页数限额。
+            retryable = 0
         sync = store.get_sync(sync_id) or {}
         retries = int(sync.get("retry_count") or 0)
         if retries < retryable:
             delay = backoffs[min(retries, len(backoffs) - 1)]
             store.update_sync(sync_id, status="queued", retry_count=retries + 1,
                               error=str(error)[:200], error_code=code)
+            logger.warning(f"目录同步等待重试 sync_id={sync_id} creator_id={creator_id} code={code} delay={delay}s page={sync.get('page', 0)}")
             return float(delay)
-        status = "paused" if code in ("login", "rate_limit") else "failed"
+        status = "paused" if code in _PAUSE_CODES or (code == "network" and pages_fetched) else "failed"
         store.update_sync(sync_id, status=status, error=str(error)[:200], error_code=code,
                           finished_at=store.now_iso())
         return None
@@ -111,6 +129,7 @@ def _run_sync(sync_id: int, creator_id: int, refresh_profile: bool) -> float | N
 
     try:
         uid = _creator_uid(creator_id)
+        client.check_session()
         if refresh_profile:
             try:
                 profile = client.profile(uid)
@@ -122,7 +141,7 @@ def _run_sync(sync_id: int, creator_id: int, refresh_profile: bool) -> float | N
                         follower_count=profile["follower_count"],
                     )
             except CatalogError as error:
-                if error.code in ("login", "rate_limit"):
+                if error.code in _PAUSE_CODES:
                     return fail(error)
                 logger.warning(f"刷新博主资料失败（继续同步目录）: {error}")
 
@@ -145,7 +164,14 @@ def _run_sync(sync_id: int, creator_id: int, refresh_profile: bool) -> float | N
             if cancelled():
                 store.update_sync(sync_id, status="cancelled", finished_at=store.now_iso())
                 return None
+            if pages_fetched >= MAX_PAGES_PER_SYNC:
+                raise CatalogError(
+                    "budget",
+                    f"本次已读取 {MAX_PAGES_PER_SYNC} 页，已暂停并保存进度；"
+                    "可稍后手动继续，继续同步仍受 B 站全局请求预算限制",
+                )
             entries, total = client.videos(uid, page)
+            pages_fetched += 1
             if expected is None and total:
                 expected = total
                 store.update_sync(sync_id, expected=int(expected))
@@ -182,14 +208,18 @@ def _run_sync(sync_id: int, creator_id: int, refresh_profile: bool) -> float | N
 
             store.update_sync(sync_id, page=page, found=found, added=added)
             if not entries:
+                if expected is not None and found < int(expected):
+                    raise CatalogError("api", f"投稿目录提前结束：已扫描 {found}/{expected}，请重试深度同步")
                 break
-            if mode == "incremental" and page_all_known:
+            if can_short_circuit and page_all_known:
                 # 整页已收录 → 已追平历史，提前终止
                 logger.info(f"增量同步短路 creator_id={creator_id} page={page} added={added}")
                 break
             if len(entries) < PAGE_SIZE:
+                if expected is not None and found < int(expected):
+                    raise CatalogError("api", f"投稿目录提前结束：已扫描 {found}/{expected}，请继续深度同步补齐历史投稿")
                 break
-            if mode == "deep" and expected is not None and found >= int(expected):
+            if expected is not None and found >= int(expected):
                 break
             page += 1
 

@@ -3,10 +3,11 @@
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api.security import require_admin
 from core import ai_config
+from core import platform_config
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -118,3 +119,25 @@ async def test_model(connection_id: str, model_id: str, request: Request):
 async def switch_model(req: SwitchRequest, request: Request):
     require_admin(request)
     return _bad_request(ai_config.switch_model, req.connection_id, req.model_id)
+
+
+class PlatformCookieRequest(BaseModel):
+    cookie: str = Field(default="", max_length=32768)
+
+
+@router.get("/platform-config")
+def get_platform_config(request: Request):
+    require_admin(request)
+    return platform_config.get_public()
+
+
+@router.put("/platform-config/{platform}")
+def save_platform_config(platform: str, req: PlatformCookieRequest, request: Request):
+    require_admin(request)
+    return _bad_request(platform_config.save, platform, req.cookie)
+
+
+@router.post("/platform-config/{platform}/validate")
+def validate_platform_config(platform: str, req: PlatformCookieRequest, request: Request):
+    require_admin(request)
+    return _bad_request(platform_config.validate, platform, req.cookie)

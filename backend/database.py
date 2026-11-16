@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS subtitles (
     language TEXT NOT NULL,
     full_text TEXT NOT NULL,
     segments_json TEXT,
+    provenance_json TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -337,6 +338,8 @@ def init_db():
     with get_db() as conn:
         conn.executescript(_SCHEMA)
         # 迁移：添加 part_info 列
+        if 'provenance_json' not in {row[1] for row in conn.execute('PRAGMA table_info(subtitles)')}:
+            conn.execute('ALTER TABLE subtitles ADD COLUMN provenance_json TEXT')
         try:
             conn.execute("ALTER TABLE videos ADD COLUMN part_info TEXT DEFAULT ''")
         except sqlite3.OperationalError:
@@ -388,7 +391,7 @@ def get_subtitle_from_db(url: str) -> dict | None:
     import json as _json
     with get_db() as conn:
         row = conn.execute("""
-            SELECT s.full_text, s.source, s.language, s.segments_json
+            SELECT s.full_text, s.source, s.language, s.segments_json, s.provenance_json
             FROM subtitles s
             JOIN videos v ON s.video_id = v.id
             WHERE v.url = ?
@@ -402,16 +405,21 @@ def get_subtitle_from_db(url: str) -> dict | None:
         try:
             segments = _json.loads(row["segments_json"])
         except (_json.JSONDecodeError, TypeError):
-            pass
+            segments = [{'start': 0, 'end': 'invalid'}]
+    try:
+        provenance = _json.loads(row["provenance_json"] or "null")
+    except (_json.JSONDecodeError, TypeError):
+        provenance = {'invalid': True}
     return {
         "full_text": row["full_text"],
         "source": row["source"],
         "language": row["language"],
         "segments": segments,
+        "provenance": provenance,
     }
 
 
-def save_subtitle_to_db(url: str, source: str, language: str, full_text: str, title: str = "", platform: str = "", part_info: str = "", segments: list = None):
+def save_subtitle_to_db(url: str, source: str, language: str, full_text: str, title: str = "", platform: str = "", part_info: str = "", segments: list = None, provenance: dict = None):
     """将字幕文本持久化到 subtitles 表。覆盖同 URL 的旧字幕。"""
     with get_db() as conn:
         # 确保 video 记录存在
@@ -443,7 +451,13 @@ def save_subtitle_to_db(url: str, source: str, language: str, full_text: str, ti
         import json as _json
         conn.execute("DELETE FROM subtitles WHERE video_id = ?", (video_id,))
         seg_json = _json.dumps(segments, ensure_ascii=False) if segments else None
+        if provenance:
+            import hashlib
+            from datetime import datetime, timezone
+            provenance = {**provenance, 'text_sha256': hashlib.sha256(full_text.encode()).hexdigest(),
+                          'fetched_at': datetime.now(timezone.utc).isoformat(),
+                          'segments_sha256': hashlib.sha256(_json.dumps(segments or [], ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
         conn.execute(
-            "INSERT INTO subtitles (video_id, source, language, full_text, segments_json) VALUES (?, ?, ?, ?, ?)",
-            (video_id, source, language, full_text, seg_json),
+            "INSERT INTO subtitles (video_id, source, language, full_text, segments_json, provenance_json) VALUES (?, ?, ?, ?, ?, ?)",
+            (video_id, source, language, full_text, seg_json, _json.dumps(provenance) if provenance else None),
         )

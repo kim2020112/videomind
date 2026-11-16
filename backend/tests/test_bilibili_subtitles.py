@@ -25,7 +25,7 @@ SUBTITLE_META = {
             "subtitles": [
                 {
                     "lan": "zh-Hans",
-                    "subtitle_url": "//example.com/subtitle.json",
+                    "subtitle_url": "//aisubtitle.hdslb.com/subtitle.json",
                 }
             ]
         }
@@ -48,24 +48,12 @@ LOGIN_HIDDEN_META = {
 
 
 class BilibiliSubtitleExtractorTests(unittest.TestCase):
-    def test_public_api_requests_include_an_anonymous_device_cookie(self):
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self):
-                return json.dumps({"code": 0, "data": {}}).encode()
-
-        with patch.object(summarizer.urllib.request, "urlopen", return_value=Response()) as urlopen:
+    def test_public_api_requests_do_not_use_saved_account_cookie_by_default(self):
+        import httpx
+        response = httpx.Response(200, json={"code": 0, "data": {}}, request=httpx.Request("GET", "https://api.bilibili.com/x/player/v2"))
+        with patch("core.bilibili_guard.httpx.get", return_value=response) as get:
             summarizer._fetch_bilibili_json("https://api.bilibili.com/x/player/v2", retries=1)
-
-        request = urlopen.call_args.args[0]
-        cookie = request.get_header("Cookie")
-        self.assertIn("buvid3=", cookie)
-        self.assertIn("b_nut=", cookie)
+        self.assertNotIn("Cookie", get.call_args.kwargs["headers"])
 
     def test_returns_available_subtitle_from_player_metadata(self):
         with patch.object(
@@ -87,6 +75,15 @@ class BilibiliDownloaderTests(unittest.TestCase):
         audio_url = "https://audio.example.com/best.m4s?deadline=9999999999"
 
         class FakeYoutubeDL:
+            def build_request_director(self, handlers):
+                return MagicMock()
+
+            def dl(self, *args, **kwargs):
+                raise AssertionError("Unexpected network download in offline test")
+
+            def urlopen(self, request):
+                raise AssertionError("Unexpected network request in offline test")
+
             def __enter__(self):
                 return self
 
@@ -141,6 +138,11 @@ class BilibiliDownloaderTests(unittest.TestCase):
         from api import routes
 
         class Response:
+            status = 302
+
+            def close(self):
+                pass
+
             def getheader(self, name):
                 if name == "Location":
                     return "https://www.bilibili.com/video/BV1demo?p=20&share_source=copy_web"
@@ -160,6 +162,15 @@ class BilibiliDownloaderTests(unittest.TestCase):
         from core import downloader as downloader_module
 
         class FakeYoutubeDL:
+            def build_request_director(self, handlers):
+                return MagicMock()
+
+            def dl(self, *args, **kwargs):
+                raise AssertionError("Unexpected network download in offline test")
+
+            def urlopen(self, request):
+                raise AssertionError("Unexpected network request in offline test")
+
             def __enter__(self):
                 return self
 
@@ -196,6 +207,15 @@ class BilibiliDownloaderTests(unittest.TestCase):
         from core import downloader as downloader_module
 
         class FakeYoutubeDL:
+            def build_request_director(self, handlers):
+                return MagicMock()
+
+            def dl(self, *args, **kwargs):
+                raise AssertionError("Unexpected network download in offline test")
+
+            def urlopen(self, request):
+                raise AssertionError("Unexpected network request in offline test")
+
             def __enter__(self):
                 return self
 
