@@ -1,6 +1,8 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { useBloggers } from '../composables/useBloggers.js'
+import { creatorSpaceUrl, syncStateLabel } from '../utils/creatorProfile.js'
+import '../creator-buttons.css'
 import { thumbnailSrc } from '../utils/thumbnail.js'
 import BaseDialog from './BaseDialog.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -71,18 +73,7 @@ function displayNameOf(item) {
   return item.alias || item.name || `UP ${item.uid}`
 }
 
-function syncLabel(item) {
-  switch (item.sync_status) {
-    case 'running': return item.sync_mode === 'deep' ? '深度同步中…' : '增量同步中…'
-    case 'queued': return '同步排队中'
-    case 'complete': return item.last_synced_at ? `已同步 · ${item.catalog_count ?? 0} 个投稿` : '已同步'
-    case 'paused': return item.sync_error_code === 'login' ? '需配置 B 站 Cookie' : '同步已暂停'
-    case 'failed': return '同步失败'
-    case 'interrupted': return '同步被中断'
-    case 'cancelled': return '同步已取消'
-    default: return '尚未同步'
-  }
-}
+const syncLabel = syncStateLabel
 
 function syncProgressText(item) {
   const page = item.sync_page || 0
@@ -184,7 +175,7 @@ async function handleSync(item, mode = 'incremental') {
   try {
     const result = await syncBlogger(item.id, { mode })
     await listBloggers()
-    showToast(result.already_running ? '同步已在进行中' : (mode === 'deep' ? '已开始深度同步' : '已开始增量同步'), 'success')
+    showToast(result.already_running ? '同步已在进行中' : (result.sync?.mode === 'deep' ? '已开始同步全部投稿，将补齐历史视频' : '已开始检查最新投稿'), 'success')
     ensureSyncPolling()
   } catch (err) {
     showToast(error.value || err.message)
@@ -193,7 +184,7 @@ async function handleSync(item, mode = 'incremental') {
 
 async function handleDeepSync(item) {
   if (!await requestConfirmation(
-    '将重新扫描该博主的全部投稿页，耗时较长；用于补漏或刷新旧投稿信息。日常更新用「同步」即可。',
+    '将扫描全部投稿并补齐历史视频；如上次未完成，会从已保存的进度继续。B站限制请求时会等待后重试。',
     '深度同步',
   )) return
   await handleSync(item, 'deep')
@@ -273,10 +264,10 @@ onMounted(async () => {
 
       <div v-if="bloggers.length" class="list-toolbar">
         <div class="search-wrap">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="search-icon">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="search-icon" aria-hidden="true">
             <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z"/>
           </svg>
-          <input v-model="searchQuery" class="search-input" type="search" placeholder="搜索备注名 / 昵称 / UID…" />
+          <input v-model="searchQuery" class="search-input" type="search" aria-label="搜索博主" placeholder="搜索备注名 / 昵称 / UID…" />
         </div>
         <select v-model="sortBy" class="sort-select" aria-label="排序">
           <option value="recent">最近添加</option>
@@ -351,13 +342,14 @@ onMounted(async () => {
             <p v-if="isSyncActive(item)" class="sync-progress">{{ syncProgressText(item) }}</p>
           </div>
           <div class="blogger-actions" @click.stop>
+            <a v-if="creatorSpaceUrl(item)" :href="creatorSpaceUrl(item)" target="_blank" rel="noopener noreferrer" class="btn-ghost btn-ghost--sm">B站空间 <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M15 3h6v6m0-6L10 14M9 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-4"/></svg></a>
             <template v-if="isSyncActive(item)">
               <button class="btn-ghost btn-ghost--sm" :disabled="pending.cancelSync === item.id" @click="handleCancelSync(item)">取消同步</button>
             </template>
             <template v-else>
-              <button class="btn-ghost btn-ghost--sm" :disabled="pending.sync === item.id" title="增量同步（日常更新，速度快）"
+              <button class="btn-ghost btn-ghost--sm" :disabled="pending.sync === item.id" title="更新最新投稿；历史未同步完整时自动补齐"
                       @click="handleSync(item, 'incremental')">同步</button>
-              <button class="btn-ghost btn-ghost--sm" :disabled="pending.sync === item.id" title="全量重扫所有投稿页"
+              <button class="btn-ghost btn-ghost--sm" :disabled="pending.sync === item.id" title="扫描全部投稿，中断后继续补齐"
                       @click="handleDeepSync(item)">深度同步</button>
             </template>
             <button class="btn-ghost btn-ghost--sm btn-ghost--danger" :disabled="pending.remove === item.id" title="退订"
@@ -493,52 +485,23 @@ onMounted(async () => {
 .error-banner .banner-icon { width: 18px; height: 18px; flex-shrink: 0; color: #f87171; }
 .error-banner .btn-ghost { margin-left: auto; }
 
-.list-toolbar { display: flex; gap: 10px; align-items: center; }
-.search-wrap { position: relative; flex: 1; }
+.list-toolbar { display: flex; gap: 12px; align-items: center; }
+.search-wrap { position: relative; flex: 1; min-width: 0; }
 .search-icon {
-  position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+  position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
   width: 16px; height: 16px; color: var(--text-muted); pointer-events: none;
 }
 .search-input {
-  width: 100%; padding: 0.6rem 0.9rem 0.6rem 2.3rem;
-  border: 1px solid var(--border); border-radius: 12px;
-  background: var(--bg-card); color: var(--text-primary); font-size: 0.85rem;
+  box-sizing: border-box; width: 100%; min-height: 44px; padding: 10px 14px 10px 40px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: .85rem;
 }
-.search-input:focus { outline: none; border-color: var(--accent-blue); }
 .search-input::placeholder { color: var(--text-muted); }
 .sort-select {
-  padding: 0.6rem 0.75rem; border: 1px solid var(--border); border-radius: 12px;
-  background: var(--bg-card); color: var(--text-secondary); font-size: 0.82rem;
+  min-height: 44px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-secondary); color: var(--text-secondary); font: inherit; font-size: .85rem;
 }
-
-.btn-primary {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 0.65rem 1.15rem; border: none; border-radius: 12px;
-  background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
-  color: #fff; font-weight: 600; font-size: 0.875rem; cursor: pointer;
-  transition: opacity 0.15s ease, transform 0.15s ease;
-}
-.btn-primary:hover:not(:disabled) { opacity: 0.92; transform: translateY(-1px); }
-.btn-primary:disabled { opacity: 0.5; cursor: default; }
-.btn-primary--danger { background: linear-gradient(135deg, #ef4444, #f97316); }
-.btn-icon { width: 15px; height: 15px; }
-
-.btn-ghost {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 0.45rem 0.85rem; border: 1px solid var(--border); border-radius: 10px;
-  background: var(--bg-card); color: var(--text-secondary);
-  font-size: 0.8rem; cursor: pointer;
-  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
-}
-.btn-ghost:hover:not(:disabled) { border-color: var(--border-hover); color: var(--text-primary); background: var(--bg-card-hover); }
-.btn-ghost:disabled { opacity: 0.5; cursor: default; }
-.btn-ghost--danger:hover:not(:disabled) { color: #f87171; border-color: rgba(248, 113, 113, 0.4); }
-.btn-ghost--sm { padding: 0.35rem 0.7rem; font-size: 0.75rem; }
-.btn-icon-only {
-  border: none; background: none; color: var(--text-muted); cursor: pointer;
-  padding: 2px; display: grid; place-items: center; border-radius: 6px;
-}
-.btn-icon-only:hover { color: var(--accent-cyan); background: var(--bg-card-hover); }
+:is(.search-input, .sort-select):focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
 
 .bloggers-empty {
   text-align: center; padding: 4rem 1rem;
@@ -555,9 +518,9 @@ onMounted(async () => {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.blogger-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 1rem; }
+.blogger-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr)); gap: 1rem; }
 .blogger-card {
-  display: flex; gap: 12px; align-items: flex-start; padding: 1.15rem;
+  display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 12px; align-items: start; padding: 1.15rem;
   background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px;
   cursor: pointer; backdrop-filter: blur(12px);
   transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
@@ -600,7 +563,7 @@ onMounted(async () => {
 .tone-busy { color: var(--accent-cyan); } .tone-busy .sync-dot { background: var(--accent-cyan); animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: 0.35; } }
 .sync-progress { margin: 0.35rem 0 0; font-size: 0.74rem; color: var(--text-muted); }
-.blogger-actions { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
+.blogger-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; padding-top: 12px; border-top: 1px solid var(--border); }
 
 .dialog-title { margin: 0 0 0.75rem; font-size: 1.15rem; color: var(--text-primary); }
 .add-form { display: flex; flex-direction: column; gap: 10px; min-width: 340px; }
@@ -662,4 +625,20 @@ onMounted(async () => {
 .toast-leave-active { animation: toast-out 0.2s ease-in; }
 @keyframes toast-in { from { opacity: 0; transform: translateX(-50%) translateY(1rem); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
 @keyframes toast-out { from { opacity: 1; transform: translateX(-50%) translateY(0); } to { opacity: 0; transform: translateX(-50%) translateY(1rem); } }
+
+@media (max-width: 600px) {
+  .bloggers-page { padding: 5rem 1rem 2rem; }
+  .bloggers-header { align-items: flex-start; flex-direction: column; }
+  .bloggers-header .btn-primary { align-self: flex-end; }
+  .bloggers-title { font-size: 1.5rem; }
+  .list-toolbar { flex-wrap: wrap; }
+  .search-wrap { flex-basis: 100%; }
+  .sort-select { margin-left: auto; }
+  .add-form, .delete-preview { min-width: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .blogger-card { transition: none; }
+  .blogger-card:hover { transform: none; }
+  .tone-busy .sync-dot { animation: none; }
+}
 </style>

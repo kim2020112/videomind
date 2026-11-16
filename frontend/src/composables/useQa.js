@@ -32,7 +32,7 @@ export function useQa() {
       })
 
       if (!response.ok) {
-        const err = await response.json()
+        const err = await response.json().catch(() => ({}))
         throw new Error(err.detail || '问答对生成失败')
       }
 

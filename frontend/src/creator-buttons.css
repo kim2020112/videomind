@@ -1,0 +1,42 @@
+/* Shared controls for creator lists, catalogs and workspace navigation. */
+:is(.bloggers-page, .blogger-detail) :is(.btn-primary, .btn-ghost),
+.workspace-back-link.workspace-back-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: .85rem;
+  font-weight: 500;
+  line-height: 1.4;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
+}
+:is(.bloggers-page, .blogger-detail) .btn-ghost--sm { padding-inline: 12px; font-size: .8rem; }
+:is(.bloggers-page, .blogger-detail) .btn-back { flex-shrink: 0; }
+:is(.bloggers-page, .blogger-detail) :is(.btn-primary, .btn-ghost):hover:not(:disabled),
+.workspace-back-link.workspace-back-link:hover { background: var(--bg-card-hover); border-color: var(--border-hover); }
+:is(.bloggers-page, .blogger-detail) .btn-primary { background: var(--accent-blue); border-color: transparent; color: #fff; font-weight: 600; }
+:is(.bloggers-page, .blogger-detail) .btn-primary:hover:not(:disabled) { background: var(--accent-blue); opacity: .9; }
+:is(.bloggers-page, .blogger-detail) .btn-primary--danger { background: #dc2626; }
+:is(.bloggers-page, .blogger-detail) .btn-ghost--danger:hover:not(:disabled) { color: #f87171; border-color: #f87171; }
+:is(.bloggers-page, .blogger-detail) button:disabled { opacity: .5; cursor: default; }
+:is(.bloggers-page, .blogger-detail) .btn-icon-only {
+  display: inline-grid; place-items: center; flex-shrink: 0;
+  width: 36px; min-height: 36px; padding: 4px;
+  border: 1px solid transparent; border-radius: 10px;
+  background: transparent; color: var(--text-secondary); cursor: pointer;
+}
+:is(.bloggers-page, .blogger-detail) .btn-icon-only:hover { background: var(--bg-card-hover); color: var(--text-primary); }
+:is(.bloggers-page, .blogger-detail) :is(button, a):focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 3px; }
+:is(.bloggers-page, .blogger-detail) .btn-icon { width: 16px; height: 16px; flex-shrink: 0; }
+@media (pointer: coarse) {
+  :is(.bloggers-page, .blogger-detail) .btn-icon-only { width: 44px; min-height: 44px; }
+}

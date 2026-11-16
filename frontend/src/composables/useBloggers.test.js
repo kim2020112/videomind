@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('./useAuth.js', () => ({
   useAuth: () => ({
@@ -7,6 +7,7 @@ vi.mock('./useAuth.js', () => ({
 }))
 
 describe('useBloggers', () => {
+  afterEach(() => vi.useRealTimers())
   beforeEach(() => {
     vi.resetModules()
     vi.unstubAllGlobals()
@@ -154,6 +155,40 @@ describe('useBloggers', () => {
     finishOld(okJson({ total: 40, items: [{ id: 1 }] }))
     expect(await old).toBeNull()
     expect(api.videos.value).toEqual([{ id: 21 }])
+  })
+
+  it('does not overlap batch requests and discards a stopped batch response', async () => {
+    vi.useFakeTimers()
+    let finish
+    const fetchMock = vi.fn(() => new Promise(resolve => { finish = resolve }))
+    vi.stubGlobal('fetch', fetchMock)
+    const api = await loadComposable()
+    const changed = vi.fn()
+    api.startBatchPolling('old', changed)
+    await vi.advanceTimersByTimeAsync(12000)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    api.stopBatchPolling()
+    finish(okJson({ id: 'old', status: 'done' }))
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(changed).not.toHaveBeenCalled()
+    expect(api.currentBatch.value).toBeNull()
+    expect(api.batchLoading.value).toBe(false)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps tracking a paused batch so a resumed task remains observable', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(okJson({ id: 'b1', status: 'paused' }))
+      .mockResolvedValueOnce(okJson({ id: 'b1', status: 'running' }))
+      .mockResolvedValueOnce(okJson({ id: 'b1', status: 'done' }))
+    vi.stubGlobal('fetch', fetchMock)
+    const api = await loadComposable()
+    api.startBatchPolling('b1')
+    await vi.advanceTimersByTimeAsync(15000)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(api.currentBatch.value.status).toBe('done')
+    api.stopBatchPolling()
   })
 
 })

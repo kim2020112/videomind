@@ -1,5 +1,6 @@
 import { ref, onScopeDispose } from 'vue'
 import { useAuth } from './useAuth.js'
+import { readJsonResponse } from '../utils/httpResponse.js'
 
 const terminal = new Set(['done', 'partial', 'failed', 'cancelled'])
 const active = new Set(['queued', 'downloading', 'transcribing', 'generating'])
@@ -43,16 +44,24 @@ export function useLearning() {
   let notesDraft = ''
 
   async function request(path, body, signal, method) {
-    const response = await fetch(`/api${path}`, {
-      method: method || (body ? 'POST' : 'GET'), headers: { ...getAuthHeaders(), ...(body ? { 'Content-Type': 'application/json' } : {}) },
-      ...(body ? { body: JSON.stringify(body) } : {}), signal,
-    })
-    if (!response.ok) {
-      let error
-      try { error = await response.json() } catch { /* generic message below */ }
-      throw new Error(typeof error?.detail === 'string' ? error.detail : `请求失败（${response.status}）`)
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) abort()
+    const timer = setTimeout(abort, 30000)
+    try {
+      const response = await fetch(`/api${path}`, {
+        method: method || (body ? 'POST' : 'GET'), headers: { ...getAuthHeaders(), ...(body ? { 'Content-Type': 'application/json' } : {}) },
+        ...(body ? { body: JSON.stringify(body) } : {}), signal: controller.signal,
+      })
+      return await readJsonResponse(response)
+    } catch (error) {
+      if (error.name === 'AbortError') throw new Error('请求超时或已取消，已有资料仍然保留')
+      throw error
+    } finally {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
     }
-    return response.json()
   }
 
   function setTask(task) {
@@ -65,9 +74,13 @@ export function useLearning() {
         moduleStates.value[target] = { ...moduleStates.value[target], ...state }
       }
     }
+    if (!task?.error) {
+      summarizeError.value = ''
+      if (subtitleText.value) subtitleError.value = ''
+    }
     if (task?.error) {
-      if (!task?.payload?.targets?.length) subtitleError.value = task.error
-      else summarizeError.value = task.error
+      if (task?.payload?.targets?.length) summarizeError.value = task.error
+      else if (!subtitleText.value) subtitleError.value = task.error
     }
   }
 
@@ -78,6 +91,7 @@ export function useLearning() {
     const sub = snapshot.subtitle
     subtitleCleared.value = Boolean(snapshot.subtitle_cleared)
     subtitleText.value = sub?.text || ''
+    subtitleError.value = snapshot.subtitle_warning || ''
     subtitleInfo.value = sub
     subtitleSource.value = sub?.source || ''
     summaryResult.value = snapshot.artifacts.result || null
@@ -139,12 +153,13 @@ export function useLearning() {
     const controller = new AbortController()
     subscription = controller
     let completed = false
+    let failures = 0
     while (!completed && ticket === epoch && !controller.signal.aborted) {
       try {
         const response = await fetch(`/api/tasks/${task.task_id}/events?after=${lastEventId}`, {
           headers: getAuthHeaders(), signal: controller.signal,
         })
-        if (!response.ok) throw new Error('任务进度连接暂不可用')
+        if (!response.ok) await readJsonResponse(response)
         const reader = response.body.getReader()
         let buffer = ''
         const decoder = new TextDecoder()
@@ -152,7 +167,7 @@ export function useLearning() {
           while (true) {
             const { done, value } = await reader.read()
             if (done) break
-            if (ticket !== epoch) return
+            if (ticket !== epoch || controller.signal.aborted || subscription !== controller) return
             buffer += decoder.decode(value, { stream: true })
             const frames = buffer.split('\n\n')
             buffer = frames.pop() || ''
@@ -160,20 +175,22 @@ export function useLearning() {
               const lines = frame.split('\n')
               const data = lines.find(line => line.startsWith('data: '))
               if (!data) continue
+              if (ticket !== epoch || controller.signal.aborted || subscription !== controller) return
               const event = JSON.parse(data.slice(6))
+              failures = 0
               const id = Number(lines.find(line => line.startsWith('id: '))?.slice(4) || 0)
               if (id && id <= lastEventId) continue
               if (id) lastEventId = id
               applyEvent(event)
               if (event.type === 'subtitle_ready') await readSnapshot(ticket)
-              if (event.type === 'task_state') completed = true
+              if (event.type === 'task_state' && (terminal.has(event.data?.status) || event.data?.status === 'awaiting_confirmation')) completed = true
             }
           }
         } finally {
           await reader.cancel().catch(() => {})
           reader.releaseLock?.()
         }
-        if (ticket !== epoch || controller.signal.aborted) return
+        if (ticket !== epoch || controller.signal.aborted || subscription !== controller) return
         const snapshot = await readSnapshot(ticket)
         completed = !snapshot?.task || terminal.has(snapshot.task.status) || snapshot.task.status === 'awaiting_confirmation'
         if (completed) {
@@ -182,12 +199,19 @@ export function useLearning() {
           refreshUsage()
         }
       } catch (error) {
-        if (controller.signal.aborted || ticket !== epoch) return
+        if (controller.signal.aborted || ticket !== epoch || subscription !== controller) return
+        if ([401, 403, 404].includes(error.status)) {
+          generationStage.value = ''
+          summarizeError.value = error.message
+          return
+        }
+        failures++
         generationStage.value = '连接中断，正在恢复后台进度'
       }
       if (!completed) await new Promise(resolve => {
-        const timer = setTimeout(resolve, 2000)
-        controller.signal.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
+        const abort = () => { clearTimeout(timer); resolve() }
+        const timer = setTimeout(() => { controller.signal.removeEventListener('abort', abort); resolve() }, Math.min(30000, 2000 * 2 ** Math.min(failures, 4)))
+        controller.signal.addEventListener('abort', abort, { once: true })
       })
     }
   }

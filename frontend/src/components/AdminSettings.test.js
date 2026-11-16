@@ -97,3 +97,15 @@ describe('AdminSettings', () => {
     wrapper.unmount()
   })
 })
+
+it('protects an unsaved platform cookie when closing settings', async () => {
+  const wrapper = await openSettings(response({ connections: [], active: {}, platforms: {} }))
+  document.querySelector('#bilibili-cookie').value = 'SESSDATA=draft'
+  document.querySelector('#bilibili-cookie').dispatchEvent(new Event('input', { bubbles: true }))
+  await nextTick()
+  document.querySelector('[aria-label="关闭通用配置"]').click()
+  await nextTick()
+  expect(document.body.textContent).toContain('放弃未保存的修改？')
+  expect(wrapper.emitted('close')).toBeUndefined()
+  wrapper.unmount()
+})

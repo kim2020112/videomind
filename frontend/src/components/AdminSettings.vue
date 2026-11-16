@@ -5,6 +5,7 @@ import BaseDialog from './BaseDialog.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import ConnectionForm from './ai-config/ConnectionForm.vue'
 import ConnectionList from './ai-config/ConnectionList.vue'
+import PlatformConfig from './PlatformConfig.vue'
 
 const props = defineProps({ visible: Boolean })
 const emit = defineEmits(['close'])
@@ -15,6 +16,8 @@ const deleteError = shallowRef('')
 const discoveryResult = shallowRef(null)
 const discoveryError = shallowRef('')
 const formDirty = shallowRef(false)
+const platformDirty = shallowRef(false)
+const platformBusy = shallowRef(false)
 const discardIntent = shallowRef('')
 
 const activeConnection = computed(() => api.connections.value.find(item => item.id === api.active.connection_id))
@@ -51,8 +54,8 @@ function finishEditing() {
 }
 
 function requestClose(intent = 'modal') {
-  if (api.pending.save) return
-  if (editing.value !== undefined && formDirty.value) {
+  if (api.pending.save || platformBusy.value) return
+  if ((editing.value !== undefined && formDirty.value) || (intent === 'modal' && platformDirty.value)) {
     discardIntent.value = intent
     return
   }
@@ -125,7 +128,7 @@ function handleNotificationFocusOut(event) {
   <ConfirmDialog
     :visible="Boolean(discardIntent)"
     title="放弃未保存的修改？"
-    message="当前连接配置尚未保存，离开后这些修改会丢失。"
+    message="当前配置尚未保存，离开后这些修改会丢失。"
     confirm-label="放弃修改"
     danger
     @confirm="confirmDiscard"
@@ -135,14 +138,14 @@ function handleNotificationFocusOut(event) {
   <BaseDialog
     :visible="visible"
     title-id="ai-settings-title"
-    close-label="关闭 AI 连接配置"
+    close-label="关闭通用配置"
     size="wide"
     panel-class="ai-settings-panel"
     :close-on-overlay="false"
     @close="requestClose('modal')"
   >
     <header class="settings-header">
-      <div><h2 id="ai-settings-title">AI 连接</h2><p>管理中转站、模型目录和业务主力模型</p></div>
+      <div><h2 id="ai-settings-title">通用配置</h2><p>管理 AI 模型与视频平台登录态</p></div>
       <button v-if="editing === undefined" type="button" class="add-button" :disabled="api.pending.load" @click="beginEdit(null)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" d="M12 5v14M5 12h14"/></svg>添加连接</button>
     </header>
 
@@ -194,6 +197,7 @@ function handleNotificationFocusOut(event) {
       @switch="api.switchModel"
       @clear-model-feedback="api.clearModelFeedback"
     />
+    <PlatformConfig v-show="editing === undefined" @dirty-change="platformDirty = $event" @busy-change="platformBusy = $event" />
   </BaseDialog>
 </template>
 

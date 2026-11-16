@@ -66,6 +66,8 @@ const {
   downloadHistory,
   subtitles,
   parseVideo,
+  loadDownloadFormats,
+  isLoadingFormats,
   startDownload,
   startDownloadAll,
   startDownloadSelected,
@@ -311,6 +313,7 @@ watch([isLoggedIn, guestSig], ([loggedIn, signature]) => {
 })
 
 watch(activeTab, (tab) => {
+  if (tab === 'download') ensureDownloadFormats()
   if (!isWorkspaceRoute.value || route.query.tab === tab) return
   syncWorkspaceRoute({ replace: true })
 })
@@ -478,13 +481,16 @@ function handleLogout() {
   router.push({ name: 'home' })
 }
 
+let parseFlow = 0
 async function handleParse({ syncRoute = true } = {}) {
+  const flow = ++parseFlow
   if (!url.value.trim()) return
   if (!canStart.value) {
     requestLogin({ continueParse: true })
     return
   }
   if (syncRoute) await syncWorkspaceRoute()
+  if (flow !== parseFlow) return
   error.value = ''
   loading.value = true
   selectedPartIndices.value = []
@@ -497,20 +503,31 @@ async function handleParse({ syncRoute = true } = {}) {
   showSubtitles.value = false
   showFullDescription.value = false
   try {
-    await parseVideo(url.value.trim())
+    if (await parseVideo(url.value.trim()) === false) return
     // 从 URL 中检测分P编号，设置 AI 总结的当前P
     const pMatch = url.value.match(/[?&]p=(\d+)/)
     if (pMatch) {
       currentSummarizePart.value = parseInt(pMatch[1])
     }
+    if (flow !== parseFlow) return
     await syncWorkspaceRoute({ replace: true })
+    if (flow !== parseFlow) return
     await loadWorkspaceAndPrepareSubtitle()
   } catch (e) {
-    error.value = e.message || '解析失败，请检查链接是否有效'
+    if (flow === parseFlow) error.value = e.message || '解析失败，请检查链接是否有效'
   } finally {
-    loading.value = false
-    await scrollToResult()
+    if (flow === parseFlow) {
+      loading.value = false
+      await scrollToResult()
+    }
   }
+}
+
+async function ensureDownloadFormats() {
+  if (!videoInfo.value || formats.value.length || isLoadingFormats.value) return
+  const target = videoInfo.value.webpage_url
+  try { await loadDownloadFormats(target) }
+  catch (e) { if (videoInfo.value?.webpage_url === target) error.value = e.message }
 }
 
 async function loadWorkspaceAndPrepareSubtitle() {
@@ -524,6 +541,7 @@ async function loadWorkspaceAndPrepareSubtitle() {
 }
 
 async function handlePartSelect(part) {
+  const flow = ++parseFlow
   const bvMatch = (videoInfo.value?.webpage_url || '').match(/(BV\w+)/)
   if (!bvMatch) return
   const partUrl = `https://www.bilibili.com/video/${bvMatch[1]}?p=${part.index}`
@@ -533,15 +551,16 @@ async function handlePartSelect(part) {
   selectedPartIndices.value = []
   reset()
   try {
-    await parseVideo(partUrl)
+    if (await parseVideo(partUrl) === false) return
+    if (flow !== parseFlow) return
     currentSummarizePart.value = part.index
     resetChat()
     resetQa()
     await loadWorkspaceAndPrepareSubtitle()
   } catch (e) {
-    error.value = e.message || '解析失败'
+    if (flow === parseFlow) error.value = e.message || '解析失败'
   } finally {
-    loading.value = false
+    if (flow === parseFlow) loading.value = false
   }
 }
 
@@ -791,7 +810,8 @@ function handleUrlChange(value) {
           </div>
 
           <!-- Tab: 下载区 -->
-          <div v-show="activeTab === 'download'">
+          <div v-show="activeTab === 'download'" :aria-busy="isLoadingFormats">
+            <p v-if="isLoadingFormats" role="status">正在获取下载格式，请稍候…</p>
             <DownloadTools
               :videoInfo="videoInfo"
               :formats="displayFormats"

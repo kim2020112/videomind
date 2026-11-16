@@ -2,6 +2,8 @@
 import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useBloggers } from '../composables/useBloggers.js'
+import { creatorSpaceUrl, syncStateLabel } from '../utils/creatorProfile.js'
+import '../creator-buttons.css'
 import { thumbnailSrc } from '../utils/thumbnail.js'
 import { useAuth } from '../composables/useAuth.js'
 import { bloggerContextKey, saveBloggerContext, readBloggerContext, cacheBloggerPage, readBloggerPage } from '../utils/bloggerNavigation.js'
@@ -125,20 +127,7 @@ function toneFor(status) {
   return 'tone-busy'
 }
 
-function syncLabel() {
-  const item = blogger.value
-  if (!item) return ''
-  switch (item.sync_status) {
-    case 'running': return item.sync_mode === 'deep' ? '深度同步中…' : '增量同步中…'
-    case 'queued': return '同步排队中'
-    case 'complete': return item.last_synced_at ? `目录已同步 · ${item.catalog_count ?? 0} 个投稿` : '目录已同步'
-    case 'paused': return item.sync_error_code === 'login' ? '需配置 B 站 Cookie（backend/.env 的 BILIBILI_COOKIE）' : '同步已暂停'
-    case 'failed': return item.sync_error ? `同步失败 · ${item.sync_error}` : '同步失败'
-    case 'interrupted': return '同步被中断，可点「同步」续跑'
-    case 'cancelled': return '同步已取消'
-    default: return '尚未同步'
-  }
-}
+function syncLabel() { return syncStateLabel(blogger.value) }
 
 function syncProgressText() {
   const item = blogger.value
@@ -272,7 +261,7 @@ async function handleSync(mode = 'incremental') {
   try {
     const result = await syncBlogger(Number(subId.value), { mode })
     await listBloggers()
-    showToast(result.already_running ? '同步已在进行中' : (mode === 'deep' ? '已开始深度同步' : '已开始增量同步'), 'success')
+    showToast(result.already_running ? '同步已在进行中' : (result.sync?.mode === 'deep' ? '已开始同步全部投稿，将补齐历史视频' : '已开始检查最新投稿'), 'success')
     ensureSyncPolling()
   } catch (err) {
     showToast(error.value || err.message)
@@ -281,7 +270,7 @@ async function handleSync(mode = 'incremental') {
 
 async function handleDeepSync() {
   if (!await requestConfirmation(
-    '将重新扫描该博主的全部投稿页，耗时较长；用于补漏或刷新旧投稿信息。日常更新用「同步」即可。',
+    '将扫描全部投稿并补齐历史视频；如上次未完成，会从已保存的进度继续。B站限制请求时会等待后重试。',
     '深度同步',
   )) return
   await handleSync('deep')
@@ -298,7 +287,11 @@ async function handleCancelSync() {
 }
 
 function ensureSyncPolling() {
-  startSyncPolling(isSyncActive, listBloggers)
+  startSyncPolling(isSyncActive, async () => {
+    const wasActive = isSyncActive()
+    await listBloggers()
+    if (wasActive && !isSyncActive()) await refreshVideos({ quiet: true })
+  })
 }
 
 // ── 多选/批量 ──
@@ -370,7 +363,7 @@ async function handleBatchAction(action) {
 
 async function openBatch(batch) {
   await getBatch(batch.id)
-  startBatchPolling(batch.id, () => getBatch(batch.id))
+  startBatchPolling(batch.id)
 }
 
 async function openWorkspace(item, videoId = item.id) {
@@ -496,7 +489,7 @@ onMounted(loadAll)
   <div class="blogger-detail">
     <div class="detail-container">
       <header class="detail-header">
-        <button class="btn-back" @click="backToList">← 返回博主列表</button>
+        <button class="btn-ghost btn-back" @click="backToList"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m12 5-7 7 7 7M5 12h14"/></svg>返回博主列表</button>
         <div class="detail-title-block">
           <div class="detail-title-row">
             <template v-if="editingAlias">
@@ -524,6 +517,7 @@ onMounted(loadAll)
             {{ blogger.follower_count || 0 }} 粉丝 · {{ videosMatchedTotal }} 个投稿 · 有字幕 {{ videosSubtitleTotal }} · 已整理 {{ videosLearnedTotal }}
           </p>
         </div>
+        <a v-if="creatorSpaceUrl(blogger)" :href="creatorSpaceUrl(blogger)" target="_blank" rel="noopener noreferrer" class="btn-ghost creator-space">B站空间 <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M15 3h6v6m0-6L10 14M9 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-4"/></svg></a>
       </header>
 
       <section class="sync-bar" :class="`sync-bar--${blogger?.sync_status || 'none'}`">
@@ -735,11 +729,8 @@ onMounted(loadAll)
 .detail-container { max-width: 1100px; margin: 0 auto; display: flex; flex-direction: column; gap: 1.15rem; }
 
 .detail-header { display: flex; align-items: center; gap: 16px; }
-.btn-back {
-  border: none; background: none; color: var(--accent-cyan);
-  cursor: pointer; font-size: 0.88rem; padding: 0;
-}
-.btn-back:hover { text-decoration: underline; }
+.detail-title-block { flex: 1; min-width: 0; }
+.creator-space { flex-shrink: 0; }
 .detail-title-row { display: flex; align-items: center; gap: 8px; }
 .detail-title {
   font-size: 1.5rem; font-weight: 700; margin: 0;
@@ -754,13 +745,6 @@ onMounted(loadAll)
   background: rgba(255, 255, 255, 0.06); color: var(--text-primary);
 }
 .alias-input:focus { outline: none; }
-.btn-icon-only {
-  border: none; background: none; color: var(--text-muted); cursor: pointer;
-  padding: 2px; display: grid; place-items: center; border-radius: 6px;
-}
-.btn-icon-only:hover { color: var(--accent-cyan); background: var(--bg-card-hover); }
-.btn-icon { width: 15px; height: 15px; }
-
 .sync-bar {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 0.75rem 1.15rem; border-radius: 14px;
@@ -768,7 +752,7 @@ onMounted(loadAll)
 }
 .sync-bar--paused, .sync-bar--failed { border-color: rgba(248, 113, 113, 0.35); background: rgba(248, 113, 113, 0.08); }
 .sync-bar--running, .sync-bar--queued { border-color: rgba(6, 182, 212, 0.35); background: rgba(6, 182, 212, 0.08); }
-.sync-bar-main { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 200px; font-size: 0.84rem; color: var(--text-secondary); }
+.sync-bar-main { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; flex: 1; min-width: 200px; font-size: 0.84rem; color: var(--text-secondary); }
 .sync-bar-label { color: var(--text-primary); }
 .sync-bar-progress { color: var(--text-muted); font-size: 0.78rem; }
 .sync-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); flex-shrink: 0; }
@@ -804,28 +788,6 @@ onMounted(loadAll)
   padding: 0.6rem 0.75rem; border: 1px solid var(--border); border-radius: 12px;
   background: var(--bg-card); color: var(--text-secondary); font-size: 0.82rem;
 }
-
-.btn-primary {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 0.6rem 1.1rem; border: none; border-radius: 12px;
-  background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
-  color: #fff; font-weight: 600; font-size: 0.85rem; cursor: pointer;
-  transition: opacity 0.15s ease, transform 0.15s ease;
-}
-.btn-primary:hover:not(:disabled) { opacity: 0.92; transform: translateY(-1px); }
-.btn-primary:disabled { opacity: 0.5; cursor: default; }
-
-.btn-ghost {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 0.5rem 0.85rem; border: 1px solid var(--border); border-radius: 10px;
-  background: var(--bg-card); color: var(--text-secondary);
-  font-size: 0.8rem; cursor: pointer;
-  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
-}
-.btn-ghost:hover:not(:disabled) { border-color: var(--border-hover); color: var(--text-primary); background: var(--bg-card-hover); }
-.btn-ghost:disabled { opacity: 0.5; cursor: default; }
-.btn-ghost--danger:hover:not(:disabled) { color: #f87171; border-color: rgba(248, 113, 113, 0.4); }
-.btn-ghost--sm { padding: 0.35rem 0.7rem; font-size: 0.75rem; }
 
 .detail-empty {
   text-align: center; padding: 4rem 1rem;

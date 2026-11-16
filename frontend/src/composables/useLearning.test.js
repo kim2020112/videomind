@@ -81,3 +81,32 @@ describe('durable learning workspace', () => {
   })
 
 })
+
+it('rejects frames from an old subscription after switching videos', async () => {
+  let oldStream
+  const old = { ...snapshot(), task: { task_id: 'old', status: 'generating', payload: { targets: ['summary'] } } }
+  vi.stubGlobal('fetch', vi.fn(url => {
+    if (url.includes('/events?')) return Promise.resolve(new Response(new ReadableStream({ start(controller) { oldStream = controller } })))
+    if (url.endsWith('/visit')) return Promise.resolve(Response.json({ recorded: true }))
+    return Promise.resolve(Response.json(url.includes('old') ? old : snapshot('新视频摘要')))
+  }))
+  const state = setup()
+  await state.loadWorkspace('https://example.com/old')
+  await state.loadWorkspace('https://example.com/new')
+  oldStream.enqueue(new TextEncoder().encode('id: 1\ndata: {"type":"artifact_saved","data":{"target":"summary","content":{"summary":"旧任务污染"}}}\n\n'))
+  await new Promise(resolve => setTimeout(resolve, 10))
+  expect(state.summaryResult.value.summary).toBe('新视频摘要')
+})
+
+it('stops reconnecting when task authorization expires', async () => {
+  const saved = { ...snapshot(), task: { task_id: 'task', status: 'generating', payload: { targets: ['summary'] } } }
+  const fetch = vi.fn(url => Promise.resolve(url.includes('/events?')
+    ? Response.json({ detail: '请重新登录' }, { status: 401 })
+    : Response.json(url.endsWith('/visit') ? { recorded: true } : saved)))
+  vi.stubGlobal('fetch', fetch)
+  const state = setup()
+  await state.loadWorkspace('https://example.com/video')
+  await new Promise(resolve => setTimeout(resolve, 10))
+  expect(state.summarizeError.value).toBe('请重新登录')
+  expect(fetch.mock.calls.filter(([url]) => url.includes('/events?'))).toHaveLength(1)
+})

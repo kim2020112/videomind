@@ -11,14 +11,28 @@ export function useDownloader() {
   const progress = ref(null)
   const downloadHistory = ref([])
   const isParsing = ref(false)
+  const isLoadingFormats = ref(false)
+  let formatsPromise = null
+  let formatsController = null
   const taskId = ref(null)
   const subtitles = ref([])
   let ws = null
+  let parseEpoch = 0
+  let parseController = null
 
   async function parseVideo(url) {
+    formatsController?.abort()
+    formatsPromise = null
+    isLoadingFormats.value = false
+    const ticket = ++parseEpoch
+    parseController?.abort()
+    const controller = new AbortController()
+    parseController = controller
+    const timer = setTimeout(() => controller.abort(), 90000)
     isParsing.value = true
     videoInfo.value = null
     formats.value = []
+    subtitles.value = []
     selectedFormat.value = 'best'
     progress.value = null
 
@@ -26,15 +40,21 @@ export function useDownloader() {
       const res = await fetch(`${API_BASE}/parse`, {
         method: 'POST',
         headers: getAuthHeaders(),
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ url, metadata_only: true }),
+        signal: controller.signal,
       })
 
+      const data = await res.json().catch(() => null)
+      if (ticket !== parseEpoch) return false
       if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail || '解析失败')
+        const detail = typeof data?.detail === 'string' ? data.detail : null
+        throw new Error(detail || (res.status >= 500
+          ? '服务暂时不可用，请稍后重试；已有学习资料不会丢失'
+          : `解析失败（HTTP ${res.status}），请稍后重试`))
       }
-
-      const data = await res.json()
+      if (!data || typeof data.title !== 'string' || !data.webpage_url) {
+        throw new Error('服务返回的视频信息不完整，请稍后重试')
+      }
       // 代理缩略图 URL，绕过防盗链
       if (data.thumbnail) {
         data.thumbnail = `/api/thumbnail?url=${encodeURIComponent(data.thumbnail)}`
@@ -50,11 +70,51 @@ export function useDownloader() {
       } else if (data.formats?.length) {
         selectedFormat.value = data.formats[0].format_id
       }
+      return true
     } catch (e) {
+      if (ticket !== parseEpoch) return false
+      if (e.name === 'AbortError') throw new Error('视频解析超时，请稍后重试')
       throw e
     } finally {
-      isParsing.value = false
+      clearTimeout(timer)
+      if (ticket === parseEpoch) isParsing.value = false
     }
+  }
+
+  function loadDownloadFormats(url) {
+    if (formatsPromise) return formatsPromise
+    const ticket = parseEpoch
+    const controller = new AbortController()
+    formatsController = controller
+    isLoadingFormats.value = true
+    const timer = setTimeout(() => controller.abort(), 90000)
+    const pending = (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/parse`, {
+          method: 'POST', headers: getAuthHeaders(), signal: controller.signal,
+          body: JSON.stringify({ url, metadata_only: false }),
+        })
+        const data = await res.json().catch(() => null)
+        if (ticket !== parseEpoch || controller.signal.aborted) return false
+        if (!res.ok) throw new Error(typeof data?.detail === 'string' ? data.detail : '下载格式暂时不可用，请稍后重试')
+        if (!data || !Array.isArray(data.formats) || data.webpage_url !== videoInfo.value?.webpage_url) {
+          throw new Error('下载格式返回的视频信息不一致，请重新解析')
+        }
+        formats.value = data.formats
+        selectedFormat.value = data.formats.find(f => f.is_best)?.format_id || data.formats[0]?.format_id || 'best'
+        videoInfo.value = { ...videoInfo.value, ...data, thumbnail: videoInfo.value.thumbnail }
+        return true
+      } catch (error) {
+        if (ticket !== parseEpoch) return false
+        if (error.name === 'AbortError') throw new Error('下载格式获取超时，请稍后重试')
+        throw error
+      } finally {
+        clearTimeout(timer)
+        if (ticket === parseEpoch) { isLoadingFormats.value = false; formatsPromise = null }
+      }
+    })()
+    formatsPromise = pending
+    return pending
   }
 
   function startDownload(url) {
@@ -134,11 +194,13 @@ export function useDownloader() {
     const query = params.toString() ? `?${params}` : ''
     const wsUrl = `${protocol}//${window.location.host}/ws/download/${tid}${query}`
 
-    ws = new WebSocket(wsUrl)
+    const socket = new WebSocket(wsUrl)
+    ws = socket
 
-    ws.onopen = () => {
+    socket.onopen = () => {
+      if (ws !== socket) return
       // 发送下载指令
-      ws.send(JSON.stringify({
+      socket.send(JSON.stringify({
         url,
         format_id: selectedFormat.value,
         ...extraData,
@@ -146,7 +208,8 @@ export function useDownloader() {
       progress.value = { status: 'downloading', percent: 0 }
     }
 
-    ws.onmessage = (event) => {
+    socket.onmessage = (event) => {
+      if (ws !== socket) return
       try {
         const data = JSON.parse(event.data)
         progress.value = data
@@ -158,7 +221,7 @@ export function useDownloader() {
             status: 'completed',
             time: Date.now(),
           })
-          ws.close()
+          socket.close()
         } else if (data.status === 'failed') {
           downloadHistory.value.unshift({
             task_id: tid,
@@ -166,14 +229,15 @@ export function useDownloader() {
             status: 'failed',
             time: Date.now(),
           })
-          ws.close()
+          socket.close()
         }
       } catch (e) {
         // 消息解析失败，忽略
       }
     }
 
-    ws.onerror = () => {
+    socket.onerror = () => {
+      if (ws !== socket) return
       progress.value = { status: 'failed', percent: 0, error: 'WebSocket 连接失败' }
     }
   }
@@ -224,6 +288,12 @@ export function useDownloader() {
   }
 
   function reset() {
+    ++parseEpoch
+    formatsController?.abort()
+    formatsPromise = null
+    isLoadingFormats.value = false
+    parseController?.abort()
+    isParsing.value = false
     videoInfo.value = null
     formats.value = []
     selectedFormat.value = 'best'
@@ -237,6 +307,11 @@ export function useDownloader() {
   }
 
   onUnmounted(() => {
+    ++parseEpoch
+    formatsController?.abort()
+    formatsPromise = null
+    isLoadingFormats.value = false
+    parseController?.abort()
     if (ws) {
       ws.close()
       ws = null
@@ -253,6 +328,8 @@ export function useDownloader() {
     taskId,
     subtitles,
     parseVideo,
+    loadDownloadFormats,
+    isLoadingFormats,
     startDownload,
     startDownloadAll,
     startDownloadSelected,

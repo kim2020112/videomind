@@ -1,5 +1,6 @@
 import { getCurrentScope, onScopeDispose, reactive, ref, shallowRef } from 'vue'
 import { useAuth } from './useAuth.js'
+import { createSerialPoller } from '../utils/serialPoller.js'
 
 const POLL_INTERVAL_MS = 3000
 
@@ -26,8 +27,9 @@ export function useBloggers() {
   })
   const error = shallowRef('')
 
-  let batchTimer = null
-  let syncTimer = null
+  const batchPoller = createSerialPoller(POLL_INTERVAL_MS)
+  const syncPoller = createSerialPoller(POLL_INTERVAL_MS)
+  let batchEpoch = 0
 
   const options = (method = 'GET', body) => ({
     method,
@@ -221,19 +223,23 @@ export function useBloggers() {
     }
   }
 
-  async function getBatch(batchId) {
+  async function getBatch(batchId, isCurrent = () => true) {
+    const ticket = ++batchEpoch
     batchLoading.value = true
     try {
-      currentBatch.value = await request(`/batches/${batchId}`)
-      return currentBatch.value
+      const data = await request(`/batches/${batchId}`)
+      if (ticket !== batchEpoch || !isCurrent()) return null
+      currentBatch.value = data
+      return data
     } catch (err) {
-      return setError(err)
+      return ticket === batchEpoch && isCurrent() ? setError(err) : null
     } finally {
-      batchLoading.value = false
+      if (ticket === batchEpoch) batchLoading.value = false
     }
   }
 
   async function batchAction(batchId, action) {
+    batchEpoch += 1
     pending.action = action
     try {
       currentBatch.value = await request(`/batches/${batchId}/actions`, 'POST', { action })
@@ -248,32 +254,32 @@ export function useBloggers() {
 
   function startBatchPolling(batchId, onChange) {
     stopBatchPolling()
-    batchTimer = setInterval(async () => {
-      const batch = await getBatch(batchId)
-      if (batch) onChange?.(batch)
-      if (['done', 'failed', 'cancelled'].includes(batch?.status)) stopBatchPolling()
-    }, POLL_INTERVAL_MS)
+    batchPoller.start(async current => {
+      const batch = await getBatch(batchId, current)
+      if (!current()) return false
+      if (!batch) return null
+      await onChange?.(batch)
+      return !['done', 'failed', 'cancelled'].includes(batch.status)
+    })
   }
 
   function stopBatchPolling() {
-    if (batchTimer) clearInterval(batchTimer)
-    batchTimer = null
+    batchPoller.stop()
+    batchEpoch += 1
+    batchLoading.value = false
   }
 
   function startSyncPolling(hasActive, onChange) {
-    stopSyncPolling()
-    const tick = async () => {
-      await onChange?.()
-      if (!hasActive()) {
-        stopSyncPolling()
-      }
-    }
-    syncTimer = setInterval(tick, POLL_INTERVAL_MS)
+    syncPoller.start(async current => {
+      if (!hasActive()) return false
+      const result = await onChange?.()
+      if (!current() || !hasActive()) return false
+      return result === null ? null : true
+    })
   }
 
   function stopSyncPolling() {
-    if (syncTimer) clearInterval(syncTimer)
-    syncTimer = null
+    syncPoller.stop()
   }
 
   if (getCurrentScope()) {

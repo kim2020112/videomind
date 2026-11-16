@@ -253,7 +253,7 @@ describe('BloggerDetailPage', () => {
     const { wrapper } = await mountPage(fetchMock)
 
     expect(wrapper.find('.sync-bar').exists()).toBe(true)
-    expect(wrapper.text()).toContain('深度同步中')
+    expect(wrapper.text()).toContain('正在同步全部投稿')
     expect(wrapper.text()).toContain('第 3 页')
     expect(wrapper.find('.sync-bar-actions').text()).toContain('取消同步')
     wrapper.unmount()

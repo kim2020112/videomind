@@ -38,7 +38,7 @@ export function useChat() {
       })
 
       if (!response.ok) {
-        const err = await response.json()
+        const err = await response.json().catch(() => ({}))
         throw new Error(err.detail || '问答失败')
       }
 

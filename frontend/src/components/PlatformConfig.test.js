@@ -1,0 +1,37 @@
+import { mount, flushPromises } from '@vue/test-utils'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import PlatformConfig from './PlatformConfig.vue'
+vi.mock('../composables/useAuth.js', () => ({ useAuth: () => ({ getAuthHeaders: () => ({ Authorization: 'Bearer t' }) }) }))
+const response = (data, ok = true) => ({ ok, json: async () => data })
+afterEach(() => vi.unstubAllGlobals())
+describe('PlatformConfig', () => {
+  it('validates a draft without saving and preserves it on error', async () => {
+    const fetch = vi.fn().mockResolvedValue(response({ platforms: {} }))
+    vi.stubGlobal('fetch', fetch)
+    const wrapper = mount(PlatformConfig)
+    await flushPromises()
+    await wrapper.get('#bilibili-cookie').setValue('SESSDATA=draft')
+    fetch.mockResolvedValueOnce(response({ detail: '网络失败' }, false))
+    await wrapper.findAll('.ghost-button')[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('网络失败')
+    expect(wrapper.get('#bilibili-cookie').element.value).toBe('SESSDATA=draft')
+    expect(fetch.mock.calls[1][0]).toBe('/api/admin/platform-config/bilibili/validate')
+    expect(wrapper.emitted('dirty-change').at(-1)).toEqual([true])
+    wrapper.unmount()
+  })
+  it('saves a cookie, clears the draft and reports configured state', async () => {
+    const fetch = vi.fn().mockResolvedValue(response({ platforms: {} }))
+    vi.stubGlobal('fetch', fetch)
+    const wrapper = mount(PlatformConfig)
+    await flushPromises()
+    await wrapper.get('#douyin-cookie').setValue('sessionid=draft')
+    fetch.mockResolvedValueOnce(response({ platforms: { douyin: { configured:true, source:'saved', status:'untested' } } }))
+    await wrapper.findAll('.secondary-button')[1].trigger('click')
+    await flushPromises()
+    expect(fetch.mock.calls[1][1].method).toBe('PUT')
+    expect(wrapper.get('#douyin-cookie').element.value).toBe('')
+    expect(wrapper.text()).toContain('已配置 · 手动保存')
+    wrapper.unmount()
+  })
+})
