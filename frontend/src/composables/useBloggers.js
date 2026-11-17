@@ -38,8 +38,8 @@ export function useBloggers() {
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   })
 
-  async function request(path, method = 'GET', body, base = '/api') {
-    const response = await fetch(`${base}${path}`, options(method, body))
+  async function request(path, method = 'GET', body, base = '/api', signal) {
+    const response = await fetch(`${base}${path}`, { ...options(method, body), ...(signal ? { signal } : {}) })
     const data = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(data.detail || '请求失败，请重试')
     return data
@@ -154,9 +154,10 @@ export function useBloggers() {
     }
   }
 
+  let videoController = null
   let videoEpoch = 0
   let pageEpoch = 0
-  function invalidateVideoRequests() { videoEpoch += 1; pageEpoch += 1; pagesLoading.value = false }
+  function invalidateVideoRequests() { videoController?.abort(); videoController = null; videoEpoch += 1; pageEpoch += 1; pagesLoading.value = false }
   function applyVideoPage(data) {
     videos.value = data.items || []
     videosTotal.value = data.total || 0
@@ -166,6 +167,9 @@ export function useBloggers() {
     videosHasMore.value = (data.offset || 0) + videos.value.length < videosTotal.value
   }
   async function listVideos(subId, params = {}, { quiet = false } = {}) {
+    videoController?.abort()
+    const controller = new AbortController()
+    videoController = controller
     const ticket = ++videoEpoch
     videosLoading.value = !quiet
     try {
@@ -173,12 +177,12 @@ export function useBloggers() {
       Object.entries(params).forEach(([key, value]) => {
         if (value !== undefined && value !== null && value !== '') query.set(key, String(value))
       })
-      const data = await request(`/bloggers/${subId}/videos?${query}`)
+      const data = await request(`/bloggers/${subId}/videos?${query}`, 'GET', undefined, '/api', controller.signal)
       if (ticket !== videoEpoch) return null
       applyVideoPage(data)
       return data
     } catch (err) {
-      if (ticket === videoEpoch) return setError(err)
+      if (ticket === videoEpoch && err?.name !== 'AbortError') return setError(err)
       return null
     } finally {
       if (ticket === videoEpoch) videosLoading.value = false

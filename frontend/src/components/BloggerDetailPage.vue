@@ -33,6 +33,7 @@ const currentPage = ref(1)
 const pageSize = ref(20)
 const listTop = ref(null)
 let lastPageData = null
+let refreshEpoch = 0
 const searchQuery = ref('')
 const subtitleOnly = ref(false)
 const restoredVideoId = ref(null)
@@ -46,6 +47,8 @@ const learnedFilter = ref('all') // all | learned | unlearned
 const selectionMode = ref(false)
 const selected = ref(new Set())
 const expandedVideoId = ref(null)
+const failedThumbnailIds = ref(new Set())
+const thumbnailRetries = ref(new Map())
 const batchMode = ref('full')
 const editingAlias = ref(false)
 const aliasValue = ref('')
@@ -178,19 +181,28 @@ function rememberPage() {
     expandedVideoId: expandedVideoId.value, pages: pages.value })
 }
 async function refreshVideos({ anchorId, quiet = false } = {}) {
+  const ticket = ++refreshEpoch
   videoError.value = ''
+  const key = snapshotKey()
   const data = await listVideos(subId.value, {
     q: searchQuery.value, learned: learnedFilter.value,
     has_subtitle: subtitleOnly.value ? '1' : undefined,
     anchor_id: anchorId, locate_anchor: anchorId ? 1 : undefined,
     limit: pageSize.value, offset: (currentPage.value - 1) * pageSize.value,
   }, { quiet })
+  if (disposed || ticket !== refreshEpoch || key !== snapshotKey()) return null
   if (data) {
     lastPageData = data
     currentPage.value = Math.floor((data.offset ?? (currentPage.value - 1) * pageSize.value) / pageSize.value) + 1
     rememberPage()
-  } else if (!disposed) videoError.value = error.value || '视频列表加载失败，请重试'
+  } else if (!disposed && !videosLoading.value) videoError.value = error.value || '视频列表加载失败，请重试'
   return data
+}
+function restoreCachedPage() {
+  const cached = readBloggerPage(snapshotKey())
+  applyVideoPage(cached?.data || { items: [] })
+  lastPageData = cached?.data || null
+  return Boolean(cached)
 }
 function scrollListTop() {
   listTop.value?.scrollIntoView({ block: 'start', behavior: 'instant' })
@@ -202,8 +214,10 @@ async function changePage(page) {
   expandedVideoId.value = null
   selected.value = new Set()
   missingVideo.value = null
-  applyVideoPage({ items: [] })
-  await refreshVideos()
+  const warm = restoreCachedPage()
+  const ticket = refreshEpoch + 1
+  await refreshVideos({ quiet: warm })
+  if (disposed || ticket !== refreshEpoch) return
   syncRouteQuery()
   await nextTick()
   scrollListTop()
@@ -215,8 +229,10 @@ async function changeSize(size) {
   currentPage.value = Math.floor(first / size) + 1
   selected.value = new Set()
   expandedVideoId.value = null
-  applyVideoPage({ items: [] })
-  await refreshVideos()
+  const warm = restoreCachedPage()
+  const ticket = refreshEpoch + 1
+  await refreshVideos({ quiet: warm })
+  if (disposed || ticket !== refreshEpoch) return
   syncRouteQuery()
   await nextTick()
   scrollListTop()
@@ -226,8 +242,10 @@ async function handleSearch() {
   selected.value = new Set()
   expandedVideoId.value = null
   missingVideo.value = null
-  applyVideoPage({ items: [] })
-  await refreshVideos()
+  const warm = restoreCachedPage()
+  const ticket = refreshEpoch + 1
+  await refreshVideos({ quiet: warm })
+  if (disposed || ticket !== refreshEpoch) return
   syncRouteQuery()
 }
 async function setLearnedFilter(value) {
@@ -236,6 +254,25 @@ async function setLearnedFilter(value) {
   await handleSearch()
 }
 async function toggleSubtitleOnly() { await handleSearch() }
+
+function thumbnailUrl(item) {
+  const retry = thumbnailRetries.value.get(item.id) || 0
+  const source = thumbnailSrc(item.cover)
+  return retry ? `${source}&retry=${retry}` : source
+}
+
+function markThumbnailFailed(id) {
+  failedThumbnailIds.value = new Set([...failedThumbnailIds.value, id])
+}
+
+function retryThumbnail(id) {
+  const next = new Map(thumbnailRetries.value)
+  next.set(id, (next.get(id) || 0) + 1)
+  thumbnailRetries.value = next
+  const failed = new Set(failedThumbnailIds.value)
+  failed.delete(id)
+  failedThumbnailIds.value = failed
+}
 
 // ── alias ──
 function startEditAlias() {
@@ -423,6 +460,7 @@ async function restorePosition(context, anchorId, ticket) {
 
 async function loadAll() {
   const ticket = ++loadEpoch
+  refreshEpoch += 1
   invalidateVideoRequests()
   let rememberedSize = 20
   try { rememberedSize = Number(localStorage.getItem(`videomind:page-size:${identityKey.value}`)) } catch {}
@@ -436,6 +474,8 @@ async function loadAll() {
   subtitleOnly.value = state.subtitle
   selected.value = new Set()
   expandedVideoId.value = null
+  failedThumbnailIds.value = new Set()
+  thumbnailRetries.value = new Map()
   missingVideo.value = null
   const anchorId = /^#video-\d+$/.test(route.hash) ? Number(route.hash.slice(7)) : null
   const context = anchorId ? readBloggerContext(bloggerContextKey(identityKey.value, subId.value, state)) : null
@@ -449,6 +489,7 @@ async function loadAll() {
     pages.value = cached.pages
     await restorePosition(saved, anchorId, ticket)
   } else {
+    lastPageData = null
     applyVideoPage({ items: [] })
     pages.value = []
   }
@@ -584,8 +625,10 @@ onMounted(loadAll)
         <button class="btn-ghost btn-ghost--sm" @click="revealMissingVideo">查看该视频</button>
       </div>
       <div v-if="videoError" class="return-notice" role="alert">{{ videoError }}<button class="btn-ghost" @click="loadAll">重试</button></div>
-      <div v-if="videosLoading && !videos.length" class="detail-empty">
-        <div class="loading-spinner"></div>
+      <div v-if="videosLoading && !videos.length" class="video-list" aria-busy="true" aria-label="正在加载视频列表">
+        <div v-for="index in Math.min(pageSize, 6)" :key="index" class="video-card video-skeleton" aria-hidden="true">
+          <div class="video-thumb"></div><div class="video-skeleton-lines"><span></span><span></span></div>
+        </div>
       </div>
       <div v-else-if="!videos.length && !videoError" class="detail-empty">
         <p class="empty-hint">
@@ -596,20 +639,26 @@ onMounted(loadAll)
 
       <template v-else>
         <div class="video-list">
-          <article v-for="item in videos" :id="`video-${item.id}`" :key="item.id" class="video-card" :class="{ 'video-card--selected': selected.has(item.id), 'video-card--restored': restoredVideoId === item.id }">
+          <article v-for="(item, itemIndex) in videos" :id="`video-${item.id}`" :key="item.id" class="video-card" :class="{ 'video-card--selected': selected.has(item.id), 'video-card--restored': restoredVideoId === item.id }">
             <label v-if="selectionMode" class="video-check">
               <input type="checkbox" :checked="selected.has(item.id)" @change="toggleSelect(item.id)" />
             </label>
             <div class="video-thumb-wrap" @click="toggleExpand(item)">
               <img
-                v-if="item.cover"
-                :src="thumbnailSrc(item.cover)"
+                v-if="item.cover && !failedThumbnailIds.has(item.id)"
+                :src="thumbnailUrl(item)"
                 alt=""
                 class="video-thumb"
-                loading="lazy"
+                :loading="itemIndex < 4 ? 'eager' : 'lazy'"
+                :fetchpriority="itemIndex < 4 ? 'high' : 'auto'"
+                width="124" height="70" decoding="async"
                 referrerpolicy="no-referrer"
+                @error="markThumbnailFailed(item.id)"
               />
-              <div v-else class="video-thumb video-thumb--placeholder">
+              <button v-if="item.cover && failedThumbnailIds.has(item.id)" class="video-thumb video-thumb--placeholder video-thumb--retry" type="button" :aria-label="`重新加载${item.title}的封面`" @click.stop="retryThumbnail(item.id)">
+                <span>封面加载失败</span><small>点击重试</small>
+              </button>
+              <div v-else-if="!item.cover" class="video-thumb video-thumb--placeholder">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
                 </svg>
@@ -822,6 +871,16 @@ onMounted(loadAll)
 .video-thumb--placeholder {
   display: grid; place-items: center; color: var(--text-muted); border: 1px solid var(--border);
 }
+.video-thumb--retry {
+  align-content: center; gap: 2px; padding: 4px; cursor: pointer; color: var(--text-secondary);
+  font-size: 0.68rem;
+}
+.video-duration, .video-parts { pointer-events: none; }
+.video-skeleton { min-height: 104px; }
+.video-skeleton-lines { flex: 1; display: grid; gap: 12px; }
+.video-skeleton-lines span { height: 12px; border-radius: 6px; background: var(--bg-secondary); width: 75%; }
+.video-skeleton-lines span:last-child { width: 40%; }
+.video-thumb--retry small { color: var(--accent-cyan); font-size: 0.62rem; }
 .video-thumb--placeholder svg { width: 26px; height: 26px; }
 .video-duration, .video-parts {
   position: absolute; background: rgba(15, 23, 42, 0.82); color: #fff;

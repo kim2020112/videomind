@@ -202,6 +202,75 @@ describe('BloggerDetailPage', () => {
     second.wrapper.unmount()
   })
 
+  it('prioritizes four covers and offers manual retry without opening parts', async () => {
+    const fetchMock = vi.fn(url => Promise.resolve(okJson(url.includes('/videos')
+      ? { total: 6, items: Array.from({ length: 6 }, (_, i) => video(i + 1, `BV${i}`, `课程${i}`, { cover: `https://i0.hdslb.com/bfs/archive/${i}.jpg` })) }
+      : { bloggers: [], batches: [] })))
+    const { wrapper } = await mountPage(fetchMock)
+    const images = wrapper.findAll('.video-thumb-wrap img')
+    expect(images.map(img => img.attributes('loading'))).toEqual(['eager', 'eager', 'eager', 'eager', 'lazy', 'lazy'])
+    const original = images[0].attributes('src')
+    await images[0].trigger('error')
+    expect(wrapper.findAll('.video-thumb-wrap img')).toHaveLength(5)
+    expect(wrapper.find('.video-thumb--retry').text()).toContain('点击重试')
+    await wrapper.find('.video-thumb--retry').trigger('click')
+    expect(wrapper.find('.video-thumb-wrap img').attributes('src')).toBe(`${original}&retry=1`)
+    expect(fetchMock.mock.calls.some(([url]) => url.includes('/pages'))).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('shows a cached page immediately on paging back and retains image nodes on refresh', async () => {
+    let delayFirstPage = false
+    let resolveRefresh
+    const fetchMock = vi.fn(url => {
+      if (!url.includes('/videos')) return Promise.resolve(okJson({ bloggers: [], batches: [] }))
+      const offset = Number(new URL(url, 'http://localhost').searchParams.get('offset'))
+      const data = { total: 40, offset, items: [video(offset + 1, 'BV1', '课程', { cover: 'https://i0.hdslb.com/bfs/archive/1.jpg' })] }
+      if (offset === 0 && delayFirstPage) return new Promise(resolve => { resolveRefresh = () => resolve(okJson(data)) })
+      return Promise.resolve(okJson(data))
+    })
+    const { wrapper } = await mountPage(fetchMock)
+    await wrapper.find('.list-top button[aria-label="下一页"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('#video-21').exists()).toBe(true)
+    delayFirstPage = true
+    await wrapper.find('.list-top button[aria-label="上一页"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('#video-1').exists()).toBe(true)
+    const image = wrapper.find('#video-1 img').element
+    resolveRefresh()
+    await flushPromises()
+    expect(wrapper.find('#video-1 img').element).toBe(image)
+    wrapper.unmount()
+  })
+
+  it('does not let a superseded page action rewrite the route or scroll', async () => {
+    let resolveOld, resolveNew
+    const fetchMock = vi.fn(url => {
+      if (!url.includes('/videos')) return Promise.resolve(okJson({ bloggers: [], batches: [] }))
+      const params = new URL(url, 'http://localhost').searchParams
+      const offset = Number(params.get('offset'))
+      if (offset === 20) return new Promise(resolve => { resolveOld = resolve })
+      if (params.get('learned') === 'learned') return new Promise(resolve => { resolveNew = resolve })
+      return Promise.resolve(okJson({ total: 40, offset: 0, items: [video(1, 'BV1', '课程')] }))
+    })
+    const { wrapper, router } = await mountPage(fetchMock)
+    await wrapper.find('.list-top button[aria-label="下一页"]').trigger('click')
+    await wrapper.findAll('.filter-chip')[1].trigger('click')
+    const scroll = vi.spyOn(Element.prototype, 'scrollIntoView')
+    const before = router.currentRoute.value.fullPath
+    resolveOld(okJson({ total: 40, offset: 20, items: [video(21, 'BV21', '旧课程')] }))
+    await flushPromises()
+    expect(router.currentRoute.value.fullPath).toBe(before)
+    expect(scroll).not.toHaveBeenCalled()
+    resolveNew(okJson({ total: 1, offset: 0, items: [video(2, 'BV2', '已整理课程')] }))
+    await flushPromises()
+    expect(router.currentRoute.value.query.learned).toBe('learned')
+    expect(wrapper.find('#video-2').exists()).toBe(true)
+    wrapper.unmount()
+    scroll.mockRestore()
+  })
+
   it('writes learned filter to query and refetches', async () => {
     const calls = []
     const fetchMock = vi.fn().mockImplementation((url) => {
