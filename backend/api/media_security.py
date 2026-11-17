@@ -13,7 +13,7 @@ from urllib.parse import urljoin, urlsplit
 
 from fastapi import HTTPException
 from core.bilibili_guard import (
-    BilibiliAccessBlocked, check_response, is_bilibili_url, request_kind, request_scope, request_slot,
+    BilibiliAccessBlocked, check_response, is_bilibili_url, request_kind, request_scope, request_slot, thumbnail_download_slot,
 )
 
 
@@ -249,8 +249,10 @@ def _open_checked(
         response = None
         try:
             guarded = is_bilibili_url(current_url, include_cdn=True)
-            kind = request_kind(current_url)
             scope = protection_scope or request_scope(current_url)
+            # Covers are independent, small CDN requests. Keep their quota and
+            # cooldowns, but do not serialize them behind video media streams.
+            kind = "thumbnail" if scope == "thumbnail" else request_kind(current_url)
             with request_slot(kind=kind, scope=scope) if guarded else nullcontext():
                 response = opener(target, headers)
                 status = int(getattr(response, "status", 0) or 0)
@@ -290,7 +292,15 @@ def _normalized_content_type(response) -> str:
     return raw.split(";", 1)[0].strip().lower()
 
 
-def fetch_thumbnail(
+def fetch_thumbnail(url: str, headers=None, *, resolver=None, opener=None) -> ThumbnailPayload:
+    try:
+        with thumbnail_download_slot():
+            return _fetch_thumbnail(url, headers, resolver=resolver, opener=opener)
+    except BilibiliAccessBlocked as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+
+
+def _fetch_thumbnail(
     url: str,
     headers: dict[str, str] | None = None,
     *,

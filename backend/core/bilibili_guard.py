@@ -1,7 +1,8 @@
 """Shared, persistent limits for Bilibili access, including worker processes.
 
-No credentials are stored here. A file lock serializes admission through response
-inspection; SQLite retains budgets and the circuit breaker across restarts.
+No credentials are stored here. API/media calls retain serialized protection;
+thumbnail admission is independent of network I/O, with four download slots.
+SQLite retains budgets and the circuit breaker across restarts.
 """
 
 from __future__ import annotations
@@ -25,10 +26,13 @@ COOLDOWN_SECONDS = 10 * 60
 MAX_COOLDOWN_SECONDS = 60 * 60
 # Application limits, not a claim about the platform's safe request threshold.
 LIMITS = {"api": (5.0, ((3600, 120), (86400, 600))),
-          "media": (0.25, ((60, 120), (3600, 1200), (86400, 3000)))}
+          "media": (0.25, ((60, 120), (3600, 1200), (86400, 3000))),
+          "thumbnail": (0.25, ((60, 120), (3600, 1200), (86400, 3000)))}
 RISK_CODES = frozenset((-111, -352, -401, -412, -509, -799))
 SCOPE_NAMES = {"all": "请求", "catalog": "投稿列表", "subtitle": "字幕", "video": "视频解析", "metadata": "视频信息", "media": "媒体资源", "account": "登录验证", "thumbnail": "封面图片"}
 _LOCK = threading.Lock()
+_THUMBNAIL_ADMISSION_LOCK = threading.Lock()
+_THUMBNAIL_SLOTS = threading.BoundedSemaphore(4)
 
 
 class BilibiliAccessBlocked(RuntimeError):
@@ -149,20 +153,24 @@ def check_response(status: int, payload=None, *, kind: str = 'api', scope: str =
             delay = 0
         trip(reason, affected, retry_after=delay)
         assert_allowed(affected)
-    if status == 403 and kind == 'media':
+    if status == 403 and kind in ('media', 'thumbnail'):
         raise BilibiliAccessBlocked('B 站媒体链接拒绝访问或已过期，请重新打开视频刷新链接')
 
 
 @contextmanager
 def request_slot(kind: str = "api", scope: str = "all"):
     """One admitted request, no automatic retry. Recheck after waiting."""
-    if not _LOCK.acquire(timeout=30):
+    if kind not in LIMITS and not (kind == "thumbnail" and "media" in LIMITS):
+        raise ValueError(f"unknown request kind: {kind}")
+    thumbnail_slot = kind == "thumbnail"
+    lock = _THUMBNAIL_ADMISSION_LOCK if thumbnail_slot else _LOCK
+    if not lock.acquire(timeout=30):
         raise BilibiliAccessBlocked("B 站请求正在排队，请稍后手动继续", "budget")
     lockfile = None
     acquired = False
     try:
         STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        lockfile = open(str(STATE_PATH) + ".lock", "a")
+        lockfile = open(str(STATE_PATH) + (".thumbnail.lock" if thumbnail_slot else ".lock"), "a")
         deadline = time.monotonic() + 30
         while not acquired:
             try:
@@ -172,7 +180,7 @@ def request_slot(kind: str = "api", scope: str = "all"):
                 if time.monotonic() >= deadline:
                     raise BilibiliAccessBlocked("B 站请求正在排队，请稍后手动继续", "budget")
                 time.sleep(0.1)
-        interval, budgets = LIMITS[kind]
+        interval, budgets = LIMITS[kind] if kind in LIMITS else LIMITS["media"]
         with _database() as connection:
             now = time.time()
             _check(connection, now, scope)
@@ -189,6 +197,17 @@ def request_slot(kind: str = "api", scope: str = "all"):
                     raise BilibiliAccessBlocked("已达到 B 站本地请求额度，任务已暂停；请稍后手动继续或使用已有缓存", "budget")
             connection.execute("DELETE FROM requests WHERE at<=?", (now-86400,))
             connection.execute("INSERT INTO requests VALUES (?, ?)", (now, kind))
+        # Thumbnail downloads are admitted and counted before the network call,
+        # but do not hold the admission lock while reading a slow image.
+        # Other request kinds retain the previous serialized behavior.
+        if thumbnail_slot:
+            if lockfile is not None and acquired:
+                fcntl.flock(lockfile, fcntl.LOCK_UN)
+                acquired = False
+            lockfile.close()
+            lockfile = None
+            lock.release()
+            lock = None
         yield
     except (OSError, sqlite3.Error) as exc:
         # HTTP libraries' transport errors are handled by their callers. Local
@@ -199,7 +218,43 @@ def request_slot(kind: str = "api", scope: str = "all"):
             if acquired:
                 fcntl.flock(lockfile, fcntl.LOCK_UN)
             lockfile.close()
-        _LOCK.release()
+        if lock is not None:
+            lock.release()
+
+
+@contextmanager
+def thumbnail_download_slot():
+    """Bound complete image downloads to four, across threads and processes."""
+    if not _THUMBNAIL_SLOTS.acquire(timeout=30):
+        raise BilibiliAccessBlocked("封面请求正在排队，请稍后重试", "budget")
+    slot = None
+    try:
+        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + 30
+        while slot is None:
+            for index in range(4):
+                candidate = open(str(STATE_PATH) + f".thumbnail-{index}.lock", "a")
+                try:
+                    fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    slot = candidate
+                    break
+                except BlockingIOError:
+                    candidate.close()
+                except BaseException:
+                    candidate.close()
+                    raise
+            if slot is None:
+                if time.monotonic() >= deadline:
+                    raise BilibiliAccessBlocked("封面请求正在排队，请稍后重试", "budget")
+                time.sleep(0.05)
+        yield
+    except (OSError, sqlite3.Error) as exc:
+        raise BilibiliAccessBlocked("封面访问保护不可用，已停止本次联网") from exc
+    finally:
+        if slot is not None:
+            fcntl.flock(slot, fcntl.LOCK_UN)
+            slot.close()
+        _THUMBNAIL_SLOTS.release()
 
 
 def guarded_get(url: str, **kwargs):

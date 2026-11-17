@@ -82,3 +82,6 @@ backend/data/platform_config.json
 backend/db/*.db.lock
 
 backend/data/platform_config.json.lock
+
+# Independent thumbnail guard locks
+backend/db/*.db.*.lock

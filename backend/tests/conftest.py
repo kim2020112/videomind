@@ -5,7 +5,10 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def isolated_bilibili_protection(tmp_path, monkeypatch):
-    from core import bilibili_guard, bilibili_cache
+    from core import bilibili_guard, bilibili_cache, thumbnail_cache
+
+    thumbnail_cache._entries.clear()
+    monkeypatch.setattr(thumbnail_cache, "DISK_PATH", tmp_path / "thumbnails.db")
 
     bilibili_cache.clear()
 
@@ -14,6 +17,7 @@ def isolated_bilibili_protection(tmp_path, monkeypatch):
     monkeypatch.setattr(bilibili_guard, "LIMITS", {
         "api": (0, ((3600, 10000), (86400, 100000))),
         "media": (0, ((3600, 10000), (86400, 100000))),
+        "thumbnail": (0, ((3600, 10000), (86400, 100000))),
     })
     monkeypatch.setenv("BILIBILI_USE_ACCOUNT_COOKIE", "false")
     monkeypatch.setenv("BILIBILI_COOKIE_SCOPE", "metadata")

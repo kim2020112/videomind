@@ -3,6 +3,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 import urllib.request
 import http.client
+import hashlib
 import uuid
 import os
 import re
@@ -27,7 +28,7 @@ from api.media_security import (
     referer_for_url,
 )
 from core.pipeline.subtitle import _download_subtitle_content
-from core.thumbnail_cache import cached_thumbnail
+from core.thumbnail_cache import load_thumbnail, thumbnail_id
 from core.logging_config import get_logger
 from core.video import canonical_video_url, is_bilibili_video
 from config import DOWNLOAD_DIR
@@ -317,10 +318,13 @@ async def proxy_video_stream(url: str, request: Request, video_url: str = ""):
 
 
 @router.get("/api/thumbnail")
-async def proxy_thumbnail(url: str):
+async def proxy_thumbnail(url: str, request: Request = None):
     """代理缩略图请求，解决混合内容和防盗链问题。"""
     thumbnail_url = _upgrade_thumbnail_url(url)
     referer = _get_cdn_referer(thumbnail_url)
+
+    metrics = {'cache': 'miss'}
+    started = time.monotonic()
 
     def _fetch():
         headers = {
@@ -329,19 +333,28 @@ async def proxy_thumbnail(url: str):
         }
         if referer:
             headers["Referer"] = referer
-        return cached_thumbnail(thumbnail_url, lambda: fetch_thumbnail(thumbnail_url, headers=headers))
+        return fetch_thumbnail(thumbnail_url, headers=headers)
 
     try:
-        payload = await asyncio.get_event_loop().run_in_executor(None, _fetch)
-        return Response(
-            content=payload.content,
-            media_type=payload.content_type,
-            headers={**MEDIA_RESPONSE_SECURITY_HEADERS, "Cache-Control": "public, max-age=3600"},
-        )
-    except HTTPException:
+        payload = await load_thumbnail(thumbnail_url, _fetch, metrics)
+        logger.info("thumbnail id=%s cache=%s queue_ms=%s upstream_ms=%s total_ms=%s",
+                    thumbnail_id(thumbnail_url), metrics.get('cache'), metrics.get('queue_ms', 0),
+                    metrics.get('upstream_ms', 0), round((time.monotonic() - started) * 1000))
+        etag = '"' + hashlib.sha256(payload.content).hexdigest() + '"'
+        response_headers = {**MEDIA_RESPONSE_SECURITY_HEADERS, "Cache-Control": "public, max-age=3600", "ETag": etag}
+        candidates = request.headers.get('if-none-match', '') if request else ''
+        if any(value.strip().removeprefix('W/') in (etag, '*') for value in candidates.split(',')):
+            return Response(status_code=304, headers=response_headers)
+        return Response(content=payload.content, media_type=payload.content_type, headers=response_headers)
+    except HTTPException as exc:
+        logger.info("thumbnail id=%s status=%s cache=%s queue_ms=%s total_ms=%s",
+                    thumbnail_id(thumbnail_url), exc.status_code, metrics.get('cache'), metrics.get('queue_ms', 0),
+                    round((time.monotonic() - started) * 1000))
         raise
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"缩略图获取失败: {e}")
+    except Exception:
+        logger.warning("thumbnail id=%s status=502 total_ms=%s", thumbnail_id(thumbnail_url),
+                       round((time.monotonic() - started) * 1000))
+        raise HTTPException(status_code=502, detail="缩略图获取失败，请稍后重试")
 
 
 def _parse_srt(content: str) -> list[dict]:
