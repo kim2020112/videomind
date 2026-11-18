@@ -4,10 +4,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 
 import config
 from database import get_db, get_subtitle_from_db, save_subtitle_to_db
-from core import job_store
+from core import job_store, job_signals
+from core.logging_config import get_logger
 from core.subtitle_validation import validate_cached_subtitle, SubtitleIdentityError
 from core.cache import _get_cached_raw, _url_hash, get_video_info_cache, save_video_info_cache, video_fingerprint, _cleanup_old_cache
 from core.generation_commit import (
@@ -28,6 +30,7 @@ from core.content_state import register_content_functions, decode_payload, conte
 TARGETS = ("summary", "mindmap", "notes", "qa")
 KEYS = {"summary": "result", "mindmap": "mindmap_markdown", "notes": "notes", "qa": "qa_pairs"}
 LABELS = {"summary": "摘要", "mindmap": "导图", "notes": "笔记", "qa": "精选问答"}
+logger = get_logger(__name__)
 
 
 def revision(text):
@@ -125,6 +128,7 @@ def emit(task_id, event_type, data):
     with get_db() as conn:
         conn.execute("INSERT INTO learning_events(task_id, event_json) VALUES (?, ?)",
                      (task_id, json.dumps({"type": event_type, "data": data}, ensure_ascii=False)))
+    job_signals.notify(task_id)
 
 
 def events_after(task_id, after=0):
@@ -258,6 +262,7 @@ async def run_learning_job(job, scheduler):
             raise ValueError("该视频没有足够的简介内容")
     else:
         job_store.update_job(task_id, message="正在获取字幕")
+        subtitle_started = time.monotonic()
         cached = get_subtitle_from_db(url)
         if not cached:
             legacy = _get_cached_raw(url)
@@ -308,6 +313,9 @@ async def run_learning_job(job, scheduler):
         add_user_history(user_id=job.get("user_id"), guest_id=job.get("guest_id"), url_hash=_url_hash(url),
                          url=url, title=info.title, platform=info.extractor or "")
         emit(task_id, "subtitle_ready", {})
+        logger.info("subtitle_ready task_id=%s source=%s cache_hit=%s elapsed_ms=%.1f",
+                    task_id, source, bool(cached and not refresh),
+                    (time.monotonic() - subtitle_started) * 1000)
     check_cancel(job)
     snapshot = payload_for(url)
     states = artifact_states(snapshot, text)

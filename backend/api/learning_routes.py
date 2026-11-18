@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from api.routes import extract_url
 from api.security import require_identity, ensure_public_http_url
-from core import job_store, learning
+from core import job_store, job_signals, learning
 from core.auth import add_user_history
 from core.cache import _url_hash, get_video_info_cache
 from core.features import is_ai_available
@@ -71,23 +71,36 @@ def submit(req, identity, targets):
         ):
             raise HTTPException(409, "当前视频已有任务，请完成或取消后再提交新的选择")
         return active
+    admission_token = uuid.uuid4().hex
     task_id = job_store.create_job(_url_hash(url), url, **owner(identity), lang=req.lang,
-                                   payload=payload, job_type="learning")
+                                   payload={**payload, "_admission_pending": True,
+                                            "_admission_token": admission_token}, job_type="learning")
     job = job_store.get_job(task_id, **owner(identity))
     if job["url"] != url or job.get("lang", "") != req.lang or any(job["payload"].get(k) != payload.get(k) for k in ("targets", "force", "input_source", "refresh_subtitle")):
         raise HTTPException(409, "请求标识已用于其他生成操作")
-    if job["status"] == "queued" and targets:
-        if needs_generation:
+    # An idempotent concurrent request must not admit another submitter's job
+    # before that submitter finishes quota/history initialization.
+    if job["payload"].get("_admission_token") != admission_token:
+        return job
+    try:
+        if job["status"] == "queued" and targets and needs_generation:
             try:
                 learning.reserve_usage(job)
             except ValueError as exc:
-                job_store.update_job(task_id, status="failed", error=str(exc), message=str(exc))
                 raise HTTPException(429, str(exc)) from exc
-    info = get_video_info_cache(url) or {}
-    add_user_history(**owner(identity), url_hash=_url_hash(url), url=url,
-                     title=info.get("title", ""), platform=info.get("extractor", ""), status=job["status"])
-    learning.restore_subtitle(url, identity)
-    return job
+        info = get_video_info_cache(url) or {}
+        add_user_history(**owner(identity), url_hash=_url_hash(url), url=url,
+                         title=info.get("title", ""), platform=info.get("extractor", ""), status=job["status"])
+        learning.restore_subtitle(url, identity)
+        job_store.update_job(task_id, payload=payload)
+    except Exception as exc:
+        learning.release_usage(task_id)
+        current = job_store.get_job(task_id)
+        if current and current["status"] == "queued":
+            message = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+            job_store.update_job(task_id, status="failed", error=message, message=message, payload=payload)
+        raise
+    return job_store.get_job(task_id, **owner(identity))
 
 
 @router.get("/workspace")
@@ -145,32 +158,37 @@ async def resume_task(task_id: str, request: Request):
     if not updated:
         learning.release_usage(task_id)
         raise HTTPException(409, "任务状态已变化")
+    job_signals.notify(task_id)
     return job_store.get_job(task_id, **owner(identity))
 
 
 async def event_stream(task_id, identity, after=0, disconnected=None):
     previous_state = None
-    while True:
-        if disconnected and await disconnected():
-            return
-        rows = learning.events_after(task_id, after)
-        for row in rows:
-            after = row["id"]
-            yield f"id: {after}\ndata: {row['event_json']}\n\n".encode()
-        job = job_store.get_job(task_id, **owner(identity))
-        if not job:
-            return
-        if len(rows) == 200:
-            continue
-        if job["status"] in job_store.TERMINAL_STATUSES or job["status"] == "awaiting_confirmation":
-            yield ("data: " + json.dumps({"type": "task_state", "data": job}, ensure_ascii=False) + "\n\n").encode()
-            return
-        state = (job["status"], job["progress"], job["message"], job["queue_position"], job["cancel_requested"])
-        if state != previous_state:
-            previous_state = state
-            yield ("data: " + json.dumps({"type": "task_progress", "data": job}, ensure_ascii=False) + "\n\n").encode()
-        yield b": heartbeat\n\n"
-        await asyncio.sleep(1)
+    async with job_signals.subscribe(task_id) as signal:
+        while True:
+            signal.clear()
+            if disconnected and await disconnected():
+                return
+            job = job_store.get_job(task_id, **owner(identity))
+            if not job:
+                return
+            rows = learning.events_after(task_id, after)
+            for row in rows:
+                after = row["id"]
+                yield f"id: {after}\ndata: {row['event_json']}\n\n".encode()
+            if len(rows) == 200:
+                continue
+            # Read status before the events: a terminal transition occurring
+            # during the read must not close the stream ahead of its last event.
+            if job["status"] in job_store.TERMINAL_STATUSES or job["status"] == "awaiting_confirmation":
+                yield ("data: " + json.dumps({"type": "task_state", "data": job}, ensure_ascii=False) + "\n\n").encode()
+                return
+            state = (job["status"], job["progress"], job["message"], job["queue_position"], job["cancel_requested"])
+            if state != previous_state:
+                previous_state = state
+                yield ("data: " + json.dumps({"type": "task_progress", "data": job}, ensure_ascii=False) + "\n\n").encode()
+            yield b": heartbeat\n\n"
+            await signal.wait(timeout=1.0)
 
 
 @router.get("/tasks/{task_id}/events")

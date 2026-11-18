@@ -1,5 +1,7 @@
+import asyncio
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch, AsyncMock
@@ -221,3 +223,114 @@ class LearningWorkspaceTests(unittest.IsolatedAsyncioTestCase):
         second = learning.events_after(job["task_id"], first[-1]["id"])
         self.assertEqual(1, len(second))
         self.assertEqual("second", json.loads(second[0]["event_json"])["data"]["message"])
+
+    async def test_subtitle_event_wakes_stream_without_polling_delay(self):
+        job = self.job([])
+        stream = learning_routes.event_stream(job["task_id"], OWNER)
+        try:
+            self.assertIn(b"task_progress", await anext(stream))
+            self.assertIn(b"heartbeat", await anext(stream))
+            next_event = asyncio.create_task(anext(stream))
+            await asyncio.to_thread(learning.emit, job["task_id"], "subtitle_ready", {})
+            self.assertIn(b"subtitle_ready", await asyncio.wait_for(next_event, 0.4))
+        finally:
+            await stream.aclose()
+
+    async def test_terminal_transition_during_event_read_does_not_drop_last_event(self):
+        job = self.job([])
+        original = learning.events_after
+        injected = False
+
+        def read_then_finish(task_id, after):
+            nonlocal injected
+            rows = original(task_id, after)
+            if not injected:
+                injected = True
+                learning.emit(task_id, "subtitle_ready", {})
+                job_store.update_job(task_id, status="done")
+            return rows
+
+        async def collect():
+            with patch.object(learning, "events_after", side_effect=read_then_finish):
+                return [frame async for frame in learning_routes.event_stream(job["task_id"], OWNER)]
+
+        frames = await asyncio.wait_for(collect(), 0.4)
+        self.assertTrue(any(b"subtitle_ready" in frame for frame in frames))
+        self.assertIn(b"task_state", frames[-1])
+
+    async def test_stream_checks_owner_before_reading_events(self):
+        job = self.job([])
+        learning.emit(job["task_id"], "subtitle_ready", {})
+        frames = [frame async for frame in learning_routes.event_stream(job["task_id"], {"guest_id": "other"})]
+        self.assertEqual([], frames)
+
+    def test_submit_waits_for_initialization_before_admitting_job(self):
+        with patch.object(learning_routes, "normalize", return_value=URL), \
+                patch.object(learning, "restore_subtitle") as restore:
+            restore.side_effect = lambda *args: self.assertIsNone(job_store.claim_next_job())
+            job = learning_routes.submit(learning_routes.PrepareRequest(url=URL), OWNER, [])
+        self.assertNotIn("_admission_pending", job["payload"])
+        self.assertEqual(job["task_id"], job_store.claim_next_job()["task_id"])
+
+    def test_failed_submit_releases_reservation_and_cannot_run(self):
+        with patch.object(learning_routes, "normalize", return_value=URL), \
+                patch.object(learning_routes, "is_ai_available", return_value=True), \
+                patch.object(learning, "restore_subtitle", side_effect=RuntimeError("initialization failed")):
+            with self.assertRaisesRegex(RuntimeError, "initialization failed"):
+                learning_routes.submit(learning_routes.GenerateRequest(url=URL, targets=["summary"]), OWNER, ["summary"])
+        self.assertEqual((0, 0), self.counts())
+        self.assertIsNone(job_store.claim_next_job())
+        with database.get_db() as conn:
+            self.assertEqual("failed", conn.execute("SELECT status FROM background_jobs").fetchone()[0])
+
+    def test_duplicate_submit_cannot_admit_pending_job(self):
+        pending = self.job([], request_key="same", refresh_subtitle=False,
+                           _admission_pending=True, _admission_token="first")
+        with patch.object(learning_routes, "normalize", return_value=URL):
+            duplicate = learning_routes.submit(learning_routes.PrepareRequest(url=URL, request_key="same"), OWNER, [])
+        self.assertEqual(pending["task_id"], duplicate["task_id"])
+        self.assertTrue(duplicate["payload"]["_admission_pending"])
+        self.assertIsNone(job_store.claim_next_job())
+
+    async def test_submit_to_subtitle_event_while_generation_is_running(self):
+        heavy_started, release = asyncio.Event(), asyncio.Event()
+        heavy_id = job_store.create_job("other-video", "https://example.com/other", **OWNER,
+                                        payload={"targets": ["summary"]}, job_type="learning")
+
+        async def long_handler(job, scheduler):
+            heavy_started.set()
+            await release.wait()
+            return {}
+
+        long = JobScheduler(lane="default", work_dir=self.scheduler.work_dir,
+                            handlers={"learning": long_handler})
+        native = JobScheduler(lane="subtitle", work_dir=self.scheduler.work_dir, poll_interval=30,
+                              handlers={"learning": learning.run_learning_job})
+        with patch.object(learning, "fetch_subtitle", new=AsyncMock(return_value=(TEXT, "bilibili_cc", "zh"))), \
+                patch.object(learning_routes, "normalize", return_value=URL):
+            await long.start()
+            await native.start(recover_interrupted=False)
+            try:
+                await asyncio.wait_for(heavy_started.wait(), 1)
+                started = time.monotonic()
+                job = await asyncio.to_thread(learning_routes.submit,
+                                              learning_routes.PrepareRequest(url=URL), OWNER, [])
+                stream = learning_routes.event_stream(job["task_id"], OWNER)
+
+                async def until_ready():
+                    async for frame in stream:
+                        if b'"subtitle_ready"' in frame:
+                            return
+                    self.fail("subtitle event missing")
+
+                try:
+                    await asyncio.wait_for(until_ready(), 0.5)
+                    elapsed_ms = (time.monotonic() - started) * 1000
+                    self.assertIsNotNone(learning.workspace(URL, OWNER)["subtitle"])
+                    self.assertEqual("downloading", job_store.get_job(heavy_id)["status"])
+                    print(f"submit_to_subtitle_ready_ms={elapsed_ms:.1f} (mock upstream; long task still running)")
+                finally:
+                    await stream.aclose()
+            finally:
+                release.set()
+                await asyncio.gather(long.stop(), native.stop())

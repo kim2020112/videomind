@@ -7,11 +7,41 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from config import DB_PATH
+from core import job_signals
 
 
 ACTIVE_STATUSES = ("queued", "downloading", "transcribing", "generating", "awaiting_confirmation")
 PROCESSING_STATUSES = ("downloading", "transcribing", "generating")
 TERMINAL_STATUSES = ("done", "partial", "failed", "cancelled")
+
+# Only native-subtitle preparation belongs in the short lane. Confirmed
+# transcription and learning generation retain the original single worker.
+_SUBTITLE_LANE_SQL = """(job_type = 'learning' AND CASE WHEN json_valid(payload_json) THEN
+    COALESCE(json_type(payload_json, '$.targets') = 'array'
+        AND json_array_length(payload_json, '$.targets') = 0
+        AND COALESCE(json_extract(payload_json, '$.input_source'), 'subtitle') = 'subtitle'
+        AND COALESCE(json_extract(payload_json, '$.allow_transcription'), 0) = 0, 0)
+    ELSE 0 END)"""
+_ADMITTED_SQL = """(CASE WHEN json_valid(payload_json) THEN
+    COALESCE(json_extract(payload_json, '$._admission_pending'), 0) = 0 ELSE 1 END)"""
+
+
+def _lane_sql(lane: str | None) -> str:
+    if lane is None:
+        return "1"
+    if lane == "subtitle":
+        return _SUBTITLE_LANE_SQL
+    if lane == "default":
+        return f"NOT {_SUBTITLE_LANE_SQL}"
+    raise ValueError(f"unknown job lane: {lane}")
+
+
+def _job_lane(row) -> str:
+    payload = _decode_json(row["payload_json"], {})
+    return "subtitle" if (row["job_type"] == "learning" and isinstance(payload, dict)
+                           and payload.get("targets") == []
+                           and payload.get("input_source", "subtitle") == "subtitle"
+                           and not payload.get("allow_transcription")) else "default"
 
 
 def _now() -> str:
@@ -126,6 +156,7 @@ def create_job(
                 now,
             ),
         )
+    job_signals.notify(job_id)
     return job_id
 
 
@@ -176,32 +207,43 @@ def find_active_job(
     return _row_to_job(row, position)
 
 
-def claim_next_job() -> dict | None:
-    """Atomically claim the oldest job when no other job is processing."""
+def claim_next_job(lane: str | None = None) -> dict | None:
+    """Claim one job atomically, with at most one running job per lane.
+
+    Omitting the lane retains the original global single-worker behavior for
+    standalone consumers. Production uses one worker for each explicit lane.
+    """
+    lane_sql = _lane_sql(lane)
     processing_placeholders = ",".join("?" for _ in PROCESSING_STATUSES)
     now = _now()
     with _db() as conn:
         conn.execute("BEGIN IMMEDIATE")
         running = conn.execute(
-            f"SELECT 1 FROM background_jobs WHERE status IN ({processing_placeholders}) LIMIT 1",
+            f"SELECT 1 FROM background_jobs WHERE status IN ({processing_placeholders}) "
+            f"AND {lane_sql} LIMIT 1",
             PROCESSING_STATUSES,
         ).fetchone()
         if running:
             return None
         row = conn.execute(
             "SELECT * FROM background_jobs WHERE status = 'queued' "
-            "AND cancel_requested = 0 ORDER BY created_at LIMIT 1"
+            f"AND cancel_requested = 0 AND {_ADMITTED_SQL} AND {lane_sql} "
+            "AND NOT EXISTS (SELECT 1 FROM background_jobs running "
+            f"WHERE running.status IN ({processing_placeholders}) "
+            "AND running.url_hash = background_jobs.url_hash) ORDER BY created_at LIMIT 1",
+            PROCESSING_STATUSES,
         ).fetchone()
         if not row:
             return None
         conn.execute(
             "UPDATE background_jobs SET status = 'downloading', progress = 0, "
             "message = ?, started_at = ?, updated_at = ? WHERE id = ? AND status = 'queued'",
-            ("正在准备音频", now, now, row["id"]),
+            ("正在获取字幕" if _job_lane(row) == "subtitle" else "正在准备音频", now, now, row["id"]),
         )
         claimed = conn.execute(
             "SELECT * FROM background_jobs WHERE id = ?", (row["id"],)
         ).fetchone()
+    job_signals.notify(claimed["id"])
     return _row_to_job(claimed)
 
 
@@ -243,7 +285,10 @@ def update_job(job_id: str, **changes) -> bool:
             f"UPDATE background_jobs SET {assignments} WHERE id = ?",
             [*values.values(), job_id],
         )
-    return cursor.rowcount == 1
+    updated = cursor.rowcount == 1
+    if updated:
+        job_signals.notify(job_id)
+    return updated
 
 
 def request_cancel(
@@ -270,6 +315,7 @@ def request_cancel(
                 "UPDATE background_jobs SET cancel_requested = 1, message = ?, updated_at = ? WHERE id = ?",
                 ("正在取消任务", now, job_id),
             )
+    job_signals.notify(job_id)
     return True
 
 
@@ -287,6 +333,13 @@ def recover_interrupted_jobs() -> int:
     now = _now()
     with _db() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        # A request interrupted before quota/history/visibility setup finished
+        # must never be treated as ready after restart.
+        conn.execute(
+            "UPDATE background_jobs SET status = 'failed', error = ?, message = ?, "
+            f"completed_at = ?, updated_at = ? WHERE status = 'queued' AND NOT {_ADMITTED_SQL}",
+            ["提交任务时服务重启，请重新提交", "提交任务时服务重启，请重新提交", now, now],
+        )
         conn.execute("DELETE FROM learning_usage WHERE status = 'reserved' AND operation_id NOT IN "
                      "(SELECT id FROM background_jobs WHERE status IN ('queued','downloading','transcribing','generating'))")
         conn.execute("DELETE FROM learning_events WHERE task_id IN (SELECT id FROM background_jobs "
@@ -304,15 +357,20 @@ def recover_interrupted_jobs() -> int:
             f"WHERE status IN ({placeholders})",
             ["服务重启，任务已重新排队并将从头处理", now, *PROCESSING_STATUSES],
         )
+    if cursor.rowcount:
+        job_signals.notify()
     return cursor.rowcount
 
 
 def _queue_position(conn: sqlite3.Connection, row: sqlite3.Row | None) -> int | None:
     if not row or row["status"] != "queued":
         return None
+    payload = _decode_json(row["payload_json"], {})
+    if isinstance(payload, dict) and payload.get("_admission_pending"):
+        return None
     result = conn.execute(
         "SELECT COUNT(*) FROM background_jobs WHERE status = 'queued' "
-        "AND cancel_requested = 0 AND created_at <= ?",
+        f"AND cancel_requested = 0 AND created_at <= ? AND {_ADMITTED_SQL} AND {_lane_sql(_job_lane(row))}",
         (row["created_at"],),
     ).fetchone()
     return int(result[0]) if result else None

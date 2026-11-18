@@ -1,8 +1,8 @@
-"""Async scheduler that runs one background job at a time.
+"""Async scheduler that runs one background job per configured lane.
 
 默认按 whisper 子进程执行；通过 handlers 可为其他 job_type 注册进程内处理器
-（如博主批量条目 batch_item）。全局单槽：同一时刻只有一个 PROCESSING 任务，
-因此处理器内禁止再 create_job 排队，否则会死锁。
+（如博主批量条目 batch_item）。每个实例持有自己的 worker 状态；原生字幕和
+长任务各占一个有界通道。处理器内禁止等待本通道中的另一个排队任务。
 """
 
 import asyncio
@@ -10,11 +10,12 @@ import inspect
 import json
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from config import TEMP_DIR
-from core import job_store
+from core import job_signals, job_store
 from core.logging_config import get_logger
 
 
@@ -45,6 +46,7 @@ class JobScheduler:
         on_completed: Callable | None = None,
         on_terminal: Callable | None = None,
         handlers: dict[str, Callable] | None = None,
+        lane: str | None = None,
     ):
         self.work_dir = Path(work_dir or (TEMP_DIR / "background_jobs"))
         self.command_factory = command_factory or self._default_command
@@ -54,23 +56,26 @@ class JobScheduler:
         self.on_completed = on_completed
         self.on_terminal = on_terminal
         self.handlers = handlers or {}
+        job_store._lane_sql(lane)  # Reject unknown lanes before starting a loop.
+        self.lane = lane
         self._loop_task: asyncio.Task | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._current_job_id: str | None = None
         self._stopping = False
 
-    async def start(self) -> None:
+    async def start(self, *, recover_interrupted: bool = True) -> None:
         if self._loop_task and not self._loop_task.done():
             return
         self.work_dir.mkdir(parents=True, exist_ok=True)
-        recovered = job_store.recover_interrupted_jobs()
+        recovered = job_store.recover_interrupted_jobs() if recover_interrupted else 0
         if recovered:
             logger.info("Recovered %s interrupted background job(s)", recovered)
         self._stopping = False
-        self._loop_task = asyncio.create_task(self._run_loop(), name="background-job-scheduler")
+        self._loop_task = asyncio.create_task(self._run_loop(), name=f"background-job-scheduler-{self.lane or 'all'}")
 
     async def stop(self) -> None:
         self._stopping = True
+        job_signals.notify()
         if self._process and self._process.returncode is None:
             await self._terminate_process(self._process)
         if self._loop_task:
@@ -78,15 +83,26 @@ class JobScheduler:
         self._loop_task = None
 
     async def _run_loop(self) -> None:
-        while not self._stopping:
-            processed = await self.run_once()
-            if not processed:
-                await asyncio.sleep(self.poll_interval)
+        async with job_signals.subscribe() as signal:
+            while not self._stopping:
+                # Clear before querying: a commit between the query and wait
+                # then remains observable, including writes from API threads.
+                signal.clear()
+                processed = await self.run_once()
+                if not processed and not self._stopping:
+                    await signal.wait(timeout=self.poll_interval)
 
     async def run_once(self) -> bool:
-        job = job_store.claim_next_job()
+        job = job_store.claim_next_job(self.lane)
         if not job:
             return False
+        try:
+            created = datetime.fromisoformat(job["created_at"])
+            queue_wait_ms = max(0, (datetime.now(timezone.utc) - created).total_seconds() * 1000)
+        except (TypeError, ValueError, KeyError):
+            queue_wait_ms = 0
+        logger.info("job_claim task_id=%s lane=%s queue_wait_ms=%.1f",
+                    job["task_id"], self.lane or "all", queue_wait_ms)
         await self._run_job(job)
         return True
 

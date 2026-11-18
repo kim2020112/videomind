@@ -1,6 +1,6 @@
 """Shared, persistent limits for Bilibili access, including worker processes.
 
-No credentials are stored here. API/media calls retain serialized protection;
+No credentials are stored here. API and media calls are serialized separately;
 thumbnail admission is independent of network I/O, with four download slots.
 SQLite retains budgets and the circuit breaker across restarts.
 """
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import fcntl
+import logging
 import os
 import sqlite3
 import threading
@@ -31,8 +32,10 @@ LIMITS = {"api": (5.0, ((3600, 120), (86400, 600))),
 RISK_CODES = frozenset((-111, -352, -401, -412, -509, -799))
 SCOPE_NAMES = {"all": "请求", "catalog": "投稿列表", "subtitle": "字幕", "video": "视频解析", "metadata": "视频信息", "media": "媒体资源", "account": "登录验证", "thumbnail": "封面图片"}
 _LOCK = threading.Lock()
+_MEDIA_LOCK = threading.Lock()
 _THUMBNAIL_ADMISSION_LOCK = threading.Lock()
 _THUMBNAIL_SLOTS = threading.BoundedSemaphore(4)
+logger = logging.getLogger(__name__)
 
 
 class BilibiliAccessBlocked(RuntimeError):
@@ -163,14 +166,19 @@ def request_slot(kind: str = "api", scope: str = "all"):
     if kind not in LIMITS and not (kind == "thumbnail" and "media" in LIMITS):
         raise ValueError(f"unknown request kind: {kind}")
     thumbnail_slot = kind == "thumbnail"
-    lock = _THUMBNAIL_ADMISSION_LOCK if thumbnail_slot else _LOCK
+    lock = _THUMBNAIL_ADMISSION_LOCK if thumbnail_slot else _MEDIA_LOCK if kind == "media" else _LOCK
+    suffix = ".thumbnail.lock" if thumbnail_slot else ".media.lock" if kind == "media" else ".lock"
+    started = time.monotonic()
+    lock_wait = rate_wait = 0.0
+    admitted_at = None
+    outcome = "stopped"
     if not lock.acquire(timeout=30):
         raise BilibiliAccessBlocked("B 站请求正在排队，请稍后手动继续", "budget")
     lockfile = None
     acquired = False
     try:
         STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        lockfile = open(str(STATE_PATH) + (".thumbnail.lock" if thumbnail_slot else ".lock"), "a")
+        lockfile = open(str(STATE_PATH) + suffix, "a")
         deadline = time.monotonic() + 30
         while not acquired:
             try:
@@ -180,6 +188,7 @@ def request_slot(kind: str = "api", scope: str = "all"):
                 if time.monotonic() >= deadline:
                     raise BilibiliAccessBlocked("B 站请求正在排队，请稍后手动继续", "budget")
                 time.sleep(0.1)
+        lock_wait = time.monotonic() - started
         interval, budgets = LIMITS[kind] if kind in LIMITS else LIMITS["media"]
         with _database() as connection:
             now = time.time()
@@ -187,8 +196,14 @@ def request_slot(kind: str = "api", scope: str = "all"):
             latest = connection.execute("SELECT max(at) FROM requests WHERE kind=?", (kind,)).fetchone()[0]
             wait = max(0, (latest or 0) + interval - now)
         if wait:
+            waiting_at = time.monotonic()
             time.sleep(wait)
+            rate_wait = time.monotonic() - waiting_at
         with _database() as connection:
+            # Separate kinds may be admitted concurrently. Keep protection,
+            # budget checks and accounting atomic with other admissions/trips.
+            # This short transaction never spans rate waiting or network I/O.
+            connection.execute("BEGIN IMMEDIATE")
             now = time.time()
             _check(connection, now, scope)
             for period, maximum in budgets:
@@ -199,7 +214,8 @@ def request_slot(kind: str = "api", scope: str = "all"):
             connection.execute("INSERT INTO requests VALUES (?, ?)", (now, kind))
         # Thumbnail downloads are admitted and counted before the network call,
         # but do not hold the admission lock while reading a slow image.
-        # Other request kinds retain the previous serialized behavior.
+        # API and media each retain serialization within their own kind, so an
+        # API's five-second wait cannot hold up an already-known subtitle URL.
         if thumbnail_slot:
             if lockfile is not None and acquired:
                 fcntl.flock(lockfile, fcntl.LOCK_UN)
@@ -208,7 +224,9 @@ def request_slot(kind: str = "api", scope: str = "all"):
             lockfile = None
             lock.release()
             lock = None
+        admitted_at = time.monotonic()
         yield
+        outcome = "completed"
     except (OSError, sqlite3.Error) as exc:
         # HTTP libraries' transport errors are handled by their callers. Local
         # state/locking errors must not fail open.
@@ -220,6 +238,13 @@ def request_slot(kind: str = "api", scope: str = "all"):
             lockfile.close()
         if lock is not None:
             lock.release()
+        if not thumbnail_slot:
+            logger.info(
+                "bilibili_request kind=%s scope=%s lock_wait_ms=%.1f rate_wait_ms=%.1f active_ms=%.1f outcome=%s",
+                kind, scope, lock_wait * 1000, rate_wait * 1000,
+                (time.monotonic() - admitted_at) * 1000 if admitted_at is not None else 0,
+                outcome,
+            )
 
 
 @contextmanager

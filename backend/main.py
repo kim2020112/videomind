@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 from fastapi import FastAPI
@@ -66,13 +67,23 @@ async def lifespan(app: FastAPI):
         on_completed=finalize_whisper_job,
         on_terminal=_on_terminal,
         handlers={"batch_item": run_batch_item, "learning": run_learning_job},
+        lane="default",
+    )
+    subtitle_scheduler = JobScheduler(
+        on_terminal=_on_terminal,
+        handlers={"learning": run_learning_job},
+        lane="subtitle",
     )
     app.state.job_scheduler = scheduler
+    app.state.subtitle_scheduler = subtitle_scheduler
     await scheduler.start()
     try:
+        # Recovery belongs to startup, not to each independent lane: a second
+        # recovery pass could requeue work already claimed by the first lane.
+        await subtitle_scheduler.start(recover_interrupted=False)
         yield
     finally:
-        await scheduler.stop()
+        await asyncio.gather(scheduler.stop(), subtitle_scheduler.stop())
 
 
 app = FastAPI(

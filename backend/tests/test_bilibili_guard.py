@@ -31,6 +31,7 @@ CDN_URL = "https://aisubtitle.hdslb.com/subtitle.json"
 def isolated_guard(tmp_path, monkeypatch):
     monkeypatch.setattr(guard, "STATE_PATH", tmp_path / "guard.db")
     monkeypatch.setattr(guard, "_LOCK", threading.Lock())
+    monkeypatch.setattr(guard, "_MEDIA_LOCK", threading.Lock())
     monkeypatch.setattr(guard, "LIMITS", {
         "api": (0, ((3600, 60), (86400, 300))),
         "media": (0, ((60, 120), (3600, 1200), (86400, 3000))),
@@ -250,17 +251,18 @@ except guard.BilibiliAccessBlocked as error:
     assert result.stdout.strip() == "budget"
 
 
-def test_separate_worker_processes_share_one_request_budget():
+@pytest.mark.parametrize("kind", ["api", "media"])
+def test_separate_worker_processes_share_one_request_budget(kind):
     with guard._database() as connection:
-        connection.executemany("INSERT INTO requests VALUES (?, 'api')", [(time.time(),)] * 58)
+        connection.executemany("INSERT INTO requests VALUES (?, ?)", [(time.time(), kind)] * 58)
     environment = os.environ.copy()
     environment["BILIBILI_GUARD_PATH"] = str(guard.STATE_PATH)
     environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
-    script = """
+    script = f"""
 from core import bilibili_guard as guard
-guard.LIMITS['api'] = (0, ((3600, 60), (86400, 300)))
+guard.LIMITS[{kind!r}] = (0, ((3600, 60), (86400, 300)))
 try:
-    with guard.request_slot():
+    with guard.request_slot({kind!r}):
         print('admitted')
 except guard.BilibiliAccessBlocked as error:
     print(error.code)
@@ -288,7 +290,8 @@ except guard.BilibiliAccessBlocked as error:
         assert connection.execute("SELECT count(*) FROM requests").fetchone()[0] == 60
 
 
-def test_api_requests_are_spaced_by_five_seconds(monkeypatch):
+@pytest.mark.parametrize("kind,interval", [("api", 5), ("media", 0.25)])
+def test_requests_keep_their_minimum_interval(monkeypatch, kind, interval):
     now = [100_000.0]
     waits = []
 
@@ -298,20 +301,21 @@ def test_api_requests_are_spaced_by_five_seconds(monkeypatch):
 
     monkeypatch.setattr(guard.time, "time", lambda: now[0])
     monkeypatch.setattr(guard.time, "sleep", sleep)
-    monkeypatch.setitem(guard.LIMITS, "api", (5, ((3600, 120), (86400, 600))))
+    monkeypatch.setitem(guard.LIMITS, kind, (interval, ((3600, 120), (86400, 600))))
     admitted = []
     for _ in range(3):
-        with guard.request_slot():
+        with guard.request_slot(kind):
             admitted.append(now[0])
-    assert admitted == [100_000.0, 100_005.0, 100_010.0]
-    assert waits == [5, 5]
+    assert admitted == [100_000.0, 100_000.0 + interval, 100_000.0 + 2 * interval]
+    assert waits == [interval, interval]
 
 
-def test_protection_is_rechecked_after_waiting(monkeypatch):
+@pytest.mark.parametrize("kind", ["api", "media"])
+def test_protection_is_rechecked_after_waiting(monkeypatch, kind):
     now = [100_000.0]
     monkeypatch.setattr(guard.time, "time", lambda: now[0])
-    monkeypatch.setitem(guard.LIMITS, "api", (10, ((3600, 60),)))
-    with guard.request_slot():
+    monkeypatch.setitem(guard.LIMITS, kind, (10, ((3600, 60),)))
+    with guard.request_slot(kind):
         pass
 
     def risk_during_wait(seconds):
@@ -320,8 +324,81 @@ def test_protection_is_rechecked_after_waiting(monkeypatch):
 
     monkeypatch.setattr(guard.time, "sleep", risk_during_wait)
     with pytest.raises(guard.BilibiliAccessBlocked):
-        with guard.request_slot():
+        with guard.request_slot(kind):
             pytest.fail("A waiting request must stop when protection was enabled")
+
+
+@pytest.mark.parametrize("blocked_stage", ["rate_wait", "network"])
+def test_subtitle_cdn_completes_while_api_is_waiting(monkeypatch, blocked_stage):
+    """Exercise both blocking regions with real concurrent request threads."""
+    api_blocked = threading.Event()
+    release_api = threading.Event()
+    now = [100_000.0]
+    monkeypatch.setattr(guard.time, "time", lambda: now[0])
+
+    def block_api():
+        api_blocked.set()
+        assert release_api.wait(3), "test did not release the API request"
+
+    def sleep(seconds):
+        block_api()
+        now[0] += seconds
+
+    if blocked_stage == "rate_wait":
+        monkeypatch.setitem(guard.LIMITS, "api", (5, ((3600, 120), (86400, 600))))
+        with guard.request_slot("api", "metadata"):
+            pass
+        monkeypatch.setattr(guard.time, "sleep", sleep)
+
+    def upstream(url, **kwargs):
+        if url == API_URL and blocked_stage == "network":
+            block_api()
+        return upstream_response(url=url)
+
+    monkeypatch.setattr(guard.httpx, "get", upstream)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        api = executor.submit(guard.guarded_get, API_URL)
+        try:
+            assert api_blocked.wait(2)
+            media = executor.submit(guard.guarded_get, CDN_URL)
+            assert media.result(timeout=1).status_code == 200
+            assert not api.done(), "CDN should finish before API is released"
+        finally:
+            release_api.set()
+        assert api.result(timeout=2).status_code == 200
+
+
+def test_subtitle_cdn_does_not_wait_for_api_in_another_process():
+    environment = os.environ.copy()
+    environment["BILIBILI_GUARD_PATH"] = str(guard.STATE_PATH)
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    # The parent holds API's process lock across the child's whole lifetime.
+    # Independent thread locks alone cannot make this scenario pass.
+    with guard.request_slot("api", "metadata"):
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", """
+from core.bilibili_guard import request_slot
+with request_slot('media', 'subtitle'):
+    print('admitted')
+"""],
+            env=environment, capture_output=True, text=True, timeout=5, check=True,
+        )
+    assert result.stdout.strip() == "admitted"
+    with sqlite3.connect(guard.STATE_PATH) as connection:
+        assert dict(connection.execute("SELECT kind, count(*) FROM requests GROUP BY kind")) == {"api": 1, "media": 1}
+
+
+def test_request_timing_logs_do_not_include_signed_urls_or_credentials(monkeypatch, caplog):
+    url = CDN_URL + "?sign=private-signature"
+    monkeypatch.setattr(guard.httpx, "get", Mock(return_value=upstream_response(url=url)))
+    with caplog.at_level("INFO", logger="core.bilibili_guard"):
+        guard.guarded_get(url, headers={"Cookie": "SESSDATA=private-cookie"})
+    message = caplog.records[-1].getMessage()
+    assert "kind=media scope=subtitle" in message
+    for field in ("lock_wait_ms=", "rate_wait_ms=", "active_ms=", "outcome=completed"):
+        assert field in message
+    assert "private" not in message
+    assert "https://" not in message
 
 
 @pytest.mark.parametrize("earlier_requests,age,expected_total", [

@@ -80,6 +80,10 @@
 3. yt-dlp 可用字幕。
 4. 用户确认后的 Whisper 本地转录。
 
+后台调度提供两个独立单槽：仅获取平台字幕的 `learning` 任务使用字幕通道；AI 整理、批量任务和已确认的 Whisper 使用长任务通道。不同 URL 可并行，同一 URL hash 的任务跨通道互斥；被同视频阻塞的队列项不阻止其他视频执行。确认转录后任务回到长任务通道。两个调度器各自持有 worker 状态，启动只恢复一次中断任务。
+
+任务完成提交初始化后才允许领取；初始化被重启打断的任务标记失败并释放预留额度。任务入队、状态提交和字幕事件落库后通过线程安全的本地订阅立即唤醒调度器或 SSE；每秒检查保留为其他进程写入及通知遗漏的兜底。SSE 仍使用持久事件游标重放并校验身份，读取终态前保证最后一批事件可交付。
+
 B 站 CC 查询使用三态语义：
 
 - `available`：已取得可用字幕。
@@ -116,7 +120,7 @@ SQLite 保存用户、会话、视频、字幕、AI 输出、学习历史、缓�
 
 目录同步（`core/blogger/sync.py`）运行在独立线程池，不进重任务队列。所有 B 站入口共享 `core/bilibili_guard.py` 的持久化限速与额度，API 至少间隔 5 秒、每小时 120 次、每 24 小时 600 次；每次同步最多 20 页并保留断点。403/412/风控代码仅暂停对应功能 10/20/40/最多60分钟，429短时暂停所有功能，不自动重试或切换接口；`login` / `budget` / `protection` 也暂停。首次分页前的 `network` 错误最多退避 30s/120s，已有进度则暂停。仅列表/字幕等必要API默认使用登录 Cookie，网页和 CDN 默认匿名；重复元数据短期缓存。保留同页签名防死循环、空目录一致性检查，并跳过课堂推广条目。详见 [B 站访问保护](bilibili-access.md)。
 
-批量条目是 `job_type="batch_item"` 的后台任务，每条目一 job：复用 `job_store` 的单槽队列、取消与崩溃恢复；`JobScheduler` 按 `job_type` 分发到进程内处理器 `core/blogger/batch_runner.py`——缓存命中直接复用，bvid+cid 已知时跳过 yt-dlp 解析快取 CC 字幕，无字幕才跑 Whisper 子进程（处理器内禁止再 create_job，单槽会死锁），AI 生成走 `background_pipeline.generate_full_from_subtitle`（与 Whisper 后完成共用），`generate-then-swap` 原子提交。AI 前有额度闸门，超限条目跳过并暂停整批。批量成果写入所属身份的学习历史后，同样受到缓存淘汰保护。
+批量条目是 `job_type="batch_item"` 的后台任务，每条目一 job：复用 `job_store` 的长任务单槽、取消与崩溃恢复；`JobScheduler` 按 `job_type` 分发到进程内处理器 `core/blogger/batch_runner.py`——缓存命中直接复用，bvid+cid 已知时跳过 yt-dlp 解析快取 CC 字幕，无字幕才跑 Whisper 子进程（处理器内禁止再 create_job，单槽会死锁），AI 生成走 `background_pipeline.generate_full_from_subtitle`（与 Whisper 后完成共用），`generate-then-swap` 原子提交。AI 前有额度闸门，超限条目跳过并暂停整批。批量成果写入所属身份的学习历史后，同样受到缓存淘汰保护。
 
 ## 后台任务
 
@@ -167,4 +171,4 @@ FastAPI lifespan 依次完成：
 
 字幕身份校验集中于 `core/subtitle_identity.py` 与 `core/subtitle_validation.py`，字幕数据库保存来源证明；访问 JSON 与封面分别使用有界缓存和请求合并。工作台轻量解析、下载页按需取得格式。最新边界说明见 [B 站访问说明](bilibili-access.md)。
 
-封面代理使用独立四线程下载队列与四个跨进程下载槽；准入锁仅覆盖额度检查，网络读取不会占用 API/媒体全局锁。缓存分为内存（1 小时，256 条/32 MiB）、SQLite 磁盘（7 天，图片内容 256 MiB）和浏览器（1 小时，ETag）。内存命中直接返回，磁盘命中无需远端额度。详细限制与回归记录见 [B 站访问说明](bilibili-access.md)。
+封面代理使用独立四线程下载队列与四个跨进程下载槽；准入锁仅覆盖额度检查，网络读取不会占用 API 或媒体的请求锁。缓存分为内存（1 小时，256 条/32 MiB）、SQLite 磁盘（7 天，图片内容 256 MiB）和浏览器（1 小时，ETag）。内存命中直接返回，磁盘命中无需远端额度。详细限制与回归记录见 [B 站访问说明](bilibili-access.md)。
