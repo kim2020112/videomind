@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from core.models import SubtitleTrack
+from core import bilibili_guard
 from core.pipeline import subtitle
 
 
@@ -39,6 +40,27 @@ class SubtitleLanguageTests(unittest.TestCase):
 
         self.assertEqual(("中文字幕正文 " * 8, "youtube_auto", "ai-zh"), result)
         download.assert_called_once_with(URL, "ai-zh", True)
+
+    def test_native_subtitle_download_inherits_bounded_request_context(self):
+        info = SimpleNamespace(
+            title="YouTube video", webpage_url="https://www.youtube.com/watch?v=demo",
+            extractor="youtube",
+            subtitles=[SubtitleTrack(lang="en", name="English", ext="vtt", is_auto=True)],
+        )
+        inherited_operations = []
+
+        def download(*args):
+            inherited_operations.append(bilibili_guard._subtitle_burst_operation.get())
+            return "raw subtitle", "vtt"
+
+        with patch.object(subtitle, "get_subtitle_from_db", return_value=None), \
+             patch.object(subtitle, "_download_subtitle_content", side_effect=download), \
+             patch.object(subtitle, "clean_subtitle_text", return_value="字幕内容足够长 " * 10):
+            with bilibili_guard.subtitle_api_burst("task-native-thread"):
+                result = asyncio.run(subtitle.fetch_subtitle(info.webpage_url, info))
+
+        self.assertEqual("youtube_auto", result[1])
+        self.assertEqual(["task-native-thread"], inherited_operations)
 
 
 if __name__ == "__main__":

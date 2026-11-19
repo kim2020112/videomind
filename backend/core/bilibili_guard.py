@@ -15,6 +15,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -26,7 +27,7 @@ STATE_PATH = Path(os.getenv("BILIBILI_GUARD_PATH", str(BASE_DIR / "db" / "bilibi
 COOLDOWN_SECONDS = 10 * 60
 MAX_COOLDOWN_SECONDS = 60 * 60
 # Application limits, not a claim about the platform's safe request threshold.
-LIMITS = {"api": (5.0, ((3600, 120), (86400, 600))),
+LIMITS = {"api": (5.0, ((60, 30), (3600, 120), (86400, 600))),
           "media": (0.25, ((60, 120), (3600, 1200), (86400, 3000))),
           "thumbnail": (0.25, ((60, 120), (3600, 1200), (86400, 3000)))}
 RISK_CODES = frozenset((-111, -352, -401, -412, -509, -799))
@@ -35,6 +36,11 @@ _LOCK = threading.Lock()
 _MEDIA_LOCK = threading.Lock()
 _THUMBNAIL_ADMISSION_LOCK = threading.Lock()
 _THUMBNAIL_SLOTS = threading.BoundedSemaphore(4)
+SUBTITLE_BURST_INTERVAL = 0.25
+SUBTITLE_BURST_MAX_REQUESTS = 4
+_subtitle_burst_operation: ContextVar[str | None] = ContextVar(
+    "bilibili_subtitle_burst_operation", default=None,
+)
 logger = logging.getLogger(__name__)
 
 
@@ -74,6 +80,21 @@ def request_scope(url: str) -> str:
 
 
 @contextmanager
+def subtitle_api_burst(operation_id: str):
+    """Allow one bounded, fast API burst for a user-initiated subtitle job.
+
+    asyncio.to_thread propagates this context to the blocking HTTP work. The
+    operation id is persisted with admitted API requests, so the cap also
+    holds across workers and process restarts.
+    """
+    token = _subtitle_burst_operation.set(str(operation_id))
+    try:
+        yield
+    finally:
+        _subtitle_burst_operation.reset(token)
+
+
+@contextmanager
 def _database():
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(STATE_PATH, timeout=5)
@@ -89,8 +110,20 @@ def _database():
             until = 0 if old[1].startswith('近期目录同步') else trigger + COOLDOWN_SECONDS
             connection.execute("INSERT OR IGNORE INTO cooldowns VALUES ('all', ?, ?, 1, ?)", (until, old[1], trigger))
             connection.execute("DELETE FROM protection WHERE id=1")
-        connection.execute("CREATE TABLE IF NOT EXISTS requests (at REAL NOT NULL, kind TEXT NOT NULL)")
+        connection.execute("CREATE TABLE IF NOT EXISTS requests (at REAL NOT NULL, kind TEXT NOT NULL, operation_id TEXT)")
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(requests)")}
+        if "operation_id" not in columns:
+            # Existing installations retain their request history and acquire
+            # a nullable operation id for future bounded subtitle bursts. Two
+            # workers may inspect an old database at once, so tolerate only a
+            # duplicate-column race and fail closed for every other error.
+            try:
+                connection.execute("ALTER TABLE requests ADD COLUMN operation_id TEXT")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
         connection.execute("CREATE INDEX IF NOT EXISTS request_time ON requests(kind, at)")
+        connection.execute("CREATE INDEX IF NOT EXISTS request_operation ON requests(operation_id, at)")
         connection.commit()
         yield connection
         connection.commit()
@@ -190,9 +223,22 @@ def request_slot(kind: str = "api", scope: str = "all"):
                 time.sleep(0.1)
         lock_wait = time.monotonic() - started
         interval, budgets = LIMITS[kind] if kind in LIMITS else LIMITS["media"]
+        operation_id = _subtitle_burst_operation.get() if kind == "api" else None
+        if operation_id is not None:
+            interval = min(interval, SUBTITLE_BURST_INTERVAL)
         with _database() as connection:
             now = time.time()
             _check(connection, now, scope)
+            if operation_id is not None:
+                count = connection.execute(
+                    "SELECT count(*) FROM requests WHERE kind='api' AND operation_id=?",
+                    (operation_id,),
+                ).fetchone()[0]
+                if count >= SUBTITLE_BURST_MAX_REQUESTS:
+                    raise BilibiliAccessBlocked(
+                        "本次字幕操作已达到 B 站请求上限，任务已暂停；请稍后手动继续或使用已有缓存",
+                        "budget",
+                    )
             latest = connection.execute("SELECT max(at) FROM requests WHERE kind=?", (kind,)).fetchone()[0]
             wait = max(0, (latest or 0) + interval - now)
         if wait:
@@ -210,8 +256,21 @@ def request_slot(kind: str = "api", scope: str = "all"):
                 count = connection.execute("SELECT count(*) FROM requests WHERE kind=? AND at>?", (kind, now-period)).fetchone()[0]
                 if count >= maximum:
                     raise BilibiliAccessBlocked("已达到 B 站本地请求额度，任务已暂停；请稍后手动继续或使用已有缓存", "budget")
+            if operation_id is not None:
+                count = connection.execute(
+                    "SELECT count(*) FROM requests WHERE kind='api' AND operation_id=?",
+                    (operation_id,),
+                ).fetchone()[0]
+                if count >= SUBTITLE_BURST_MAX_REQUESTS:
+                    raise BilibiliAccessBlocked(
+                        "本次字幕操作已达到 B 站请求上限，任务已暂停；请稍后手动继续或使用已有缓存",
+                        "budget",
+                    )
             connection.execute("DELETE FROM requests WHERE at<=?", (now-86400,))
-            connection.execute("INSERT INTO requests VALUES (?, ?)", (now, kind))
+            connection.execute(
+                "INSERT INTO requests (at, kind, operation_id) VALUES (?, ?, ?)",
+                (now, kind, operation_id),
+            )
         # Thumbnail downloads are admitted and counted before the network call,
         # but do not hold the admission lock while reading a slow image.
         # API and media each retain serialization within their own kind, so an

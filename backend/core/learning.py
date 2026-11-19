@@ -244,12 +244,17 @@ def _set_module(job, target, state):
 async def run_learning_job(job, scheduler):
     from api.routes import downloader
     from core.video_metadata import learning_video_info
+    from core.bilibili_guard import subtitle_api_burst
     from core.auth import add_user_history
     task_id = job["task_id"]
     payload = job.get("payload") or {}
     targets = payload.get("targets", [])
     info_data = get_video_info_cache(job["url"]) or payload.get("info")
-    info = VideoInfo.model_validate(info_data) if info_data else await asyncio.to_thread(learning_video_info, job["url"], downloader)
+    if info_data:
+        info = VideoInfo.model_validate(info_data)
+    else:
+        with subtitle_api_burst(task_id):
+            info = await asyncio.to_thread(learning_video_info, job["url"], downloader)
     url = canonical_video_url(job["url"], info)
     info.webpage_url = url
     job["url"] = url
@@ -279,8 +284,9 @@ async def run_learning_job(job, scheduler):
             text, source, language = cached["full_text"], cached["source"], cached["language"]
         else:
             # Platform SDKs contain blocking HTTP calls; keep the API event loop responsive.
-            text, source, language = await asyncio.to_thread(
-                lambda: asyncio.run(fetch_subtitle(url, info, job.get("lang"), trace_id=task_id, refresh=refresh, persist=True)))
+            with subtitle_api_burst(task_id):
+                text, source, language = await asyncio.to_thread(
+                    lambda: asyncio.run(fetch_subtitle(url, info, job.get("lang"), trace_id=task_id, refresh=refresh, persist=True)))
         check_cancel(job)
         if not text:
             duration = video_duration_for_url(url, info)

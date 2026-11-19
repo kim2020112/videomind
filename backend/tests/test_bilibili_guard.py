@@ -1,5 +1,6 @@
 """Bilibili request safety with fake upstreams and isolated persistent state."""
 
+import asyncio
 import io
 import json
 import os
@@ -232,7 +233,7 @@ else:
 def test_restart_does_not_reset_request_budget():
     now = time.time()
     with guard._database() as connection:
-        connection.executemany("INSERT INTO requests VALUES (?, 'api')", [(now,)] * 60)
+        connection.executemany("INSERT INTO requests (at, kind) VALUES (?, 'api')", [(now,)] * 60)
     environment = os.environ.copy()
     environment["BILIBILI_GUARD_PATH"] = str(guard.STATE_PATH)
     environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
@@ -254,7 +255,7 @@ except guard.BilibiliAccessBlocked as error:
 @pytest.mark.parametrize("kind", ["api", "media"])
 def test_separate_worker_processes_share_one_request_budget(kind):
     with guard._database() as connection:
-        connection.executemany("INSERT INTO requests VALUES (?, ?)", [(time.time(), kind)] * 58)
+        connection.executemany("INSERT INTO requests (at, kind) VALUES (?, ?)", [(time.time(), kind)] * 58)
     environment = os.environ.copy()
     environment["BILIBILI_GUARD_PATH"] = str(guard.STATE_PATH)
     environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
@@ -308,6 +309,140 @@ def test_requests_keep_their_minimum_interval(monkeypatch, kind, interval):
             admitted.append(now[0])
     assert admitted == [100_000.0, 100_000.0 + interval, 100_000.0 + 2 * interval]
     assert waits == [interval, interval]
+
+
+def test_subtitle_burst_is_fast_but_limited_per_operation(monkeypatch):
+    now = [100_000.0]
+    waits = []
+
+    def sleep(seconds):
+        waits.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(guard.time, "time", lambda: now[0])
+    monkeypatch.setattr(guard.time, "sleep", sleep)
+    monkeypatch.setitem(guard.LIMITS, "api", (5, ((60, 30), (3600, 120), (86400, 600))))
+
+    admitted = []
+    with guard.subtitle_api_burst("task-burst"):
+        for _ in range(guard.SUBTITLE_BURST_MAX_REQUESTS):
+            with guard.request_slot("api", "subtitle"):
+                admitted.append(now[0])
+        with pytest.raises(guard.BilibiliAccessBlocked) as blocked:
+            with guard.request_slot("api", "subtitle"):
+                pytest.fail("The operation request cap must be checked before admission")
+
+    assert blocked.value.code == "budget"
+    assert admitted == [100_000.0 + index * guard.SUBTITLE_BURST_INTERVAL for index in range(4)]
+    assert waits == [guard.SUBTITLE_BURST_INTERVAL] * 3
+    with sqlite3.connect(guard.STATE_PATH) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM requests WHERE operation_id='task-burst'",
+        ).fetchone()[0] == 4
+
+
+def test_subtitle_burst_context_propagates_to_asyncio_worker_thread():
+    def request():
+        with guard.request_slot("api", "subtitle"):
+            return True
+
+    async def run():
+        with guard.subtitle_api_burst("task-thread-context"):
+            return await asyncio.to_thread(request)
+
+    assert asyncio.run(run()) is True
+    with sqlite3.connect(guard.STATE_PATH) as connection:
+        assert connection.execute(
+            "SELECT operation_id FROM requests WHERE kind='api'",
+        ).fetchone()[0] == "task-thread-context"
+
+
+def test_subtitle_burst_operation_cap_is_shared_across_processes():
+    environment = os.environ.copy()
+    environment["BILIBILI_GUARD_PATH"] = str(guard.STATE_PATH)
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    script = """
+from core import bilibili_guard as guard
+guard.LIMITS['api'] = (0, ((60, 30), (3600, 120), (86400, 600)))
+guard.SUBTITLE_BURST_INTERVAL = 0
+with guard.subtitle_api_burst('shared-task'):
+    try:
+        with guard.request_slot('api', 'subtitle'):
+            print('admitted')
+    except guard.BilibiliAccessBlocked as error:
+        print(error.code)
+"""
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-B", "-c", script], env=environment,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        for _ in range(6)
+    ]
+    try:
+        outputs = []
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=10)
+            assert process.returncode == 0, stderr
+            outputs.append(stdout.strip())
+        assert sorted(outputs) == ["admitted"] * 4 + ["budget"] * 2
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=10)
+    with sqlite3.connect(guard.STATE_PATH) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM requests WHERE operation_id='shared-task'",
+        ).fetchone()[0] == 4
+
+
+def test_minute_budget_is_shared_across_concurrent_api_admissions(monkeypatch):
+    monkeypatch.setattr(guard.time, "time", lambda: 100_000.0)
+    monkeypatch.setitem(guard.LIMITS, "api", (0, ((60, 2), (3600, 60), (86400, 300))))
+
+    def admit(_):
+        try:
+            with guard.request_slot("api"):
+                return True
+        except guard.BilibiliAccessBlocked as error:
+            assert error.code == "budget"
+            return False
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(admit, range(8)))
+    assert sum(results) == 2
+    with sqlite3.connect(guard.STATE_PATH) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM requests WHERE kind='api' AND at>99000",
+        ).fetchone()[0] == 2
+
+
+def test_subtitle_burst_does_not_bypass_scoped_cooldown():
+    guard.trip("字幕接口风控", "subtitle")
+    with guard.subtitle_api_burst("task-cooldown"):
+        with pytest.raises(guard.BilibiliAccessBlocked) as blocked:
+            with guard.request_slot("api", "subtitle"):
+                pytest.fail("A burst must not bypass a subtitle cooldown")
+    assert blocked.value.code == "rate_limit"
+
+
+def test_existing_two_column_requests_table_migrates_and_keeps_history():
+    with sqlite3.connect(guard.STATE_PATH) as connection:
+        connection.execute("CREATE TABLE requests (at REAL NOT NULL, kind TEXT NOT NULL)")
+        connection.execute("INSERT INTO requests VALUES (?, ?)", (time.time(), "api"))
+
+    with guard._database() as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(requests)")}
+        assert "operation_id" in columns
+        assert connection.execute("SELECT count(*) FROM requests").fetchone()[0] == 1
+        connection.execute(
+            "INSERT INTO requests (at, kind, operation_id) VALUES (?, ?, ?)",
+            (time.time(), "api", "new-task"),
+        )
+        assert connection.execute(
+            "SELECT count(*) FROM requests WHERE operation_id='new-task'",
+        ).fetchone()[0] == 1
 
 
 @pytest.mark.parametrize("kind", ["api", "media"])
@@ -412,7 +547,7 @@ def test_hourly_and_daily_budgets_cannot_be_overspent_concurrently(
     monkeypatch.setattr(guard.time, "time", lambda: now)
     with guard._database() as connection:
         connection.executemany(
-            "INSERT INTO requests VALUES (?, 'api')", [(now - age,)] * earlier_requests,
+            "INSERT INTO requests (at, kind) VALUES (?, 'api')", [(now - age,)] * earlier_requests,
         )
 
     def admit(_):

@@ -246,8 +246,8 @@ async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = No
         selected = _select_subtitle_lang(info.subtitles, lang)
         if selected and selected.lang != 'danmaku':
             try:
-                raw_content, ext = await asyncio.get_event_loop().run_in_executor(
-                    None, _download_subtitle_content, url, selected.lang, selected.is_auto
+                raw_content, ext = await asyncio.to_thread(
+                    _download_subtitle_content, url, selected.lang, selected.is_auto
                 )
                 if ext == 'xml' or selected.lang == 'danmaku':
                     subtitle_text = _clean_danmaku_xml(raw_content)
