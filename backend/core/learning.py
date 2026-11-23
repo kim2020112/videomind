@@ -15,14 +15,14 @@ from core.cache import _get_cached_raw, _url_hash, get_video_info_cache, save_vi
 from core.generation_commit import (
     _upsert_ai_cache, _upsert_history, _cache_timestamp, validate_summary_result,
 )
-from core.job_scheduler import JobCancelled
+from core.job_scheduler import JobCancelled, WorkerFailed
 from core.models import VideoInfo
-from core.pipeline.subtitle import fetch_subtitle, _build_part_info
+from core.pipeline.subtitle import BilibiliSubtitleUnavailable, fetch_subtitle, _build_part_info
 from core.pipeline.summary import run_summary
 from core.pipeline.mindmap import run_mindmap
 from core.pipeline.notes import run_notes
 from core.pipeline.qanda import run_qanda
-from core.features import is_whisper_available
+from core.features import whisper_unavailable_reason
 from core.video import canonical_video_url, video_duration_for_url
 from core.whisper import estimate_transcribe_time
 from core.content_state import register_content_functions, decode_payload, content_state, present_modules
@@ -244,7 +244,7 @@ def _set_module(job, target, state):
 async def run_learning_job(job, scheduler):
     from api.routes import downloader
     from core.video_metadata import learning_video_info
-    from core.bilibili_guard import subtitle_api_burst
+    from core.bilibili_guard import BilibiliAccessBlocked, subtitle_api_burst
     from core.auth import add_user_history
     task_id = job["task_id"]
     payload = job.get("payload") or {}
@@ -280,23 +280,38 @@ async def run_learning_job(job, scheduler):
             except SubtitleIdentityError:
                 cached = None
         refresh = payload.get("refresh_subtitle", False)
+        confirmed = payload.get("allow_transcription", False)
+        lookup_error = None
         if cached and not refresh:
             text, source, language = cached["full_text"], cached["source"], cached["language"]
-        else:
+        elif not confirmed:
             # Platform SDKs contain blocking HTTP calls; keep the API event loop responsive.
             with subtitle_api_burst(task_id):
-                text, source, language = await asyncio.to_thread(
-                    lambda: asyncio.run(fetch_subtitle(url, info, job.get("lang"), trace_id=task_id, refresh=refresh, persist=True)))
+                try:
+                    text, source, language = await asyncio.to_thread(
+                        lambda: asyncio.run(fetch_subtitle(url, info, job.get("lang"), trace_id=task_id, refresh=refresh, persist=True)))
+                except (BilibiliSubtitleUnavailable, BilibiliAccessBlocked) as exc:
+                    lookup_error = exc
         check_cancel(job)
         if not text:
             duration = video_duration_for_url(url, info)
-            if not is_whisper_available() or (config.WHISPER_MAX_DURATION > 0 and duration > config.WHISPER_MAX_DURATION):
+            audio_ready = info.audio_stream_url and (
+                not info.audio_stream_expires_at or info.audio_stream_expires_at > time.time()
+            )
+            if isinstance(lookup_error, BilibiliAccessBlocked) and not audio_ready:
+                reason = str(lookup_error)
+            elif config.WHISPER_MAX_DURATION > 0 and duration > config.WHISPER_MAX_DURATION:
+                reason = f"视频时长 {int(duration)} 秒，超过语音转录上限 {config.WHISPER_MAX_DURATION} 秒"
+            else:
+                reason = whisper_unavailable_reason()
+            if reason:
                 state = job_store.get_job(task_id).get("result") or {}
                 job_store.update_job(task_id, result={**state, "subtitle_unavailable": True})
-                raise ValueError("没有平台字幕，语音转录不可用或视频超过转录时长限制；可仅根据简介生成摘要")
-            if not payload.get("allow_transcription"):
+                raise ValueError(f"未能获取平台字幕。{reason.rstrip('。')}。") from lookup_error
+            if not confirmed:
                 release_usage(task_id)
-                job_store.update_job(task_id, status="awaiting_confirmation", message="未找到平台字幕，请确认是否开始语音转录",
+                message = "平台字幕暂未取到，可尝试语音转录" if lookup_error else "未找到平台字幕，可开始语音转录"
+                job_store.update_job(task_id, status="awaiting_confirmation", message=message,
                                      estimated_seconds=estimate_transcribe_time(duration), payload={**payload, "info": info.model_dump()})
                 emit(task_id, "awaiting_confirmation", {})
                 return
@@ -304,12 +319,16 @@ async def run_learning_job(job, scheduler):
             job["payload"]["info"] = info.model_dump()
             try:
                 worker = await scheduler.run_worker_subprocess(task_id, scheduler.command_factory(job, result_path))
+                check_cancel(job)
+                text, source, language = worker.get("subtitle_text", ""), "whisper", worker.get("language", "auto")
+                if len(text.strip()) < 20:
+                    raise WorkerFailed("语音转录未识别出足够的文字")
+            except WorkerFailed:
+                state = job_store.get_job(task_id).get("result") or {}
+                job_store.update_job(task_id, result={**state, "subtitle_unavailable": True})
+                raise
             finally:
                 result_path.unlink(missing_ok=True)
-            check_cancel(job)
-            text, source, language = worker.get("subtitle_text", ""), "whisper", worker.get("language", "auto")
-            if len(text.strip()) < 20:
-                raise ValueError("语音转录结果为空或过短")
             save_subtitle_to_db(url, source, language, text, info.title, info.extractor or "", _build_part_info(url, info), worker.get("segments"))
         elif not cached or refresh:
             # Native fetch persists precise segments; do not replace them with text-only rows.

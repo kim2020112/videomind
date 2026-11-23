@@ -126,7 +126,7 @@ class LearningWorkspaceTests(unittest.IsolatedAsyncioTestCase):
     async def test_transcription_requires_confirmation_and_does_not_call_ai(self):
         job = self.job([])
         self.scheduler.run_worker_subprocess = AsyncMock(return_value={"subtitle_text": TEXT, "language": "zh", "segments": [{"start": 0, "end": 2.2, "text": "转录内容"}]})
-        with patch.object(learning, "fetch_subtitle", new_callable=AsyncMock, return_value=(None, "", "")), patch.object(learning, "is_whisper_available", return_value=True):
+        with patch.object(learning, "fetch_subtitle", new_callable=AsyncMock, return_value=(None, "", "")), patch.object(learning, "whisper_unavailable_reason", return_value=""):
             await self.scheduler.run_once()
             waiting = job_store.get_job(job["task_id"])
             self.assertEqual("awaiting_confirmation", waiting["status"])
@@ -139,14 +139,45 @@ class LearningWorkspaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2.2, learning.workspace(URL, OWNER)["subtitle"]["segments"][0]["end"])
         self.assertEqual((0, 0), self.counts())
 
-    async def test_temporary_subtitle_failure_does_not_transcribe(self):
+    async def test_temporary_subtitle_failure_offers_transcription_without_automatic_start(self):
         from core.pipeline.subtitle import BilibiliSubtitleUnavailable
         job = self.job([])
-        self.scheduler.run_worker_subprocess = AsyncMock()
-        with patch.object(learning, "fetch_subtitle", new_callable=AsyncMock, side_effect=BilibiliSubtitleUnavailable("暂时不可用")):
+        self.scheduler.run_worker_subprocess = AsyncMock(return_value={"subtitle_text": TEXT})
+        with patch.object(learning, "fetch_subtitle", new_callable=AsyncMock, side_effect=BilibiliSubtitleUnavailable("暂时不可用")) as fetch, patch.object(learning, "whisper_unavailable_reason", return_value=""):
             await self.scheduler.run_once()
-        self.assertEqual("failed", job_store.get_job(job["task_id"])["status"])
+            waiting = job_store.get_job(job["task_id"])
+            self.assertEqual("awaiting_confirmation", waiting["status"])
+            self.assertIn("暂未取到", waiting["message"])
+            self.scheduler.run_worker_subprocess.assert_not_called()
+            with patch.object(learning_routes, "require_identity", return_value=OWNER):
+                await learning_routes.resume_task(job["task_id"], object())
+            await self.scheduler.run_once()
+        fetch.assert_awaited_once()
+        self.assertEqual("done", job_store.get_job(job["task_id"])["status"])
+
+    async def test_bilibili_access_block_offers_description_when_no_audio_is_available(self):
+        from core.bilibili_guard import BilibiliAccessBlocked
+        job = self.job([])
+        self.scheduler.run_worker_subprocess = AsyncMock()
+        with patch.object(learning, "fetch_subtitle", new_callable=AsyncMock,
+                          side_effect=BilibiliAccessBlocked("B 站视频解析暂时受限（HTTP 412）")):
+            await self.scheduler.run_once()
+        failed = job_store.get_job(job["task_id"])
+        self.assertEqual("failed", failed["status"])
+        self.assertIn("HTTP 412", failed["error"])
+        self.assertTrue(failed["result"]["subtitle_unavailable"])
         self.scheduler.run_worker_subprocess.assert_not_called()
+
+    async def test_confirmed_refresh_retranscribes_instead_of_reusing_old_whisper(self):
+        database.save_subtitle_to_db(URL, "whisper", "zh", TEXT)
+        job = self.job([], refresh_subtitle=True, allow_transcription=True)
+        new_text = TEXT + "新识别的内容"
+        self.scheduler.run_worker_subprocess = AsyncMock(return_value={"subtitle_text": new_text})
+        with patch.object(learning, "whisper_unavailable_reason", return_value=""):
+            await self.scheduler.run_once()
+        self.scheduler.run_worker_subprocess.assert_awaited_once()
+        self.assertEqual("done", job_store.get_job(job["task_id"])["status"])
+        self.assertEqual(new_text, database.get_subtitle_from_db(URL)["full_text"])
 
     async def test_restart_skips_committed_module_and_does_not_charge_twice(self):
         self.subtitle()

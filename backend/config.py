@@ -2,9 +2,8 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
-
 BASE_DIR = Path(__file__).parent
+load_dotenv(BASE_DIR / ".env")
 
 # AI API 配置
 AI_PROVIDER = os.getenv("AI_PROVIDER", "deepseek")  # deepseek | openai | openrouter
@@ -44,6 +43,8 @@ WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")  # tiny | base | small | med
 WHISPER_MODELS_DIR = Path(
     os.getenv("WHISPER_MODELS_DIR", str(BASE_DIR / "data" / "whisper_models"))
 ).expanduser()
+_whisper_model_path = os.getenv("WHISPER_MODEL_PATH", "").strip()
+WHISPER_MODEL_PATH = Path(_whisper_model_path).expanduser() if _whisper_model_path else None
 
 # Whisper 字幕校正（AI 后处理，修正语音识别错误）
 SUBTITLE_CORRECTION_ENABLED = os.getenv("SUBTITLE_CORRECTION_ENABLED", "true").lower() == "true"

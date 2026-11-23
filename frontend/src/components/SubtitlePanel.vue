@@ -127,7 +127,7 @@ async function copy() {
         <p>{{ text ? `${source} · ${language} · ${lines.length} 条` : cleared ? '字幕已清空，不会自动重新获取' : '尚未获取视频字幕' }}</p>
       </div>
       <div class="heading-actions">
-        <button v-if="!text" class="tool-button" type="button" :disabled="busy" @click="onFetch?.()">{{ busy ? '正在获取…' : '获取字幕' }}</button>
+        <button v-if="!text" class="tool-button" type="button" :disabled="busy" @click="onFetch?.()">{{ busy ? '正在获取…' : error ? '重试获取字幕' : '获取字幕' }}</button>
         <template v-else>
           <button type="button" class="refresh-button tool-button" :disabled="busy" @click="onFetch?.(true)">{{ info?.source === 'whisper' ? '重新识别' : '重新获取' }}</button>
           <button type="button" class="toggle-button tool-button" :aria-expanded="expanded" :aria-controls="previewId" @click="expanded = !expanded">{{ expanded ? '收起字幕' : '展开字幕' }}</button>

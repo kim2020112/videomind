@@ -87,10 +87,10 @@
 B 站 CC 查询使用三态语义：
 
 - `available`：已取得可用字幕。
-- `absent`：平台成功响应并明确没有字幕。
+- `absent`：B 站主、备字幕目录均返回有效的空结果，且未要求登录。工作台随后可按需探测 yt-dlp 提供的字幕轨道。
 - `unavailable`：限流、网络、登录要求或无效响应导致无法可靠判断。
 
-只有平台明确返回 `absent` 时才向用户请求 Whisper 确认；`unavailable` 返回可重试错误，不会触发转录或简介摘要。多分 P 视频使用所选分 P 的精确 `cid`，不会静默回退到 P1。
+工作台在缺少平台字幕或字幕接口暂时失败时，可以请求 Whisper 确认。遇到 B 站访问保护且没有有效音频直链时，直接显示错误和重试提示。转录在用户确认后才开始，并继续遵守访问保护。无法获取正文时，简介足够长的视频可由用户明确选择生成独立简介摘要。多分 P 查询使用所选分 P 的精确 `cid`。
 
 短链解析完成后，缓存、字幕和学习状态统一使用 yt-dlp 返回的规范 `webpage_url`，并保留原始 `p` 参数。基础多分 P URL 可展示全集总时长；明确选择分 P 后，Whisper 时长上限、ETA 和进度使用该分 P 自身时长。
 
@@ -118,13 +118,13 @@ SQLite 保存用户、会话、视频、字幕、AI 输出、学习历史、缓�
 
 博主功能拆分「共享目录」与「按身份订阅」：`blogger_creators`/`blogger_videos`/`blogger_video_pages` 全局共享（同一 UP 主只同步一次），`blogger_subs`/`blogger_batches`/`blogger_batch_items` 按 `user_id`/`guest_id` 归属，互不可见。退订只删订阅行，最后一个订阅者离开且无活跃任务时才清理共享目录。
 
-目录同步（`core/blogger/sync.py`）运行在独立线程池，不进重任务队列。所有 B 站入口共享 `core/bilibili_guard.py` 的持久化限速与额度，API 默认至少间隔 5 秒，每分钟 30 次、每小时 120 次、每日 600 次；工作台单次字幕操作最多 4 次 API 请求可按 0.25 秒间隔发出，但仍计入共享额度。每次同步最多 20 页并保留断点。403/412/风控代码仅暂停对应功能 10/20/40/最多60分钟，429短时暂停所有功能，不自动重试或切换接口；`login` / `budget` / `protection` 也暂停。首次分页前的 `network` 错误最多退避 30s/120s，已有进度则暂停。仅列表/字幕等必要API默认使用登录 Cookie，网页和 CDN 默认匿名；重复元数据短期缓存。保留同页签名防死循环、空目录一致性检查，并跳过课堂推广条目。详见 [B 站访问保护](bilibili-access.md)。
+目录同步（`core/blogger/sync.py`）运行在独立线程池，不进重任务队列。所有 B 站入口共享 `core/bilibili_guard.py` 的持久化限速与额度，API 默认至少间隔 5 秒，每分钟 30 次、每小时 120 次、每日 600 次；工作台单次字幕操作最多 5 次 API 请求可按 0.25 秒间隔发出，但仍计入共享额度。每次同步最多 20 页并保留断点。403/412/风控代码仅暂停对应功能 10/20/40/最多60分钟，429短时暂停所有功能，不自动重试或切换接口；`login` / `budget` / `protection` 也暂停。首次分页前的 `network` 错误最多退避 30s/120s，已有进度则暂停。仅列表/字幕等必要API默认使用登录 Cookie，网页和 CDN 默认匿名；重复元数据短期缓存。保留同页签名防死循环、空目录一致性检查，并跳过课堂推广条目。详见 [B 站访问保护](bilibili-access.md)。
 
 批量条目是 `job_type="batch_item"` 的后台任务，每条目一 job：复用 `job_store` 的长任务单槽、取消与崩溃恢复；`JobScheduler` 按 `job_type` 分发到进程内处理器 `core/blogger/batch_runner.py`——缓存命中直接复用，bvid+cid 已知时跳过 yt-dlp 解析快取 CC 字幕，无字幕才跑 Whisper 子进程（处理器内禁止再 create_job，单槽会死锁），AI 生成走 `background_pipeline.generate_full_from_subtitle`（与 Whisper 后完成共用），`generate-then-swap` 原子提交。AI 前有额度闸门，超限条目跳过并暂停整批。批量成果写入所属身份的学习历史后，同样受到缓存淘汰保护。
 
 ## 后台任务
 
-`GET /api/workspace?url=...` 返回只读快照；`POST /api/subtitle/prepare` 创建独立字幕任务；`POST /api/learning/generate` 接受 `summary`、`mindmap`、`notes`、`qa` 的所选组合；`GET /api/tasks/{id}/events?after=...` 以持久事件 ID 续读 SSE。平台无字幕时任务进入 `awaiting_confirmation`，确认接口恢复原任务并继续转录与生成。页面卸载只关闭 SSE，不取消后台工作。
+`GET /api/workspace?url=...` 返回只读快照。`POST /api/subtitle/prepare` 创建独立字幕任务。`POST /api/learning/generate` 接受 `summary`、`mindmap`、`notes`、`qa` 的所选组合。`GET /api/tasks/{id}/events?after=...` 以持久事件 ID 续读 SSE。取不到平台字幕且满足转录条件时，任务进入 `awaiting_confirmation`。确认接口恢复原任务并继续转录与生成。离开页面后后台工作继续执行。
 
 任务状态流：
 
@@ -142,7 +142,7 @@ queued -> downloading -> transcribing -> generating -> done
 
 学习任务会在每个模块保存后持久化检查点；服务重启后跳过已保存模块并继续未完成的模块。事件记录按保留期清理；取消会终止当前子进程并清理临时结果。模块业务失败进入可单独重试的终态，不无限重试。
 
-视频解析结果会分别保留播放流和最佳音频流。提交 Whisper 任务时，解析信息随任务 payload 持久化；仍有效的音频直链通过 `--audio-url` 传给 worker。worker 优先直接下载音频 CDN，避免 B 站在短时间内重复抓取视频页面触发 `412`；直链缺失或失效时才回退到原视频 URL。旧缓存没有音频直链时，B 站任务会先刷新解析信息再入队。
+视频解析结果会分别保留播放流和最佳音频流。工作台确认转录时保留视频信息，并跳过已完成的平台字幕查询。有效音频直链通过 `--audio-url` 传给 worker。直链缺失时，或直链下载普通失败且访问保护允许时，worker 尝试原视频 URL。
 
 ## 启动与能力降级
 
@@ -165,7 +165,7 @@ FastAPI lifespan 依次完成：
 | AI 服务商配置 | `backend/data/ai_config.json` | `AI_CONFIG_PATH` |
 | 临时文件 | `backend/temp/` | `TEMP_DIR` |
 | 下载文件 | `backend/downloads/` | `DOWNLOAD_DIR` |
-| Whisper 模型 | `backend/data/whisper_models/` | `WHISPER_MODELS_DIR` |
+| Whisper 模型 | `backend/data/whisper_models/faster-whisper-small/` | `WHISPER_MODEL_PATH` 优先，否则由 `WHISPER_MODELS_DIR` 和 `WHISPER_MODEL` 拼接 |
 
 数据库、密钥、模型、下载内容、旧向量索引和会话交接文件不得提交到 Git。
 

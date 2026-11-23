@@ -3,7 +3,7 @@
 优先级：平台原生字幕 > 自动字幕 > Whisper 转录 > OCR（预留）
 
 模型加载：
-- 仅从本地 WHISPER_MODELS_DIR 加载，不联网下载
+- 优先使用本地 WHISPER_MODEL_PATH，否则从 WHISPER_MODELS_DIR 加载，不联网下载
 - 启动时检查模型目录，缺失时记录错误日志但不阻塞服务
 """
 
@@ -11,7 +11,7 @@ import os
 import tempfile
 import shutil
 
-from config import WHISPER_MODEL, WHISPER_MODELS_DIR
+from config import WHISPER_MODEL, WHISPER_MODELS_DIR, WHISPER_MODEL_PATH
 from core.bilibili import youtube_dl, ydl_opts_for, ytdlp_error_message
 from core.bilibili_guard import BilibiliAccessBlocked
 from core.logging_config import get_logger
@@ -26,6 +26,8 @@ _REQUIRED_FILES = ["config.json", "model.bin", "tokenizer.json", "vocabulary.txt
 
 
 def model_directory() -> str:
+    if WHISPER_MODEL_PATH is not None:
+        return str(WHISPER_MODEL_PATH)
     return os.path.join(str(WHISPER_MODELS_DIR), f"faster-whisper-{WHISPER_MODEL}")
 
 

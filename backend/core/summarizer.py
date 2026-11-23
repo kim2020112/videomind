@@ -286,6 +286,7 @@ def extract_bilibili_subtitle_by_cid(bvid: str, cid: int, aid: int = None) -> di
     }
     metadata = None
     primary_confirmed_absent = False
+    fallback_confirmed_absent = False
     primary_tracks = []
     fallback_tracks = []
 
@@ -333,7 +334,20 @@ def extract_bilibili_subtitle_by_cid(bvid: str, cid: int, aid: int = None) -> di
                 f'https://api.bilibili.com/x/v2/dm/view?{dm_query}',
                 headers=headers,
             )
-            fallback_tracks = fallback.get('data', {}).get('subtitle', {}).get('subtitles') or []
+            fallback_data = fallback.get('data')
+            fallback_subtitle = fallback_data.get('subtitle') if isinstance(fallback_data, dict) else None
+            # B 站 uses both [] and null for a valid empty CC directory. Keep
+            # rejecting a missing/non-list field so malformed responses are
+            # never turned into a false "no subtitles" result.
+            if not isinstance(fallback_subtitle, dict) or 'subtitles' not in fallback_subtitle:
+                raise RuntimeError('备用字幕目录响应格式不完整，不能认定为无字幕')
+            raw_fallback_tracks = fallback_subtitle.get('subtitles')
+            if raw_fallback_tracks is not None and not isinstance(raw_fallback_tracks, list):
+                raise RuntimeError('备用字幕目录响应格式不完整，不能认定为无字幕')
+            fallback_tracks = raw_fallback_tracks or []
+            fallback_confirmed_absent = (
+                not fallback_tracks and not fallback_data.get('need_login_subtitle', False)
+            )
             if _select_bilibili_track(fallback_tracks):
                 metadata = fallback
         except BilibiliAccessBlocked:
@@ -342,7 +356,10 @@ def extract_bilibili_subtitle_by_cid(bvid: str, cid: int, aid: int = None) -> di
             logger.warning(f"B站备用字幕元数据请求失败 bvid={bvid} cid={cid}: {exc}")
 
     if metadata is None:
-        if primary_confirmed_absent and not fallback_tracks:
+        # An empty primary list is not proof of absence if the secondary
+        # endpoint failed (for example, a transient 412/429). Require both
+        # independent metadata endpoints to complete with a valid empty list.
+        if primary_confirmed_absent and fallback_confirmed_absent:
             return {'has_subtitle': False, 'reason': 'absent'}
         if primary_tracks or fallback_tracks:
             raise RuntimeError('B站已返回字幕目录，但未提供可下载的字幕链接；请稍后重新获取')

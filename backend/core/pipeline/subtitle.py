@@ -25,6 +25,7 @@ from core.cache import get_video_info_cache
 from core.bilibili import youtube_dl, ydl_opts_for
 from core.logging_config import get_logger
 from core.bilibili_guard import BilibiliAccessBlocked
+from core.subtitle_identity import SubtitleIdentityError
 from core.video import canonical_video_url, is_bilibili_video
 
 logger = get_logger(__name__)
@@ -197,7 +198,7 @@ async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = No
         logger.info("忽略英文字幕缓存，重新检查 B站当前可用字幕")
         cached_sub = None
     if cached_sub:
-        from core.subtitle_validation import validate_cached_subtitle, SubtitleIdentityError
+        from core.subtitle_validation import validate_cached_subtitle
         try:
             cached_sub = validate_cached_subtitle(url, cached_sub, info)
         except SubtitleIdentityError:
@@ -213,8 +214,13 @@ async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = No
     bilibili_sub = None
     bilibili_lookup_unavailable = False
     if 'bilibili' in (info.extractor or '').lower():
-        with refresh_responses(refresh):
-            bilibili_sub = await asyncio.to_thread(try_get_bilibili_cc_subtitle, url, info)
+        try:
+            with refresh_responses(refresh):
+                bilibili_sub = await asyncio.to_thread(try_get_bilibili_cc_subtitle, url, info)
+        except (BilibiliAccessBlocked, SubtitleIdentityError):
+            raise
+        except RuntimeError as exc:
+            logger.info("B站CC字幕未能下载: %s", exc)
         if bilibili_sub:
             logger.info(f"B站CC字幕获取成功 has_subtitle={bilibili_sub.get('has_subtitle')} lang={bilibili_sub.get('language')}")
         else:
@@ -240,6 +246,25 @@ async def fetch_subtitle(url: str, info, lang: str = None, fingerprint: str = No
                 save_subtitle_to_db(url, "bilibili_cc", sub_lang, text, info.title, platform,
                                     _build_part_info(url, info), bilibili_sub.get("segments"), provenance=bilibili_sub.get("provenance"))
             return text, "bilibili_cc", sub_lang
+
+    # The learning workspace uses a lightweight metadata lookup that does not
+    # populate yt-dlp's subtitle tracks. If the direct CC endpoint did not
+    # yield a transcript, lazily inspect native tracks before reporting absence.
+    if (bilibili_sub is not None and not bilibili_sub.get('has_subtitle')
+            and 'bilibili' in (info.extractor or '').lower()
+            and not getattr(info, 'subtitles', None)):
+        try:
+            from api.routes import downloader
+            native_info = await asyncio.to_thread(downloader.parse_info, url)
+            native_tracks = getattr(native_info, 'subtitles', None) or []
+            if native_tracks:
+                info.subtitles = native_tracks
+                logger.info("B站CC字幕未取得，yt-dlp发现 %s 条原生字幕轨道", len(native_tracks))
+        except BilibiliAccessBlocked:
+            raise
+        except RuntimeError as exc:
+            bilibili_lookup_unavailable = True
+            logger.info("B站原生字幕轨道探测失败: %s", exc)
 
     # ── Pipeline 2: yt-dlp 原生字幕 ──
     if info.subtitles:

@@ -22,6 +22,9 @@ cp backend/.env.example backend/.env
 | `AI_API_FORMAT` | `.env` 兜底协议，取值为 `anthropic` 或 `openai` |
 | `AI_API_KEY`、`AI_BASE_URL`、`AI_MODEL` | `.env` 兜底连接的凭据、地址和模型；有管理员运行时连接时由其覆盖 |
 | `FEATURE_AI`、`FEATURE_WHISPER` | 显式关闭可选功能 |
+| `WHISPER_MODEL`、`WHISPER_MODELS_DIR` | 默认模型名称与本地模型根目录 |
+| `WHISPER_MODEL_PATH` | 可选的完整本地模型目录；复用其他位置已有的 Faster-Whisper 模型时设置，无需重新下载 |
+| `WHISPER_MAX_DURATION` | 转录时长上限，单位为秒。默认 `0` 表示不限时 |
 | `BILIBILI_COOKIE` | 可选的 B 站登录凭据；默认仅登录验证、列表和字幕目录接口使用 |
 | `BILIBILI_USE_ACCOUNT_COOKIE` | 默认 `true`；设为 `false` 则自动请求完全匿名，不会解除额度或冷却 |
 | `ADMIN_USERNAME`、`ADMIN_PASSWORD` | 可选管理员初始化 |
@@ -121,9 +124,10 @@ curl http://127.0.0.1:8083/api/capabilities
 - `/api/health/live` 失败：检查 Uvicorn 进程和端口。
 - `/api/health/ready` 返回 503：检查 SQLite、临时目录和下载目录权限。
 - 前端 5173 无法访问：检查 Vite Preview 进程、构建产物、监听地址和防火墙。
-- B 站字幕临时不可用：查看后端日志中的平台错误码；不要直接改成“无字幕”回退。
+- Whisper 不可用时，先核对运行中服务的 `/api/capabilities` 和任务提示。检查服务所用 Python 环境是否已安装 `backend/requirements-whisper.txt` 中的依赖、FFmpeg 是否在服务的 `PATH` 中，以及模型目录内是否有 `config.json`、`model.bin`、`tokenizer.json` 和 `vocabulary.txt`。`backend/.env` 由后端按固定路径加载，服务环境变量优先。改动配置后重启服务再核对能力。
+- B 站字幕暂时不可用时，查看后端日志中的平台错误码。工作台可提示重试或请求确认转录，具体取决于运行时能力和访问保护。
 - 博主目录同步报 `login`：平台要求有效登录，自动任务已暂停；优先在官方客户端访问，不反复提交账号 Cookie。
-- 解析/下载报 HTTP 412：请求受到限制，不能据此断言账号被封或 Cookie 失效。对应功能冷却 10～60 分钟；只有429会短时全局冷却，更新 Cookie/重启不会清除。API 默认间隔 5 秒、每分钟 30 次、每小时 120 次、每天 600 次；工作台每次字幕操作最多 4 次可按 0.25 秒间隔发出，仍共用这些额度；见 [访问保护](bilibili-access.md)。
+- 解析或下载报 HTTP 412 时，对应功能冷却通常为 10～60 分钟。API 返回 HTTP 429 时可触发全局冷却。API 默认请求间隔为 5 秒，上限为每分钟 30 次、每小时 120 次、每天 600 次。工作台每次字幕操作最多 5 次可按不低于 0.25 秒的间隔发出，继续共用这些额度。见 [访问保护](bilibili-access.md)。
 - B 站无 CC 后转录出现 `HTTP 412`：确认解析结果含 `audio_stream_url`，并确认 worker 命令收到 `--audio-url`。旧 `video_info_cache` 没有该字段时应先刷新解析，不要直接让 worker 再次抓取视频页面。
 - 分 P 状态异常：同时检查精确 URL、`url_hash`、当前身份历史归属及已保存的有效字幕/模块，失败任务不应抹掉已有资料状态；不要把共享视频指纹当成分 P 唯一键。
 - 分 P 转录 ETA 异常：确认 canonical URL 保留 `p` 参数，并从 `parts` 中读取所选分 P 时长，而不是全集总时长。

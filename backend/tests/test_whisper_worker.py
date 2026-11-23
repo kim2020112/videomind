@@ -16,6 +16,17 @@ from core import whisper
 
 
 class WhisperWorkerTests(unittest.TestCase):
+    def test_explicit_model_path_overrides_default_model_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "existing-small-model"
+            model_path.mkdir()
+            for filename in whisper._REQUIRED_FILES:
+                (model_path / filename).write_text("local", encoding="utf-8")
+
+            with patch.object(whisper, "WHISPER_MODEL_PATH", model_path):
+                self.assertEqual(str(model_path), whisper.model_directory())
+                self.assertTrue(whisper.is_model_available())
+
     def test_download_audio_uses_direct_stream_without_reopening_video_page(self):
         page_url = "https://www.bilibili.com/video/BV1demo"
         audio_url = "https://audio.example.com/best.m4s?deadline=9999999999"

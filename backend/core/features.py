@@ -6,7 +6,6 @@
 
 import os
 import shutil
-from functools import lru_cache
 from config import DEFAULT_GUEST_SECRET, GUEST_SECRET
 from core.logging_config import get_logger
 
@@ -35,28 +34,30 @@ def is_ai_available() -> bool:
     return True
 
 
-@lru_cache(maxsize=1)
 def is_whisper_available() -> bool:
     """Whisper 功能是否可用：环境开关 + faster_whisper 库可导入 + 模型文件存在 + FFmpeg 可用。"""
+    return not whisper_unavailable_reason()
+
+
+def whisper_unavailable_reason() -> str:
     if not FEATURE_WHISPER:
-        return False
+        return "服务未启用语音转录"
     try:
         import faster_whisper  # noqa: F401
-    except ImportError:
-        logger.warning("FEATURE_WHISPER=true 但 faster-whisper 库未安装，Whisper 功能自动禁用")
-        return False
-    # 检查模型文件
+    except (ImportError, OSError) as exc:
+        logger.warning("faster-whisper 加载失败: %s", exc)
+        return "服务无法加载语音转录依赖"
     try:
-        from core.whisper import is_model_available
+        from core.whisper import is_model_available, model_directory
         if not is_model_available():
-            return False
+            logger.warning("Whisper 模型文件缺失: %s", model_directory())
+            return "服务找不到完整的语音转录模型"
     except Exception:
-        return False
-    # 检查 FFmpeg
-    return is_ffmpeg_available()
+        logger.exception("Whisper 模型检查失败")
+        return "服务无法检查语音转录模型"
+    return "" if is_ffmpeg_available() else "服务找不到 FFmpeg，无法处理音频"
 
 
-@lru_cache(maxsize=1)
 def is_ffmpeg_available() -> bool:
     """检查 FFmpeg 是否在 PATH 中可用。"""
     return shutil.which("ffmpeg") is not None

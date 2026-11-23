@@ -37,7 +37,9 @@ _MEDIA_LOCK = threading.Lock()
 _THUMBNAIL_ADMISSION_LOCK = threading.Lock()
 _THUMBNAIL_SLOTS = threading.BoundedSemaphore(4)
 SUBTITLE_BURST_INTERVAL = 0.25
-SUBTITLE_BURST_MAX_REQUESTS = 4
+# One additional request lets lightweight learning metadata inspect native
+# yt-dlp subtitle tracks after the direct CC endpoints report an empty list.
+SUBTITLE_BURST_MAX_REQUESTS = 5
 _subtitle_burst_operation: ContextVar[str | None] = ContextVar(
     "bilibili_subtitle_burst_operation", default=None,
 )

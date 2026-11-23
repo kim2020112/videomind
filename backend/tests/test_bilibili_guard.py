@@ -333,12 +333,13 @@ def test_subtitle_burst_is_fast_but_limited_per_operation(monkeypatch):
                 pytest.fail("The operation request cap must be checked before admission")
 
     assert blocked.value.code == "budget"
-    assert admitted == [100_000.0 + index * guard.SUBTITLE_BURST_INTERVAL for index in range(4)]
-    assert waits == [guard.SUBTITLE_BURST_INTERVAL] * 3
+    assert admitted == [100_000.0 + index * guard.SUBTITLE_BURST_INTERVAL
+                        for index in range(guard.SUBTITLE_BURST_MAX_REQUESTS)]
+    assert waits == [guard.SUBTITLE_BURST_INTERVAL] * (guard.SUBTITLE_BURST_MAX_REQUESTS - 1)
     with sqlite3.connect(guard.STATE_PATH) as connection:
         assert connection.execute(
             "SELECT count(*) FROM requests WHERE operation_id='task-burst'",
-        ).fetchone()[0] == 4
+        ).fetchone()[0] == guard.SUBTITLE_BURST_MAX_REQUESTS
 
 
 def test_subtitle_burst_context_propagates_to_asyncio_worker_thread():
@@ -385,7 +386,8 @@ with guard.subtitle_api_burst('shared-task'):
             stdout, stderr = process.communicate(timeout=10)
             assert process.returncode == 0, stderr
             outputs.append(stdout.strip())
-        assert sorted(outputs) == ["admitted"] * 4 + ["budget"] * 2
+        allowed = guard.SUBTITLE_BURST_MAX_REQUESTS
+        assert sorted(outputs) == ["admitted"] * allowed + ["budget"] * (6 - allowed)
     finally:
         for process in processes:
             if process.poll() is None:
@@ -394,7 +396,7 @@ with guard.subtitle_api_burst('shared-task'):
     with sqlite3.connect(guard.STATE_PATH) as connection:
         assert connection.execute(
             "SELECT count(*) FROM requests WHERE operation_id='shared-task'",
-        ).fetchone()[0] == 4
+        ).fetchone()[0] == guard.SUBTITLE_BURST_MAX_REQUESTS
 
 
 def test_minute_budget_is_shared_across_concurrent_api_admissions(monkeypatch):

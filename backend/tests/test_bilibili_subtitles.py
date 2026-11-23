@@ -13,7 +13,7 @@ BACKEND = ROOT / "backend"
 sys.path.insert(0, str(BACKEND))
 
 from core import summarizer
-from core.models import VideoInfo, VideoPart
+from core.models import SubtitleTrack, VideoInfo, VideoPart
 from core.pipeline import subtitle as subtitle_pipeline
 from core.summary_models import SummarizeRequest
 
@@ -37,6 +37,10 @@ SUBTITLE_BODY = {
         {"from": 4.0, "to": 7.0, "content": "第二句字幕"},
     ]
 }
+
+
+async def _run_inline(function, *args, **kwargs):
+    return function(*args, **kwargs)
 LOGIN_HIDDEN_META = {
     "code": 0,
     "data": {
@@ -252,10 +256,54 @@ class BilibiliDownloaderTests(unittest.TestCase):
 class BilibiliSubtitleFallbackTests(unittest.TestCase):
     def test_successful_empty_track_list_is_explicitly_absent(self):
         empty_meta = {"code": 0, "data": {"subtitle": {"subtitles": []}}}
-        with patch.object(summarizer, "_fetch_bilibili_json", return_value=empty_meta):
+        view_meta = {"code": 0, "data": {"aid": 99}}
+        with patch.object(
+            summarizer,
+            "_fetch_bilibili_json",
+            side_effect=[empty_meta, view_meta, empty_meta],
+        ) as fetch_json:
             result = summarizer.extract_bilibili_subtitle_by_cid("BV1demo", 2024)
 
         self.assertEqual({"has_subtitle": False, "reason": "absent"}, result)
+        self.assertEqual(3, fetch_json.call_count)
+
+    def test_successful_null_track_list_is_explicitly_absent(self):
+        empty_meta = {"code": 0, "data": {"subtitle": {"subtitles": []}}}
+        null_meta = {"code": 0, "data": {"subtitle": {"subtitles": None}}}
+        view_meta = {"code": 0, "data": {"aid": 99}}
+        with patch.object(
+            summarizer,
+            "_fetch_bilibili_json",
+            side_effect=[empty_meta, view_meta, null_meta],
+        ):
+            result = summarizer.extract_bilibili_subtitle_by_cid("BV1demo", 2024)
+
+        self.assertEqual({"has_subtitle": False, "reason": "absent"}, result)
+
+    def test_empty_primary_tracks_and_failed_fallback_are_not_reported_absent(self):
+        empty_meta = {"code": 0, "data": {"subtitle": {"subtitles": []}}}
+        view_meta = {"code": 0, "data": {"aid": 99}}
+        with patch.object(
+            summarizer,
+            "_fetch_bilibili_json",
+            side_effect=[empty_meta, view_meta, RuntimeError("temporary API failure")],
+        ):
+            result = summarizer.extract_bilibili_subtitle_by_cid("BV1demo", 2024)
+
+        self.assertIsNone(result)
+
+    def test_empty_but_malformed_fallback_is_not_reported_absent(self):
+        empty_meta = {"code": 0, "data": {"subtitle": {"subtitles": []}}}
+        view_meta = {"code": 0, "data": {"aid": 99}}
+        malformed_fallback = {"code": 0, "data": {}}
+        with patch.object(
+            summarizer,
+            "_fetch_bilibili_json",
+            side_effect=[empty_meta, view_meta, malformed_fallback],
+        ):
+            result = summarizer.extract_bilibili_subtitle_by_cid("BV1demo", 2024)
+
+        self.assertIsNone(result)
 
     def test_login_hidden_empty_list_uses_the_fallback_endpoint(self):
         with patch.object(
@@ -404,14 +452,47 @@ class BilibiliSubtitlePipelineTests(unittest.IsolatedAsyncioTestCase):
             webpage_url="https://www.bilibili.com/video/BV1demo",
             extractor="BiliBili",
         )
+        from api.routes import downloader
         with (
             patch.object(subtitle_pipeline, "get_subtitle_from_db", return_value=None),
-            patch.object(subtitle_pipeline, "extract_bilibili_subtitle", return_value=None),
+            patch.object(subtitle_pipeline, "try_get_bilibili_cc_subtitle", return_value=None),
+            patch.object(downloader, "parse_info", side_effect=RuntimeError("temporary failure")),
+            patch.object(subtitle_pipeline.asyncio, "to_thread", side_effect=_run_inline),
         ):
             with self.assertRaises(RuntimeError) as raised:
                 await subtitle_pipeline.fetch_subtitle(info.webpage_url, info)
 
         self.assertIn("字幕接口暂时不可用", str(raised.exception))
+
+    async def test_learning_metadata_lazily_discovers_native_bilibili_tracks(self):
+        from api.routes import downloader
+
+        url = "https://www.bilibili.com/video/BV1demo"
+        info = VideoInfo(title="Demo", webpage_url=url, extractor="BiliBili")
+        native_info = VideoInfo(
+            title="Demo",
+            webpage_url=url,
+            extractor="BiliBili",
+            subtitles=[SubtitleTrack(lang="zh-Hans", name="中文", ext="vtt")],
+        )
+        subtitle_text = "[00:01] 这是从平台原生字幕轨道提取到的正文内容。" * 3
+
+        with (
+            patch.object(subtitle_pipeline, "get_subtitle_from_db", return_value=None),
+            patch.object(
+                subtitle_pipeline,
+                "try_get_bilibili_cc_subtitle",
+                return_value={"has_subtitle": False, "reason": "absent"},
+            ),
+            patch.object(downloader, "parse_info", return_value=native_info) as parse_info,
+            patch.object(subtitle_pipeline, "_download_subtitle_content", return_value=("raw subtitle", "vtt")),
+            patch.object(subtitle_pipeline, "clean_subtitle_text", return_value=subtitle_text),
+            patch.object(subtitle_pipeline.asyncio, "to_thread", side_effect=_run_inline),
+        ):
+            result = await subtitle_pipeline.fetch_subtitle(url, info)
+
+        self.assertEqual((subtitle_text, "ytdlp_native", "zh-Hans"), result)
+        parse_info.assert_called_once_with(url)
 
     async def test_stream_does_not_enqueue_whisper_when_cc_lookup_is_unavailable(self):
         from api import stream_routes

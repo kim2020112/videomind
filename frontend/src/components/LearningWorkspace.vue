@@ -39,7 +39,7 @@ function status(target) {
     <section v-if="taskVisible" class="learning-task" aria-label="后台任务" aria-live="polite">
       <strong>{{ backgroundTask.message || '等待后台处理' }}</strong>
       <template v-if="waiting">
-        <p>未找到平台字幕。语音转录预计需要 {{ Math.max(1, Math.ceil((backgroundTask.estimated_seconds || 0) / 60)) }} 分钟，完成后将继续原先选择的内容。</p>
+        <p>语音转录预计需要 {{ Math.max(1, Math.ceil((backgroundTask.estimated_seconds || 0) / 60)) }} 分钟。{{ backgroundTask.payload?.targets?.length ? '完成后将继续生成所选资料。' : '完成后可查看字幕。' }}</p>
         <button type="button" :disabled="submitting" @click="onResumeTask?.()">开始语音转录</button>
       </template>
       <template v-else>
